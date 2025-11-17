@@ -97,26 +97,61 @@ var (
 
 type tickMsg time.Time
 type dataMsg struct {
-	health    map[string]interface{}
-	devices   []hsmodel.Device
-	incidents []hsmodel.Incident
-	err       error
+	health            map[string]interface{}
+	devices           []hsmodel.Device
+	incidents         []hsmodel.Incident
+	discoveredBrokers []DiscoveredBroker
+	discoveredDevices []DiscoveredDevice
+	err               error
+}
+
+type viewType int
+
+const (
+	dashboardView viewType = iota
+	discoveryView
+)
+
+type DiscoveredBroker struct {
+	Name         string    `json:"name"`
+	Host         string    `json:"host"`
+	Port         int       `json:"port"`
+	URL          string    `json:"url"`
+	DiscoveredAt time.Time `json:"discovered_at"`
+}
+
+type DiscoveredDevice struct {
+	ID           string            `json:"id"`
+	Name         string            `json:"name"`
+	Type         string            `json:"type"`
+	Integration  string            `json:"integration"`
+	Host         string            `json:"host,omitempty"`
+	Port         int               `json:"port,omitempty"`
+	Manufacturer string            `json:"manufacturer,omitempty"`
+	Model        string            `json:"model,omitempty"`
+	Metadata     map[string]string `json:"metadata,omitempty"`
+	DiscoveredAt time.Time         `json:"discovered_at"`
 }
 
 type dashModel struct {
-	health     map[string]interface{}
-	devices    []hsmodel.Device
-	incidents  []hsmodel.Incident
-	err        error
-	quitting   bool
-	width      int
-	height     int
-	lastUpdate time.Time
-	spinner    int
+	health            map[string]interface{}
+	devices           []hsmodel.Device
+	incidents         []hsmodel.Incident
+	discoveredBrokers []DiscoveredBroker
+	discoveredDevices []DiscoveredDevice
+	err               error
+	quitting          bool
+	width             int
+	height            int
+	lastUpdate        time.Time
+	spinner           int
+	currentView       viewType
 }
 
 func initialModel() dashModel {
-	return dashModel{}
+	return dashModel{
+		currentView: dashboardView,
+	}
 }
 
 func (m dashModel) Init() tea.Cmd {
@@ -135,6 +170,22 @@ func (m dashModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 		case "r":
 			return m, fetchData()
+		case "tab", "right":
+			// Switch to next view
+			if m.currentView == dashboardView {
+				m.currentView = discoveryView
+			} else {
+				m.currentView = dashboardView
+			}
+			return m, fetchData() // Refresh data when switching views
+		case "left":
+			// Switch to previous view
+			if m.currentView == discoveryView {
+				m.currentView = dashboardView
+			} else {
+				m.currentView = discoveryView
+			}
+			return m, fetchData()
 		}
 
 	case tea.WindowSizeMsg:
@@ -152,6 +203,8 @@ func (m dashModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.health = msg.health
 		m.devices = msg.devices
 		m.incidents = msg.incidents
+		m.discoveredBrokers = msg.discoveredBrokers
+		m.discoveredDevices = msg.discoveredDevices
 		m.err = msg.err
 		m.lastUpdate = time.Now()
 	}
@@ -179,21 +232,32 @@ func (m dashModel) View() string {
 	subtitle := subtitleStyle.Render("Real-time Home Monitoring System")
 	sections = append(sections, title, subtitle)
 
-	// Status section with enhanced styling
-	statusSection := m.renderStatus(spinner)
-	sections = append(sections, boxStyle.Render(statusSection))
+	// Tab navigation
+	tabs := m.renderTabs()
+	sections = append(sections, tabs)
 
-	// Two-column layout for devices and incidents
-	leftColumn := m.renderDevices()
-	rightColumn := m.renderIncidents()
+	// Render content based on current view
+	if m.currentView == dashboardView {
+		// Status section with enhanced styling
+		statusSection := m.renderStatus(spinner)
+		sections = append(sections, boxStyle.Render(statusSection))
 
-	columns := lipgloss.JoinHorizontal(
-		lipgloss.Top,
-		deviceBoxStyle.Width(50).Render(leftColumn),
-		"  ",
-		incidentBoxStyle.Width(50).Render(rightColumn),
-	)
-	sections = append(sections, columns)
+		// Two-column layout for devices and incidents
+		leftColumn := m.renderDevices()
+		rightColumn := m.renderIncidents()
+
+		columns := lipgloss.JoinHorizontal(
+			lipgloss.Top,
+			deviceBoxStyle.Width(50).Render(leftColumn),
+			"  ",
+			incidentBoxStyle.Width(50).Render(rightColumn),
+		)
+		sections = append(sections, columns)
+	} else {
+		// Discovery view
+		discoveryContent := m.renderDiscovery(spinner)
+		sections = append(sections, boxStyle.Render(discoveryContent))
+	}
 
 	// Enhanced help text with more info
 	updateInfo := ""
@@ -204,6 +268,7 @@ func (m dashModel) View() string {
 
 	help := helpStyle.Render(
 		"⌨️  Controls: " +
+			labelStyle.Render("tab") + " switch view  " +
 			labelStyle.Render("r") + " refresh  " +
 			labelStyle.Render("q") + " quit" +
 			mutedStyle.Render(updateInfo),
@@ -383,6 +448,148 @@ func (m dashModel) renderIncidents() string {
 	return header + "\n" + strings.Join(incidentList, "\n")
 }
 
+func (m dashModel) renderTabs() string {
+	activeTabStyle := lipgloss.NewStyle().
+		Bold(true).
+		Foreground(lipgloss.Color("#FFFFFF")).
+		Background(lipgloss.Color("#00D9FF")).
+		Padding(0, 2)
+
+	inactiveTabStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#888888")).
+		Background(lipgloss.Color("#1A1A1A")).
+		Padding(0, 2)
+
+	dashTab := "📊 Dashboard"
+	discTab := "🔍 Discovery"
+
+	if m.currentView == dashboardView {
+		dashTab = activeTabStyle.Render(dashTab)
+		discTab = inactiveTabStyle.Render(discTab)
+	} else {
+		dashTab = inactiveTabStyle.Render(dashTab)
+		discTab = activeTabStyle.Render(discTab)
+	}
+
+	tabs := lipgloss.JoinHorizontal(lipgloss.Top, dashTab, "  ", discTab)
+	return lipgloss.NewStyle().MarginTop(1).MarginBottom(1).Render(tabs)
+}
+
+func (m dashModel) renderDiscovery(spinner string) string {
+	var content []string
+
+	// Header
+	header := headerStyle.Render(fmt.Sprintf("🔍  DEVICE DISCOVERY %s", spinner))
+	content = append(content, header)
+	content = append(content, "")
+
+	// Brokers section
+	brokersHeader := labelStyle.Render(fmt.Sprintf("📡 MQTT Brokers (%d)", len(m.discoveredBrokers)))
+	content = append(content, brokersHeader)
+
+	if len(m.discoveredBrokers) == 0 {
+		content = append(content, mutedStyle.Render("  No MQTT brokers discovered via mDNS"))
+		content = append(content, mutedStyle.Render("  (Manual configuration may be required)"))
+	} else {
+		for _, broker := range m.discoveredBrokers {
+			brokerLine := fmt.Sprintf("  • %s (%s:%d)", broker.Name, broker.Host, broker.Port)
+			content = append(content, valueStyle.Render(brokerLine))
+		}
+	}
+
+	content = append(content, "")
+
+	// Devices section
+	devicesHeader := labelStyle.Render(fmt.Sprintf("📱 Discovered Devices (%d)", len(m.discoveredDevices)))
+	content = append(content, devicesHeader)
+
+	if len(m.discoveredDevices) == 0 {
+		content = append(content, "")
+		content = append(content, mutedStyle.Render("  No devices discovered yet."))
+		content = append(content, "")
+		content = append(content, mutedStyle.Render("  Listening for:"))
+		content = append(content, mutedStyle.Render("    • Home Assistant MQTT discovery"))
+		content = append(content, mutedStyle.Render("    • Homie Convention devices"))
+		content = append(content, mutedStyle.Render("    • Tasmota discovery"))
+		content = append(content, mutedStyle.Render("    • Shelly devices (mDNS)"))
+		content = append(content, mutedStyle.Render("    • ESPHome devices (mDNS)"))
+		content = append(content, mutedStyle.Render("    • Matter devices (mDNS)"))
+		content = append(content, "")
+		content = append(content, mutedStyle.Render("  Devices will appear here when they announce themselves."))
+		content = append(content, mutedStyle.Render("  For Home Assistant: Restart HA or reload integrations."))
+	} else {
+		content = append(content, "")
+		for i, device := range m.discoveredDevices {
+			if i >= 15 { // Show max 15
+				remaining := len(m.discoveredDevices) - 15
+				content = append(content, mutedStyle.Render(fmt.Sprintf("  ... and %d more devices", remaining)))
+				break
+			}
+
+			// Integration badge
+			integrationBadge := ""
+			switch device.Integration {
+			case "homeassistant":
+				integrationBadge = lipgloss.NewStyle().
+					Foreground(lipgloss.Color("#00A6FF")).
+					Render("[HA]")
+			case "homie":
+				integrationBadge = lipgloss.NewStyle().
+					Foreground(lipgloss.Color("#9D4EDD")).
+					Render("[Homie]")
+			case "tasmota":
+				integrationBadge = lipgloss.NewStyle().
+					Foreground(lipgloss.Color("#FF6B35")).
+					Render("[Tasmota]")
+			case "lan":
+				integrationBadge = lipgloss.NewStyle().
+					Foreground(lipgloss.Color("#00D9FF")).
+					Render("[LAN]")
+			default:
+				integrationBadge = lipgloss.NewStyle().
+					Foreground(lipgloss.Color("#888888")).
+					Render("[" + device.Integration + "]")
+			}
+
+			deviceName := device.Name
+			if deviceName == "" {
+				deviceName = device.ID
+			}
+
+			deviceType := device.Type
+			if deviceType != "" {
+				deviceType = " (" + deviceType + ")"
+			}
+
+			deviceLine := fmt.Sprintf("  %s %s%s", integrationBadge, deviceName, deviceType)
+			content = append(content, deviceLine)
+
+			// Additional info
+			var details []string
+			if device.Manufacturer != "" {
+				details = append(details, device.Manufacturer)
+			}
+			if device.Model != "" {
+				details = append(details, device.Model)
+			}
+			if device.Host != "" {
+				details = append(details, device.Host)
+			}
+
+			if len(details) > 0 {
+				detailLine := "    " + strings.Join(details, " • ")
+				content = append(content, mutedStyle.Render(detailLine))
+			}
+		}
+
+		content = append(content, "")
+		content = append(content, mutedStyle.Render("  💡 Tip: Use the API to onboard these devices:"))
+		content = append(content, mutedStyle.Render("     POST /api/onboard/device"))
+	}
+
+	return strings.Join(content, "\n")
+}
+
 func tickCmd() tea.Cmd {
 	return tea.Tick(5*time.Second, func(t time.Time) tea.Msg {
 		return tickMsg(t)
@@ -448,6 +655,27 @@ func fetchData() tea.Cmd {
 		if err := json.Unmarshal(body, &msg.incidents); err != nil {
 			msg.err = fmt.Errorf("failed to parse incidents: %w", err)
 			return msg
+		}
+
+		// Fetch discovery data
+		resp, err = http.Get(apiURL + "/api/discovery")
+		if err != nil {
+			// Discovery is optional, don't fail if it's not available
+			// Just leave the discovery arrays empty
+			return msg
+		}
+		defer resp.Body.Close()
+
+		body, err = io.ReadAll(resp.Body)
+		if err == nil {
+			var discoveryData struct {
+				Brokers []DiscoveredBroker `json:"brokers"`
+				Devices []DiscoveredDevice `json:"devices"`
+			}
+			if err := json.Unmarshal(body, &discoveryData); err == nil {
+				msg.discoveredBrokers = discoveryData.Brokers
+				msg.discoveredDevices = discoveryData.Devices
+			}
 		}
 
 		return msg

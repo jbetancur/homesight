@@ -15,7 +15,7 @@ go.work
 # Build artifacts
 dist/
 build/
-
+homesightd
 # Database files
 *.db
 *.db-shm

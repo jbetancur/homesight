@@ -10,6 +10,8 @@ from pydantic import BaseModel
 from typing import Dict, List, Optional, Any
 import uvicorn
 import logging
+import os
+import yaml
 from pathlib import Path
 
 # Configure logging
@@ -25,6 +27,25 @@ app = FastAPI(title="HomeSight AI Service")
 llm = None
 rag_engine = None
 document_fetcher = None
+
+# Load config to get OpenAI API key
+def load_config():
+    """Load configuration from config.yaml"""
+    config_path = os.getenv("HOMESIGHT_CONFIG", "../config.yaml")
+    config_file = Path(__file__).parent.parent / config_path if not os.path.isabs(config_path) else Path(config_path)
+    
+    if not config_file.exists():
+        logger.warning(f"Config file not found at {config_file}")
+        return {}
+    
+    try:
+        with open(config_file, 'r') as f:
+            return yaml.safe_load(f) or {}
+    except Exception as e:
+        logger.error(f"Failed to load config: {e}")
+        return {}
+
+config = load_config()
 
 
 class ChatRequest(BaseModel):
@@ -104,6 +125,10 @@ def initialize_rag():
     try:
         from rag_engine import RAGEngine
         
+        # OpenAI key is optional now - only needed for LLM-powered document finding
+        # Embeddings use local FastEmbed model (fully offline)
+        openai_api_key = os.getenv("OPENAI_API_KEY") or config.get("ai", {}).get("openai_api_key")
+        
         # Initialize RAG engine with persistent storage
         # Try system path first, fall back to local for development
         rag_path = Path("/var/lib/homesight/rag")
@@ -115,7 +140,10 @@ def initialize_rag():
             rag_path.mkdir(parents=True, exist_ok=True)
         
         logger.info(f"Initializing RAG engine at {rag_path}")
-        rag_engine = RAGEngine(persist_directory=str(rag_path))
+        rag_engine = RAGEngine(
+            persist_directory=str(rag_path),
+            openai_api_key=openai_api_key  # Optional - only for doc finding
+        )
         
         # Check if we have documents indexed
         stats = rag_engine.get_stats()
@@ -458,9 +486,21 @@ def get_document_fetcher():
     try:
         from document_fetcher import DocumentAutoFetcher
         
+        # Get OpenAI key for LLM-powered document finding
+        openai_api_key = os.getenv("OPENAI_API_KEY") or config.get("ai", {}).get("openai_api_key")
+        
         cache_dir = Path.home() / ".homesight" / "manuals"
-        document_fetcher = DocumentAutoFetcher(rag_instance, cache_dir)
-        logger.info(f"Document auto-fetcher initialized (cache: {cache_dir})")
+        document_fetcher = DocumentAutoFetcher(
+            rag_instance,
+            cache_dir,
+            openai_api_key=openai_api_key
+        )
+        
+        if openai_api_key:
+            logger.info(f"Document auto-fetcher initialized with LLM support (cache: {cache_dir})")
+        else:
+            logger.info(f"Document auto-fetcher initialized (template mode, cache: {cache_dir})")
+        
         return document_fetcher
     except ImportError as e:
         logger.warning(f"Could not initialize document fetcher: {e}")

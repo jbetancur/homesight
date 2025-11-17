@@ -3,12 +3,14 @@ package api
 import (
 	"encoding/json"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/homesight/homesight/internal/ai"
 	"github.com/homesight/homesight/internal/db"
+	"github.com/homesight/homesight/internal/discovery"
 	"github.com/homesight/homesight/internal/incidents"
 	"github.com/homesight/homesight/internal/metrics"
 	"github.com/homesight/homesight/internal/model"
@@ -16,12 +18,14 @@ import (
 
 // Server is the REST API server
 type Server struct {
-	router          *chi.Mux
-	incidentService incidents.IncidentService
-	deviceRepo      db.DeviceRepository
-	metricsSink     metrics.MetricsSink
-	aiClient        ai.Client
-	addr            string
+	router            *chi.Mux
+	incidentService   incidents.IncidentService
+	deviceRepo        db.DeviceRepository
+	metricsSink       metrics.MetricsSink
+	aiClient          ai.Client
+	addr              string
+	discoveryListener *discovery.MQTTDiscoveryListener
+	discoveryMutex    sync.RWMutex
 }
 
 // NewServer creates a new API server
@@ -43,6 +47,13 @@ func NewServer(
 
 	s.setupRoutes()
 	return s
+}
+
+// SetDiscoveryListener registers an MQTT discovery listener with the server
+func (s *Server) SetDiscoveryListener(listener *discovery.MQTTDiscoveryListener) {
+	s.discoveryMutex.Lock()
+	defer s.discoveryMutex.Unlock()
+	s.discoveryListener = listener
 }
 
 // setupRoutes configures the API routes
@@ -76,6 +87,11 @@ func (s *Server) setupRoutes() {
 	s.router.Route("/metrics", func(r chi.Router) {
 		r.Get("/{sensorID}", s.getMetrics)
 	})
+
+	// Discovery & Onboarding
+	s.router.Get("/api/discovery", s.handleDiscovery)
+	s.router.Post("/api/onboard/device", s.handleOnboardDevice)
+	s.router.Post("/api/onboard/broker", s.handleOnboardBroker)
 
 	// AI proxy
 	s.router.Route("/ai", func(r chi.Router) {

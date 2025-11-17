@@ -31,17 +31,17 @@ type DeviceCommand struct {
 
 // Device represents a physical or logical device
 type Device struct {
-	ID           string
-	Name         string
-	Type         string
-	Integration  string
-	ZoneID       string
-	AssetID      string
-	Enabled      bool
-	LastSeen     time.Time
-	Metadata     map[string]string
-	CreatedAt    time.Time
-	UpdatedAt    time.Time
+	ID          string
+	Name        string
+	Type        string
+	Integration string
+	ZoneID      string
+	AssetID     string
+	Enabled     bool
+	LastSeen    time.Time
+	Metadata    map[string]string
+	CreatedAt   time.Time
+	UpdatedAt   time.Time
 }
 
 // Sensor represents a sensor within a device
@@ -80,17 +80,17 @@ type Zone struct {
 
 // Asset represents a physical asset that may have sensors
 type Asset struct {
-	ID          string
-	HomeID      string
-	ZoneID      string
-	Name        string
-	Type        string // "sump_pump", "water_heater", "hvac", etc.
+	ID           string
+	HomeID       string
+	ZoneID       string
+	Name         string
+	Type         string // "sump_pump", "water_heater", "hvac", etc.
 	Manufacturer string
-	Model       string
-	InstallDate time.Time
-	Metadata    map[string]string
-	CreatedAt   time.Time
-	UpdatedAt   time.Time
+	Model        string
+	InstallDate  time.Time
+	Metadata     map[string]string
+	CreatedAt    time.Time
+	UpdatedAt    time.Time
 }
 
 // IncidentSeverity levels
@@ -108,9 +108,9 @@ const (
 type IncidentStatus string
 
 const (
-	StatusOpen       IncidentStatus = "open"
+	StatusOpen         IncidentStatus = "open"
 	StatusAcknowledged IncidentStatus = "acknowledged"
-	StatusResolved   IncidentStatus = "resolved"
+	StatusResolved     IncidentStatus = "resolved"
 )
 
 // Incident represents a detected issue or alert

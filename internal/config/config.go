@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"os"
+
 	"gopkg.in/yaml.v3"
 )
 
@@ -14,6 +15,8 @@ type Config struct {
 
 	MQTT struct {
 		BrokerURL string `yaml:"broker_url"`
+		Username  string `yaml:"username"`
+		Password  string `yaml:"password"`
 	} `yaml:"mqtt"`
 
 	Prometheus struct {
@@ -29,10 +32,10 @@ type Config struct {
 	} `yaml:"api"`
 
 	Integrations struct {
-		Matter  bool `yaml:"matter"`
-		Zigbee  bool `yaml:"zigbee"`
-		MQTT    bool `yaml:"mqtt"`
-		LAN     bool `yaml:"lan"`
+		Matter bool `yaml:"matter"`
+		Zigbee bool `yaml:"zigbee"`
+		MQTT   bool `yaml:"mqtt"`
+		LAN    bool `yaml:"lan"`
 	} `yaml:"integrations"`
 }
 

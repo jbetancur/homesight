@@ -29,6 +29,79 @@ make build
 ./scripts/homesight.sh status
 ```
 
+## Device Auto-Discovery
+
+HomeSight is **truly zero-config** - it automatically discovers and connects to ALL devices/brokers on your network:
+
+| Protocol | Auto-Discovery | Behavior |
+|----------|----------------|----------|
+| **MQTT Broker** | ✅ Yes | Connects to ALL discovered brokers (_mqtt._tcp) |
+| **Zigbee2MQTT** | ✅ Via MQTT | Enabled on each discovered MQTT broker |
+| **Z-Wave JS** | ✅ Yes | Discovers Z-Wave gateways (_z-wave-js._tcp) |
+| **Matter** | ✅ Yes | Discovers ALL Matter devices (_matter._tcp) |
+| **Shelly** | ✅ Yes | Finds ALL Shelly smart plugs/relays (_http._tcp) |
+| **Tasmota** | ✅ Yes | Discovers ALL Tasmota devices (_http._tcp) |
+| **ESPHome** | ✅ Yes | Finds ALL ESPHome devices (_esphomelib._tcp) |
+
+### MQTT Device Discovery (Generic)
+
+HomeSight includes a **generic MQTT discovery listener** that automatically detects devices from:
+
+- **Home Assistant** MQTT discovery (`homeassistant/+/+/config`)
+- **Homie Convention** devices (`homie/+/$homie`)
+- **Tasmota** discovery (`tasmota/discovery/+/config`)
+- **Generic** MQTT patterns (`+/discovery`)
+
+**View discovered devices** in the dashboard:
+
+```bash
+./scripts/homesight.sh dashboard
+# Press TAB to switch to Discovery view
+```
+
+**Or via API**:
+
+```bash
+# See all discovered but not yet onboarded devices
+curl http://localhost:8080/api/discovery
+
+# Discover ALL mDNS services on network (not just known types)
+curl http://localhost:8080/api/discovery?generic=true
+
+# Onboard a specific device
+curl -X POST http://localhost:8080/api/onboard/device \
+  -H "Content-Type: application/json" \
+  -d '{"id":"govee_light_1", "name":"Living Room Light", ...}'
+```
+
+**Zero Configuration Required**:
+
+- Just leave `mqtt.broker_url` empty in `config.yaml`
+- HomeSight automatically finds and connects to ALL brokers/devices
+- No manual selection needed - aggregates everything
+- Devices appear in Discovery view when they announce themselves
+
+Example startup logs:
+
+```log
+Zero-config mode: Auto-discovering MQTT brokers...
+Found 3 MQTT broker(s), connecting to all...
+  → Connecting to: homeassistant (tcp://10.0.60.46:1883)
+    ✓ Connected to homeassistant
+    ✓ Zigbee2MQTT enabled on homeassistant
+    ✓ MQTT discovery listener enabled (Home Assistant, Homie, Tasmota, etc.)
+  → Connecting to: local-mosquitto (tcp://192.168.1.10:1883)
+    ✓ Connected to local-mosquitto
+```
+
+**Requirements**:
+
+- Devices must support mDNS/Bonjour
+- Must be on the same network/VLAN
+- mDNS must be enabled (usually default)
+
+**Manual Configuration**: If auto-discovery doesn't find your devices, you can still configure them manually in `config.yaml`.
+
 ## Running the Demo
 
 ### Sensor & Incident Demo
@@ -56,6 +129,7 @@ The demo creates:
 This interactive demo showcases:
 
 **Part 1: RAG-Powered Analysis**
+
 - Document retrieval from vector database
 - Semantic search with relevance scoring
 - Context-aware incident recommendations
@@ -63,6 +137,7 @@ This interactive demo showcases:
 - Real examples: Water leak, freeze risk, device issues
 
 **Part 2: Zero-Config Auto-Ingestion**
+
 - Simulates device onboarding
 - Automatic doc fetching via webhook
 - Background processing (non-blocking)
@@ -81,6 +156,7 @@ HomeSight uses Retrieval-Augmented Generation (RAG) to provide context-aware inc
 4. **Smart Analysis**: Incidents query RAG for relevant docs before providing recommendations
 
 **Zero Config**: No manual doc downloads required! The system automatically:
+
 - Detects device manufacturer and model from metadata
 - Fetches manuals from manufacturer websites or templates
 - Caches locally for offline use
@@ -204,12 +280,13 @@ graph TB
         direction TB
         API[REST API Server]
         EVENTS[Event Bus]
+        DISCOVERY[MQTT Discovery Listener<br/>- Home Assistant Format<br/>- Homie Convention<br/>- Tasmota Format]
         
         subgraph "Integrations"
-            INT_MQTT[MQTT Integration]
-            INT_ZIGBEE[Zigbee2MQTT]
-            INT_LAN[LAN Integration]
-            INT_MATTER[Matter Integration]
+            INT_MQTT[MQTT Integration<br/>MQTT Client]
+            INT_ZIGBEE[Zigbee2MQTT Wrapper]
+            INT_LAN[LAN Integration<br/>HTTP/REST Polling]
+            INT_MATTER[Matter Integration<br/>Discovery Only]
         end
         
         subgraph "Processing"
@@ -227,8 +304,12 @@ graph TB
 
     subgraph "AI Sidecar :8001"
         AI_API[FastAPI Server]
-        LLM[Local LLM<br/>llama.cpp]
-        RAG[RAG Engine<br/>- Embeddings<br/>- Vector Search]
+        DOC_FETCH[Document Fetcher<br/>LLM-Powered]
+        RAG[RAG Engine<br/>- FastEmbed Local<br/>- ChromaDB Storage<br/>- Offline Queries]
+    end
+    
+    subgraph "Cloud Services (Optional)"
+        OPENAI[OpenAI API<br/>- GPT-4o-mini for Doc Finding<br/>- Used during setup only]
     end
 
     subgraph "Monitoring"
@@ -244,6 +325,7 @@ graph TB
     %% Integration connections
     MOSQUITTO --> INT_MQTT
     MOSQUITTO --> INT_ZIGBEE
+    DISCOVERY --> INT_MQTT
     INT_MQTT --> EVENTS
     INT_ZIGBEE --> EVENTS
     INT_LAN --> EVENTS
@@ -263,8 +345,9 @@ graph TB
     
     %% AI connections
     AI_CLIENT -->|HTTP| AI_API
-    AI_API --> LLM
     AI_API --> RAG
+    DOC_FETCH -.->|Setup Only| OPENAI
+    DOC_FETCH --> RAG
     
     %% Metrics
     METRICS -->|Scrape| PROM
@@ -275,13 +358,53 @@ graph TB
     classDef ai fill:#ff9800,stroke:#e65100,stroke-width:2px,color:#fff
     classDef device fill:#9e9e9e,stroke:#616161,stroke-width:2px,color:#fff
     classDef bus fill:#ab47bc,stroke:#6a1b9a,stroke-width:2px,color:#fff
+    classDef cloud fill:#03a9f4,stroke:#0277bd,stroke-width:2px,stroke-dasharray: 5 5,color:#fff
     
-    class API,EVENTS,RULES,INCIDENTS core
+    class API,EVENTS,RULES,INCIDENTS,DISCOVERY core
     class DB,METRICS storage
-    class AI_API,LLM,RAG,AI_CLIENT ai
+    class AI_API,RAG,DOC_FETCH,AI_CLIENT ai
     class MQTT_DEV,ZIGBEE,LAN_DEV,MATTER device
     class MOSQUITTO,PROM bus
+    class OPENAI cloud
 ```
+
+### Key Architecture Notes
+
+**MQTT Client, Not Server:**
+- HomeSight connects to external Mosquitto as MQTT client
+- Does not embed/bundle MQTT broker
+- Supports multiple broker connections simultaneously
+- Auto-discovers brokers via mDNS (`_mqtt._tcp`)
+
+**Discovery Architecture:**
+- **mDNS Discovery**: Finds brokers, Matter devices, LAN devices, Z-Wave JS gateways
+- **MQTT Discovery Listener**: Parses Home Assistant, Homie, and Tasmota discovery messages
+- **Zero-config**: No manual device entry required
+
+**Integration Types:**
+- **MQTT Integration**: Generic MQTT client for device state and control
+- **Zigbee2MQTT**: Wrapper around MQTT client using `zigbee2mqtt` base topic
+- **LAN Integration**: HTTP/REST polling for Shelly, Tasmota, ESPHome
+- **Matter Integration**: Discovery only (control not yet implemented)
+
+### AI Architecture Details
+
+**Fully Offline Operation:**
+- **Embeddings**: FastEmbed (BAAI/bge-small-en-v1.5) runs locally - ~50MB model
+- **Vector Storage**: ChromaDB persists embeddings locally
+- **RAG Queries**: 100% offline after documents are indexed
+- **No API calls** during normal incident analysis
+
+**Optional Cloud Services (Setup Only):**
+- **OpenAI GPT-4o-mini**: Used only during device onboarding to intelligently find manufacturer documentation
+- **Cost**: ~$0.001 per device discovery (one-time)
+- **Fallback**: Template-based documentation if no API key provided
+
+**Benefits:**
+- ✅ Privacy: Data never leaves your network during operation
+- ✅ Fast: Local embeddings, no API latency
+- ✅ Reliable: Works without internet after setup
+- ✅ Cost-effective: Only pay for initial document discovery (~$0.50/year)
 
 ## Auto-Resolution
 
@@ -387,9 +510,6 @@ homesight/
 ```bash
 # Build daemon and dashboard
 make build
-
-# Run tests (TODO)
-make test
 
 # Clean build artifacts
 make clean

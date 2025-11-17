@@ -14,7 +14,12 @@ type Zigbee2MQTTIntegration struct {
 
 // NewZigbee2MQTTIntegration creates a new Zigbee2MQTT integration
 func NewZigbee2MQTTIntegration(brokerURL string) (*Zigbee2MQTTIntegration, error) {
-	mqtt, err := NewMQTTIntegration(brokerURL, "zigbee2mqtt")
+	return NewZigbee2MQTTIntegrationWithAuth(brokerURL, "", "")
+}
+
+// NewZigbee2MQTTIntegrationWithAuth creates a new Zigbee2MQTT integration with authentication
+func NewZigbee2MQTTIntegrationWithAuth(brokerURL, username, password string) (*Zigbee2MQTTIntegration, error) {
+	mqtt, err := NewMQTTIntegrationWithAuth(brokerURL, "zigbee2mqtt", username, password)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create Zigbee2MQTT integration: %w", err)
 	}

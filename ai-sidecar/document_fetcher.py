@@ -2,12 +2,14 @@
 Auto-fetch device documentation from manufacturer websites
 
 This module automatically downloads manuals when devices are discovered.
-Zero configuration required - uses device manufacturer/model to find docs.
+Zero configuration required - uses LLM to intelligently find documentation.
 """
 
 import asyncio
 import hashlib
+import json
 import logging
+import os
 from pathlib import Path
 from typing import Optional, List, Dict
 import httpx
@@ -17,12 +19,103 @@ import pypdf
 logger = logging.getLogger(__name__)
 
 
+class LLMDocumentFinder:
+    """Use LLM to intelligently find manufacturer documentation"""
+    
+    def __init__(self, openai_api_key: Optional[str] = None):
+        self.api_key = openai_api_key or os.getenv("OPENAI_API_KEY")
+        if not self.api_key:
+            logger.warning("No OpenAI API key - LLM document finding disabled")
+            self.enabled = False
+        else:
+            self.enabled = True
+    
+    async def find_documentation_url(
+        self,
+        manufacturer: str,
+        model: str,
+        device_type: Optional[str] = None
+    ) -> Optional[str]:
+        """
+        Use GPT to find the most likely documentation URL
+        
+        Returns:
+            URL to documentation PDF or support page, or None if not found
+        """
+        if not self.enabled:
+            logger.warning("LLM document finder not enabled - no API key")
+            return None
+        
+        try:
+            from openai import AsyncOpenAI
+            client = AsyncOpenAI(api_key=self.api_key)
+            
+            device_info = f"{manufacturer} {model}"
+            if device_type:
+                device_info += f" ({device_type})"
+            
+            prompt = f"""Find the official documentation/manual URL for this device:
+
+Device: {device_info}
+
+Please provide:
+1. The official manufacturer support/documentation page URL
+2. Direct PDF manual URL if available
+3. Alternative documentation sources if official not available
+
+Respond in JSON format:
+{{
+    "official_support_url": "url here or null",
+    "pdf_manual_url": "url here or null",
+    "search_queries": ["query 1", "query 2"],
+    "notes": "any helpful notes"
+}}
+
+Focus on official manufacturer sources first. Be conservative - only suggest URLs you're confident about."""
+
+            response = await client.chat.completions.create(
+                model="gpt-4o-mini",  # Cheap and fast
+                messages=[
+                    {"role": "system", "content": "You are a helpful assistant that finds official device documentation. Always prioritize manufacturer websites."},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.3,  # Low temperature for factual responses
+                max_tokens=500
+            )
+            
+            content = response.choices[0].message.content
+            
+            # Parse JSON response
+            try:
+                result = json.loads(content)
+                
+                # Return PDF URL if available, otherwise support page
+                if result.get("pdf_manual_url"):
+                    logger.info(f"LLM found PDF URL for {device_info}: {result['pdf_manual_url']}")
+                    return result["pdf_manual_url"]
+                elif result.get("official_support_url"):
+                    logger.info(f"LLM found support page for {device_info}: {result['official_support_url']}")
+                    return result["official_support_url"]
+                else:
+                    logger.warning(f"LLM couldn't find documentation for {device_info}")
+                    return None
+                    
+            except json.JSONDecodeError:
+                logger.error(f"LLM response not valid JSON: {content}")
+                return None
+                
+        except Exception as e:
+            logger.error(f"Error using LLM to find documentation: {e}")
+            return None
+
+
 class ManufacturerFetcher:
     """Base class for manufacturer-specific doc fetchers"""
     
-    def __init__(self, cache_dir: Path):
+    def __init__(self, cache_dir: Path, llm_finder: Optional[LLMDocumentFinder] = None):
         self.cache_dir = cache_dir
         self.cache_dir.mkdir(parents=True, exist_ok=True)
+        self.llm_finder = llm_finder
     
     async def fetch(self, model: str) -> Optional[Path]:
         """Fetch manual for a specific model. Returns path to cached PDF."""
@@ -44,10 +137,10 @@ class ManufacturerFetcher:
 
 
 class AqaraFetcher(ManufacturerFetcher):
-    """Fetch Aqara device manuals from their support site"""
+    """Fetch Aqara device manuals using LLM to find documentation"""
     
     # Known Aqara models - Using direct links when available
-    # Note: These URLs may change. In production, implement web scraping fallback.
+    # Note: These URLs may change. LLM will be used as fallback.
     KNOWN_MODELS = {
         "SJCGQ11LM": "water_leak_sensor",  # Water Leak Sensor
         "WSDCGQ11LM": "temp_humidity_sensor",  # Temperature & Humidity Sensor
@@ -62,8 +155,9 @@ class AqaraFetcher(ManufacturerFetcher):
         
         Strategy:
         1. Check cache first
-        2. Try to find PDF on manufacturer website (currently limited)
-        3. For demo: Use pre-written documentation
+        2. Use LLM to find official documentation URL
+        3. Download and cache the documentation
+        4. Fallback to template if LLM can't find docs
         """
         
         # Check cache first
@@ -72,14 +166,59 @@ class AqaraFetcher(ManufacturerFetcher):
             logger.info(f"Aqara {model} manual found in cache")
             return cached
         
-        # For now, create documentation from known device info
-        # In production, this would scrape the actual Aqara website
+        # Try LLM-powered document finding
+        if self.llm_finder and self.llm_finder.enabled:
+            device_type = self.KNOWN_MODELS.get(model, "smart home device")
+            doc_url = await self.llm_finder.find_documentation_url(
+                manufacturer="Aqara",
+                model=model,
+                device_type=device_type
+            )
+            
+            if doc_url:
+                # Try to download the documentation
+                downloaded = await self._download_from_url(model, doc_url)
+                if downloaded:
+                    return downloaded
+                logger.warning(f"Failed to download from LLM-provided URL: {doc_url}")
+        
+        # Fallback: use template for known models
         device_type = self.KNOWN_MODELS.get(model)
         if device_type:
+            logger.info(f"Using template documentation for Aqara {model}")
             return await self._create_manual_from_template(model, device_type)
         
         logger.warning(f"Could not find manual for Aqara {model}")
         return None
+    
+    async def _download_from_url(self, model: str, url: str) -> Optional[Path]:
+        """Download documentation from URL and cache it"""
+        try:
+            async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
+                response = await client.get(url)
+                
+                if response.status_code == 200:
+                    # Determine file type from content or URL
+                    content_type = response.headers.get("content-type", "")
+                    
+                    if "pdf" in content_type or url.endswith(".pdf"):
+                        filename = f"{model}_manual.pdf"
+                    else:
+                        filename = f"{model}_manual.txt"
+                    
+                    cache_path = self._get_cache_path(model, filename)
+                    cache_path.parent.mkdir(parents=True, exist_ok=True)
+                    
+                    cache_path.write_bytes(response.content)
+                    logger.info(f"Downloaded and cached documentation for {model}")
+                    return cache_path
+                else:
+                    logger.warning(f"Failed to download from {url}: HTTP {response.status_code}")
+                    return None
+                    
+        except Exception as e:
+            logger.error(f"Error downloading from {url}: {e}")
+            return None
     
     async def _search_support_site(self, model: str) -> Optional[str]:
         """Search Aqara support site for model"""
@@ -363,9 +502,10 @@ class ShellyFetcher(ManufacturerFetcher):
 class DocumentAutoFetcher:
     """
     Automatically fetch device documentation with zero configuration
+    Uses LLM to intelligently find documentation sources.
     
     Usage:
-        fetcher = DocumentAutoFetcher(rag_engine, cache_dir)
+        fetcher = DocumentAutoFetcher(rag_engine, cache_dir, openai_api_key)
         await fetcher.fetch_for_device({
             "manufacturer": "Aqara",
             "model": "SJCGQ11LM",
@@ -373,15 +513,18 @@ class DocumentAutoFetcher:
         })
     """
     
-    def __init__(self, rag_engine, cache_dir: Path = None):
+    def __init__(self, rag_engine, cache_dir: Path = None, openai_api_key: Optional[str] = None):
         self.rag = rag_engine
         self.cache_dir = cache_dir or Path.home() / ".homesight" / "manuals"
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         
-        # Initialize manufacturer fetchers
+        # Initialize LLM document finder
+        self.llm_finder = LLMDocumentFinder(openai_api_key)
+        
+        # Initialize manufacturer fetchers with LLM support
         self.fetchers = {
-            "aqara": AqaraFetcher(self.cache_dir / "aqara"),
-            "shelly": ShellyFetcher(self.cache_dir / "shelly"),
+            "aqara": AqaraFetcher(self.cache_dir / "aqara", self.llm_finder),
+            "shelly": ShellyFetcher(self.cache_dir / "shelly", self.llm_finder),
         }
     
     async def fetch_for_device(self, device: Dict) -> bool:

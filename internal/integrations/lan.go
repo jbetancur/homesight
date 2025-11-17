@@ -9,13 +9,15 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/homesight/homesight/internal/discovery"
 	"github.com/homesight/homesight/internal/model"
 )
 
 // LANIntegration integrates LAN-based devices (Shelly, Tapo, Govee)
 type LANIntegration struct {
-	client  *http.Client
-	devices map[string]string // device_id -> base_url
+	client            *http.Client
+	devices           map[string]string // device_id -> base_url
+	discoveredDevices map[string]discovery.LANDevice
 }
 
 // NewLANIntegration creates a new LAN integration
@@ -24,7 +26,8 @@ func NewLANIntegration() *LANIntegration {
 		client: &http.Client{
 			Timeout: 10 * time.Second,
 		},
-		devices: make(map[string]string),
+		devices:           make(map[string]string),
+		discoveredDevices: make(map[string]discovery.LANDevice),
 	}
 }
 
@@ -33,18 +36,49 @@ func (i *LANIntegration) RegisterDevice(deviceID, baseURL string) {
 	i.devices[deviceID] = baseURL
 }
 
-// Discover finds LAN devices (typically configured, not auto-discovered)
+// Discover finds LAN devices via auto-discovery
 func (i *LANIntegration) Discover(ctx context.Context) ([]model.DeviceDescriptor, error) {
-	devices := make([]model.DeviceDescriptor, 0)
-	for id := range i.devices {
-		devices = append(devices, model.DeviceDescriptor{
-			ID:          id,
-			Name:        id,
-			Type:        "lan_device",
-			Integration: "lan",
-		})
+	descriptors := make([]model.DeviceDescriptor, 0)
+
+	// Auto-discover devices
+	discovered, err := discovery.DiscoverAllLANDevices(5 * time.Second)
+	if err == nil {
+		for _, dev := range discovered {
+			deviceID := fmt.Sprintf("%s-%s", dev.Type, dev.Name)
+			i.discoveredDevices[deviceID] = dev
+
+			baseURL := fmt.Sprintf("http://%s:%d", dev.Host, dev.Port)
+			i.devices[deviceID] = baseURL
+
+			descriptors = append(descriptors, model.DeviceDescriptor{
+				ID:          deviceID,
+				Name:        dev.Name,
+				Type:        dev.Type,
+				Integration: "lan",
+				Metadata: map[string]string{
+					"host":         dev.Host,
+					"port":         fmt.Sprintf("%d", dev.Port),
+					"model":        dev.Model,
+					"manufacturer": dev.Manufacturer,
+					"url":          baseURL,
+				},
+			})
+		}
 	}
-	return devices, nil
+
+	// Include manually registered devices
+	for id := range i.devices {
+		if _, exists := i.discoveredDevices[id]; !exists {
+			descriptors = append(descriptors, model.DeviceDescriptor{
+				ID:          id,
+				Name:        id,
+				Type:        "lan_device",
+				Integration: "lan",
+			})
+		}
+	}
+
+	return descriptors, nil
 }
 
 // Subscribe polls LAN devices for state changes

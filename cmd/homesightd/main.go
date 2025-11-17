@@ -2,15 +2,18 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/homesight/homesight/internal/ai"
 	"github.com/homesight/homesight/internal/api"
 	"github.com/homesight/homesight/internal/config"
 	"github.com/homesight/homesight/internal/db"
+	"github.com/homesight/homesight/internal/discovery"
 	"github.com/homesight/homesight/internal/events"
 	"github.com/homesight/homesight/internal/incidents"
 	"github.com/homesight/homesight/internal/integrations"
@@ -73,23 +76,57 @@ func main() {
 	// Initialize integrations
 	var activeIntegrations []integrations.Integration
 
-	if cfg.Integrations.MQTT {
-		mqttIntegration, err := integrations.NewMQTTIntegration(cfg.MQTT.BrokerURL, "homesight")
-		if err != nil {
-			log.Printf("Failed to initialize MQTT integration: %v", err)
-		} else {
-			activeIntegrations = append(activeIntegrations, mqttIntegration)
-			log.Println("MQTT integration enabled")
-		}
-	}
+	// Auto-discover and connect to ALL MQTT brokers
+	if cfg.MQTT.BrokerURL == "" || cfg.MQTT.BrokerURL == "tcp://localhost:1883" {
+		log.Println("Zero-config mode: Auto-discovering MQTT brokers...")
+		brokers, err := discovery.DiscoverMQTTBrokers(5 * time.Second)
+		if err == nil && len(brokers) > 0 {
+			log.Printf("Found %d MQTT broker(s), connecting to all...", len(brokers))
+			for _, broker := range brokers {
+				log.Printf("  → Connecting to: %s (%s)", broker.Name, broker.BrokerURL())
+				mqttInt, err := integrations.NewMQTTIntegrationWithAuth(broker.BrokerURL(), fmt.Sprintf("homesight-%s", broker.Name), cfg.MQTT.Username, cfg.MQTT.Password)
+				if err != nil {
+					log.Printf("    ✗ Failed to connect to %s: %v", broker.Name, err)
+				} else {
+					activeIntegrations = append(activeIntegrations, mqttInt)
+					log.Printf("    ✓ Connected to %s", broker.Name)
+				}
 
-	if cfg.Integrations.Zigbee {
-		zigbeeIntegration, err := integrations.NewZigbee2MQTTIntegration(cfg.MQTT.BrokerURL)
-		if err != nil {
-			log.Printf("Failed to initialize Zigbee2MQTT integration: %v", err)
+				// Also try Zigbee2MQTT on this broker
+				if cfg.Integrations.Zigbee {
+					zigbeeInt, err := integrations.NewZigbee2MQTTIntegrationWithAuth(broker.BrokerURL(), cfg.MQTT.Username, cfg.MQTT.Password)
+					if err != nil {
+						log.Printf("    ✗ Zigbee2MQTT not available on %s", broker.Name)
+					} else {
+						activeIntegrations = append(activeIntegrations, zigbeeInt)
+						log.Printf("    ✓ Zigbee2MQTT enabled on %s", broker.Name)
+					}
+				}
+			}
 		} else {
-			activeIntegrations = append(activeIntegrations, zigbeeIntegration)
-			log.Println("Zigbee2MQTT integration enabled")
+			log.Println("No MQTT brokers discovered, skipping MQTT integration")
+		}
+	} else {
+		// Manual configuration - single broker
+		log.Printf("Using manually configured MQTT broker: %s", cfg.MQTT.BrokerURL)
+		if cfg.Integrations.MQTT {
+			mqttIntegration, err := integrations.NewMQTTIntegrationWithAuth(cfg.MQTT.BrokerURL, "homesight", cfg.MQTT.Username, cfg.MQTT.Password)
+			if err != nil {
+				log.Printf("Failed to initialize MQTT integration: %v", err)
+			} else {
+				activeIntegrations = append(activeIntegrations, mqttIntegration)
+				log.Println("MQTT integration enabled")
+			}
+		}
+
+		if cfg.Integrations.Zigbee {
+			zigbeeIntegration, err := integrations.NewZigbee2MQTTIntegrationWithAuth(cfg.MQTT.BrokerURL, cfg.MQTT.Username, cfg.MQTT.Password)
+			if err != nil {
+				log.Printf("Failed to initialize Zigbee2MQTT integration: %v", err)
+			} else {
+				activeIntegrations = append(activeIntegrations, zigbeeIntegration)
+				log.Println("Zigbee2MQTT integration enabled")
+			}
 		}
 	}
 
@@ -128,6 +165,31 @@ func main() {
 
 	// Start API server
 	server := api.NewServer(cfg.API.Addr, incidentService, deviceRepo, metricsSink, aiClient)
+
+	// Set up generic MQTT discovery listener (supports Home Assistant, Homie, Tasmota, etc.)
+	// This will work with ANY connected MQTT broker
+	for _, integration := range activeIntegrations {
+		if mqttInt, ok := integration.(*integrations.MQTTIntegration); ok {
+			// Configure discovery topic patterns - add more protocols as needed
+			topicPatterns := []string{
+				"homeassistant/+/+/config",   // Home Assistant discovery
+				"homie/+/$homie",             // Homie convention
+				"homie/+/$name",              // Homie device name
+				"tasmota/discovery/+/config", // Tasmota discovery
+				"+/discovery",                // Generic discovery pattern
+			}
+
+			listener := discovery.NewMQTTDiscoveryListener(mqttInt.GetClient(), topicPatterns)
+			if err := listener.Start(); err != nil {
+				log.Printf("Warning: Failed to start MQTT discovery listener: %v", err)
+			} else {
+				server.SetDiscoveryListener(listener)
+				log.Printf("MQTT discovery listener enabled (Home Assistant, Homie, Tasmota, etc.)")
+			}
+			break // Only need one listener for the first MQTT connection
+		}
+	}
+
 	go func() {
 		log.Printf("Starting API server on %s", cfg.API.Addr)
 		if err := server.Start(); err != nil {

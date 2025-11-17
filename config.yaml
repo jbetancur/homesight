@@ -2,19 +2,22 @@ database:
   path: ./data/homesight.db
 
 mqtt:
-  broker_url: tcp://localhost:1883
+  broker_url: "tcp://homeassistant:1883"  # Your Home Assistant MQTT (mDNS not available on your network)
+  username: "john"    # Set your MQTT username here
+  password: ''    # Set your MQTT password here
 
 prometheus:
   url: http://localhost:9090
 
 ai:
   service_url: http://localhost:8001
+  openai_api_key: ""
 
 api:
   addr: :8080
 
 integrations:
-  matter: false
-  zigbee: true
-  mqtt: true
-  lan: true
+  matter: true   # Auto-discovers Matter devices via mDNS (requires native network)
+  zigbee: true   # Requires MQTT broker with Zigbee2MQTT
+  mqtt: true     # General MQTT device support + MQTT discovery
+  lan: true      # Auto-discovers Shelly, Tasmota, ESPHome via mDNS (requires native network)

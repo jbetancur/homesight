@@ -5,9 +5,9 @@ Manages document ingestion, vector storage, and retrieval for manufacturer manua
 troubleshooting guides, and home maintenance documentation.
 """
 
+import hashlib
 import chromadb
 from chromadb.config import Settings
-from sentence_transformers import SentenceTransformer
 from typing import List, Dict, Any, Optional
 from pathlib import Path
 import logging
@@ -16,10 +16,15 @@ logger = logging.getLogger(__name__)
 
 
 class RAGEngine:
-    """RAG engine using ChromaDB and sentence transformers"""
+    """RAG engine using ChromaDB with FastEmbed for fully offline operation"""
     
-    def __init__(self, persist_directory: str = "./rag-db"):
-        """Initialize RAG engine with persistent storage"""
+    def __init__(self, persist_directory: str = "./rag-db", openai_api_key: Optional[str] = None):
+        """
+        Initialize RAG engine with persistent storage and local FastEmbed embeddings
+        
+        Note: openai_api_key parameter kept for backwards compatibility but not used for embeddings.
+        OpenAI may still be used elsewhere (e.g., document fetching).
+        """
         self.persist_directory = Path(persist_directory)
         self.persist_directory.mkdir(parents=True, exist_ok=True)
         
@@ -29,16 +34,46 @@ class RAGEngine:
             settings=Settings(anonymized_telemetry=False)
         )
         
-        # Initialize embedding model
-        logger.info("Loading embedding model...")
-        self.embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
-        logger.info("Embedding model loaded")
+        # Use FastEmbed for local, offline embeddings
+        logger.info("Using FastEmbed for local embeddings (BAAI/bge-small-en-v1.5)...")
+        from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
+        
+        # ChromaDB's DefaultEmbeddingFunction uses sentence-transformers
+        # For fastembed, we'll create a custom embedding function
+        try:
+            from fastembed import TextEmbedding
+            
+            class FastEmbedFunction:
+                def __init__(self):
+                    # Use BAAI/bge-small-en-v1.5 - lightweight and efficient
+                    self.model = TextEmbedding(model_name="BAAI/bge-small-en-v1.5")
+                
+                def __call__(self, input: List[str]) -> List[List[float]]:
+                    embeddings = list(self.model.embed(input))
+                    return embeddings
+                
+                def embed_query(self, input: List[str]) -> List[List[float]]:
+                    """Alias for __call__ - required by ChromaDB 1.3+"""
+                    return self.__call__(input)
+                
+                @staticmethod
+                def name() -> str:
+                    return "BAAI/bge-small-en-v1.5"
+            
+            self.embedding_function = FastEmbedFunction()
+            logger.info("FastEmbed initialized successfully - fully offline operation enabled")
+            
+        except ImportError:
+            logger.error("FastEmbed not installed. Install with: pip install fastembed")
+            raise
         
         # Get or create collection
         self.collection = self.client.get_or_create_collection(
             name="homesight_docs",
+            embedding_function=self.embedding_function,
             metadata={"description": "Home maintenance and device documentation"}
         )
+        logger.info("RAG engine initialized with local embeddings (offline mode)")
     
     def add_document(
         self,
@@ -47,16 +82,12 @@ class RAGEngine:
         doc_id: Optional[str] = None
     ):
         """Add a document to the vector database"""
-        # Generate embedding
-        embedding = self.embedding_model.encode(text).tolist()
-        
         # Generate ID if not provided
         if doc_id is None:
             doc_id = f"doc_{hash(text)}"
         
-        # Add to collection
+        # Add to collection (ChromaDB handles embedding automatically)
         self.collection.add(
-            embeddings=[embedding],
             documents=[text],
             metadatas=[metadata],
             ids=[doc_id]
@@ -76,12 +107,9 @@ class RAGEngine:
         Returns documents with relevance scores (1 - distance).
         Higher relevance scores are better (closer to 1 = more relevant).
         """
-        # Generate query embedding
-        query_embedding = self.embedding_model.encode(query_text).tolist()
-        
-        # Search
+        # Query collection (ChromaDB handles query embedding automatically)
         results = self.collection.query(
-            query_embeddings=[query_embedding],
+            query_texts=[query_text],
             n_results=n_results,
             where=where
         )
@@ -111,7 +139,7 @@ class RAGEngine:
         return {
             "total_documents": count,
             "persist_directory": str(self.persist_directory),
-            "embedding_model": "all-MiniLM-L6-v2",
+            "embedding_model": "BAAI/bge-small-en-v1.5 (FastEmbed - Local)",
             "collection_name": "homesight_docs"
         }
 

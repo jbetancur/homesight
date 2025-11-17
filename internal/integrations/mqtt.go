@@ -21,10 +21,24 @@ type MQTTIntegration struct {
 
 // NewMQTTIntegration creates a new MQTT integration
 func NewMQTTIntegration(brokerURL, baseTopic string) (*MQTTIntegration, error) {
+	return NewMQTTIntegrationWithAuth(brokerURL, baseTopic, "", "")
+}
+
+// NewMQTTIntegrationWithAuth creates a new MQTT integration with authentication
+func NewMQTTIntegrationWithAuth(brokerURL, baseTopic, username, password string) (*MQTTIntegration, error) {
 	opts := mqtt.NewClientOptions()
 	opts.AddBroker(brokerURL)
 	opts.SetClientID("homesight")
 	opts.SetAutoReconnect(true)
+	opts.SetResumeSubs(true)    // Auto-resume subscriptions after reconnect
+	opts.SetCleanSession(false) // Persist subscriptions across reconnects
+
+	if username != "" {
+		opts.SetUsername(username)
+	}
+	if password != "" {
+		opts.SetPassword(password)
+	}
 
 	client := mqtt.NewClient(opts)
 	if token := client.Connect(); token.Wait() && token.Error() != nil {
@@ -50,8 +64,14 @@ func (i *MQTTIntegration) Discover(ctx context.Context) ([]model.DeviceDescripto
 	return devices, nil
 }
 
+// GetClient returns the MQTT client for advanced usage (like discovery listeners)
+func (i *MQTTIntegration) GetClient() mqtt.Client {
+	return i.client
+}
+
 // Subscribe listens for MQTT device events
 func (i *MQTTIntegration) Subscribe(ctx context.Context, events chan<- model.DeviceEvent) error {
+	// Subscribe to general device topics
 	topic := fmt.Sprintf("%s/+/+", i.baseTopic)
 
 	handler := func(client mqtt.Client, msg mqtt.Message) {
