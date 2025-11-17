@@ -241,6 +241,10 @@ case "${1:-}" in
     logs)
         show_logs "${2:-}"
         ;;
+    dashboard)
+        echo "🏠 Opening HomeSight Dashboard..."
+        "$PROJECT_DIR/bin/homesight-dashboard"
+        ;;
     start-daemon)
         start_daemon
         ;;
@@ -262,7 +266,7 @@ case "${1:-}" in
     *)
         echo "🏠 HomeSight Control Script"
         echo ""
-        echo "Usage: $0 {start|stop|restart|status|logs}"
+        echo "Usage: $0 {start|stop|restart|status|logs|dashboard}"
         echo ""
         echo "Commands:"
         echo "  start          Start all services (daemon + AI + docker)"
@@ -270,6 +274,7 @@ case "${1:-}" in
         echo "  restart        Restart all services"
         echo "  status         Show service status"
         echo "  logs [service] Show logs (daemon or ai)"
+        echo "  dashboard      Open interactive TUI dashboard"
         echo ""
         echo "Individual controls:"
         echo "  start-daemon   Start only the daemon"
@@ -283,6 +288,7 @@ case "${1:-}" in
         echo "  $0 start           # Start everything"
         echo "  $0 stop            # Stop everything"
         echo "  $0 status          # Check status"
+        echo "  $0 dashboard       # Open TUI dashboard"
         echo "  $0 logs daemon     # View daemon logs"
         exit 1
         ;;

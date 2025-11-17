@@ -118,36 +118,6 @@ graph TB
 - **Modular**: Each component is independently testable
 - **Resilient**: Handles sensor outages, restarts, and partial failures
 
-## Project Structure
-
-```
-homesight/
-├── cmd/
-│   └── homesightd/        # Main daemon entry point
-├── internal/
-│   ├── api/               # REST API server
-│   ├── ai/                # AI client (calls Python sidecar)
-│   ├── config/            # Configuration management
-│   ├── db/                # SQLite repositories
-│   ├── integrations/      # Device integrations (Matter, Zigbee, MQTT, LAN)
-│   ├── events/            # Event bus
-│   ├── metrics/           # Metrics sink (Prometheus abstraction)
-│   ├── rules/             # Rules engine
-│   ├── incidents/         # Incident management
-│   ├── model/             # Core domain models
-│   └── system/            # System utilities
-├── pkg/
-│   └── common/            # Shared utilities
-├── ai-sidecar/            # Python AI service
-├── scripts/               # Setup and deployment scripts
-├── systemd/               # systemd service files
-└── docs/                  # Documentation
-```
-
-## Quick Start
-
-See [QUICKSTART.md](QUICKSTART.md) for detailed setup instructions.
-
 ### One-Command Control
 
 ```bash
@@ -159,6 +129,9 @@ See [QUICKSTART.md](QUICKSTART.md) for detailed setup instructions.
 
 # Check status
 ./scripts/homesight.sh status
+
+# Open interactive TUI dashboard
+./scripts/homesight.sh dashboard
 
 # View logs
 ./scripts/homesight.sh logs daemon

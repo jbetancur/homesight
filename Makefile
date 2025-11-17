@@ -12,6 +12,7 @@ all: build
 
 build:
 	$(GOBUILD) -o $(BINARY_PATH) ./cmd/homesightd
+	$(GOBUILD) -o bin/homesight-dashboard ./cmd/dashboard
 
 clean:
 	$(GOCLEAN)
