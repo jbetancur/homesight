@@ -1,0 +1,24 @@
+[Unit]
+Description=Zigbee2MQTT Bridge
+After=network.target mosquitto.service
+Requires=mosquitto.service
+
+[Service]
+Type=simple
+User=homesight
+Group=homesight
+WorkingDirectory=/opt/zigbee2mqtt
+ExecStart=/usr/bin/node index.js
+Restart=on-failure
+RestartSec=10
+
+# Security
+NoNewPrivileges=true
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=zigbee2mqtt
+
+[Install]
+WantedBy=multi-user.target

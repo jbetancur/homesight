@@ -1,0 +1,66 @@
+# Binaries
+bin/
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Test binaries
+*.test
+*.out
+
+# Go workspace file
+go.work
+
+# Build artifacts
+dist/
+build/
+
+# Database files
+*.db
+*.db-shm
+*.db-wal
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+.venv
+pip-log.txt
+pip-delete-this-directory.txt
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Config with secrets
+config.local.yaml
+*.secret
+
+# Logs
+*.log
+logs/
+.logs/
+
+# Runtime
+.pids/
+data/
+
+# Docker volumes
+docker/mosquitto/data/
+docker/mosquitto/log/
+
+# Prometheus data
+prometheus-data/

@@ -1,0 +1,30 @@
+[Unit]
+Description=HomeSight AI Sidecar Service
+After=network.target
+PartOf=homesightd.service
+
+[Service]
+Type=simple
+User=homesight
+Group=homesight
+WorkingDirectory=/opt/homesight/ai-sidecar
+ExecStart=/usr/bin/python3 main.py
+Restart=on-failure
+RestartSec=10
+Environment="AI_MODEL_PATH=/var/lib/homesight/models/llama-2-7b-chat.gguf"
+Environment="AI_PORT=8001"
+
+# Security hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/homesight
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=homesight-ai
+
+[Install]
+WantedBy=multi-user.target
