@@ -4,9 +4,11 @@ Optional Python service for AI-powered incident analysis.
 
 ## What It Does
 
-- Analyzes incidents and suggests actions
-- Provides conversational interface for home maintenance questions
-- Runs completely local (no cloud dependencies)
+- **RAG-Powered Analysis**: Retrieves device manuals and provides contextual advice
+- **Zero-Config Knowledge Base**: Automatically fetches documentation as devices are added
+- **Intelligent Incident Analysis**: Suggests actions based on device type and situation
+- **Conversational Interface**: Chat about home maintenance questions
+- **Completely Local**: No cloud dependencies, runs entirely on your hardware
 
 ## Setup
 

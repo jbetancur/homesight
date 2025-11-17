@@ -20,6 +20,12 @@ build/
 *.db
 *.db-shm
 *.db-wal
+*.sqlite3
+*.sqlite
+
+# ChromaDB / RAG vector databases
+**/rag-db/
+*.bin
 
 # Python
 __pycache__/

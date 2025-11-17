@@ -19,6 +19,9 @@ make build
 # Start everything
 ./scripts/homesight.sh start
 
+# Run AI intelligence demo (RAG + auto-ingestion)
+./scripts/demo-ai-intelligence.sh
+
 # Open dashboard
 ./scripts/homesight.sh dashboard
 
@@ -27,6 +30,8 @@ make build
 ```
 
 ## Running the Demo
+
+### Sensor & Incident Demo
 
 ```bash
 # Run interactive demo (simulates sensor lifecycle)
@@ -37,17 +42,125 @@ make build
 ```
 
 The demo creates:
+
 - 6 test devices (leak sensor, sump pump, temperature sensors, door sensors)
 - 2 incidents (water leak, low battery)
+
+### AI Intelligence Demo
+
+```bash
+# Comprehensive AI demo (RAG + auto-ingestion)
+./scripts/demo-ai-intelligence.sh
+```
+
+This interactive demo showcases:
+
+**Part 1: RAG-Powered Analysis**
+- Document retrieval from vector database
+- Semantic search with relevance scoring
+- Context-aware incident recommendations
+- Transparent sourcing (shows which docs were used)
+- Real examples: Water leak, freeze risk, device issues
+
+**Part 2: Zero-Config Auto-Ingestion**
+- Simulates device onboarding
+- Automatic doc fetching via webhook
+- Background processing (non-blocking)
+- Verification that docs were indexed
+- Incident analysis using auto-fetched docs
+
+## Intelligent AI with RAG
+
+HomeSight uses Retrieval-Augmented Generation (RAG) to provide context-aware incident analysis with **zero-configuration auto-ingestion**.
+
+### How It Works
+
+1. **Device Discovery**: When a new device is onboarded (Zigbee2MQTT, MQTT, etc.)
+2. **Auto-Fetch**: AI service automatically fetches manufacturer documentation
+3. **RAG Ingestion**: Documents are embedded into vector database (ChromaDB)
+4. **Smart Analysis**: Incidents query RAG for relevant docs before providing recommendations
+
+**Zero Config**: No manual doc downloads required! The system automatically:
+- Detects device manufacturer and model from metadata
+- Fetches manuals from manufacturer websites or templates
+- Caches locally for offline use
+- Ingests into RAG in the background
+
+### Supported Manufacturers (Auto-Fetch)
+
+- **Aqara**: Water leak sensors, temperature sensors, door/window sensors
+- **Shelly**: Relays, sensors, smart plugs (coming soon)
+- **Generic**: Fallback templates for common devices
+
+Want more manufacturers? Contribute to the fetcher!
+
+### Current Knowledge Base
+
+- Aqara Water Leak Sensor Manual
+- Aqara Temperature & Humidity Sensor Manual
+- Aqara Door/Window Sensor Manual
+- Emergency Plumbing Guide
+- Water Heater Maintenance Manual
+- International Residential Code (IRC) - Plumbing
+- Home Winterization and Freeze Prevention Guide
+
+More manuals are auto-fetched as devices are added!
+
+### Manual Override (Optional)
+
+For offline use or custom docs, you can pre-populate the cache:
+
+```bash
+# Add PDFs to cache
+mkdir -p ~/.homesight/manuals/aqara
+cp your-manual.pdf ~/.homesight/manuals/aqara/
+
+# Check what's in RAG
+curl http://localhost:8001/rag/status
+```
+
+The auto-fetcher checks cache first, so pre-downloaded docs are used immediately.
+
+### Example RAG Response
+
+```json
+{
+  "analysis": "Incident Analysis: Water Leak Detected (Severity: high) [Enhanced with 3 document(s)]",
+  "insights": [
+    "Water leak detected - potential for property damage",
+    "Found 3 relevant maintenance guides",
+    "📖 Plumbing Emergency Guide: Emergency actions for water leaks...",
+    "📖 Aqara Water Leak Sensor Manual: Troubleshooting and maintenance..."
+  ],
+  "actions": [
+    "Locate and shut off water source immediately",
+    "Check for visible damage and call plumber if needed"
+  ],
+  "metadata": {
+    "rag_sources": [
+      {
+        "source": "Plumbing Emergency Guide",
+        "relevance": 0.654
+      },
+      {
+        "source": "Aqara Water Leak Sensor Manual",
+        "relevance": 0.369
+      }
+    ]
+  }
+}
+```
 
 ## API Endpoints
 
 ### Health
+
 ```bash
 curl http://localhost:8080/health
 ```
 
 ### Devices
+
 ```bash
 # List all devices
 curl http://localhost:8080/devices
@@ -57,6 +170,7 @@ curl http://localhost:8080/devices/{id}
 ```
 
 ### Incidents
+
 ```bash
 # List all incidents
 curl http://localhost:8080/incidents
@@ -172,6 +286,7 @@ graph TB
 ## Auto-Resolution
 
 Incidents automatically resolve when:
+
 - **Leak sensors**: `leak=false` reported
 - **Temperature**: Rises above freeze threshold (35°F)
 - **Battery**: Level recovers above 20%
@@ -181,6 +296,7 @@ No manual intervention needed in production.
 ## Rules Engine
 
 Built-in rules:
+
 - **Leak Detection** - Creates critical incident when water detected
 - **Freeze Risk** - High severity when temp < 35°F
 - **Low Battery** - Medium severity when < 20%
@@ -224,6 +340,7 @@ Commands:
 ## Dashboard
 
 Interactive TUI with:
+
 - Real-time device list
 - Active incidents with severity colors
 - Auto-refresh every 5 seconds
@@ -231,7 +348,7 @@ Interactive TUI with:
 
 ## Project Structure
 
-```
+```sh
 homesight/
 ├── cmd/
 │   ├── homesightd/      # Main daemon
@@ -303,12 +420,14 @@ curl -X DELETE http://localhost:8080/devices/test-sensor-001
 ## Troubleshooting
 
 **Services won't start:**
+
 ```bash
 ./scripts/homesight.sh status
 tail -f .logs/daemon.log
 ```
 
 **Database issues:**
+
 ```bash
 sqlite3 data/homesight.db
 .tables
@@ -316,6 +435,7 @@ SELECT * FROM incidents WHERE status='open';
 ```
 
 **MQTT connection failed:**
+
 ```bash
 docker ps  # Check if mosquitto is running
 docker logs homesight-mosquitto
@@ -323,4 +443,4 @@ docker logs homesight-mosquitto
 
 ## License
 
-MIT
+TBD

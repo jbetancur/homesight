@@ -5,7 +5,7 @@ This Python service handles all LLM inference and RAG operations for HomeSight.
 It provides a REST API for chat, metric analysis, and incident explanation.
 """
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, BackgroundTasks
 from pydantic import BaseModel
 from typing import Dict, List, Optional, Any
 import uvicorn
@@ -21,9 +21,10 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(title="HomeSight AI Service")
 
-# Global LLM instance (lazy loaded)
+# Global instances (lazy loaded)
 llm = None
 rag_engine = None
+document_fetcher = None
 
 
 class ChatRequest(BaseModel):
@@ -101,25 +102,32 @@ def initialize_rag():
         return rag_engine
     
     try:
-        from langchain.vectorstores import FAISS
-        from langchain.embeddings import HuggingFaceEmbeddings
+        from rag_engine import RAGEngine
         
-        # Initialize embeddings
-        embeddings = HuggingFaceEmbeddings(
-            model_name="sentence-transformers/all-MiniLM-L6-v2"
-        )
+        # Initialize RAG engine with persistent storage
+        # Try system path first, fall back to local for development
+        rag_path = Path("/var/lib/homesight/rag")
+        try:
+            rag_path.mkdir(parents=True, exist_ok=True)
+        except PermissionError:
+            logger.warning("Permission denied for /var/lib/homesight, using local directory")
+            rag_path = Path(__file__).parent.parent / "data" / "rag"
+            rag_path.mkdir(parents=True, exist_ok=True)
         
-        # TODO: Load home maintenance documentation
-        # For now, return None - will be implemented with actual docs
-        logger.info("RAG engine initialized")
-        rag_engine = {
-            "embeddings": embeddings,
-            "vectorstore": None
-        }
+        logger.info(f"Initializing RAG engine at {rag_path}")
+        rag_engine = RAGEngine(persist_directory=str(rag_path))
+        
+        # Check if we have documents indexed
+        stats = rag_engine.get_stats()
+        if stats["total_documents"] == 0:
+            logger.warning("No documents in RAG database yet. Run ingest-docs.py to add manufacturer documentation.")
+        else:
+            logger.info(f"RAG engine loaded with {stats['total_documents']} documents")
+        
         return rag_engine
         
-    except ImportError:
-        logger.warning("RAG dependencies not installed")
+    except ImportError as e:
+        logger.warning(f"RAG dependencies not installed: {e}")
         return None
     except Exception as e:
         logger.error(f"Failed to initialize RAG: {e}")
@@ -150,11 +158,44 @@ def generate_response(prompt: str) -> str:
 @app.get("/health")
 async def health_check():
     """Health check endpoint"""
+    rag_stats = {}
+    if rag_engine is not None:
+        try:
+            rag_stats = rag_engine.get_stats()
+        except:
+            pass
+    
     return {
         "status": "healthy",
         "llm_loaded": llm is not None,
-        "rag_loaded": rag_engine is not None
+        "rag_loaded": rag_engine is not None,
+        "rag_documents": rag_stats.get("total_documents", 0)
     }
+
+
+@app.get("/rag/status")
+async def rag_status():
+    """Get RAG engine status and statistics"""
+    rag_instance = initialize_rag()
+    
+    if rag_instance is None:
+        return {
+            "enabled": False,
+            "message": "RAG engine not initialized"
+        }
+    
+    try:
+        stats = rag_instance.get_stats()
+        return {
+            "enabled": True,
+            "stats": stats,
+            "message": "RAG engine operational" if stats["total_documents"] > 0 else "No documents indexed yet"
+        }
+    except Exception as e:
+        return {
+            "enabled": False,
+            "error": str(e)
+        }
 
 
 @app.post("/chat", response_model=ChatResponse)
@@ -231,31 +272,91 @@ def analyze_metrics(data: Dict[str, Any], context: Optional[Dict[str, Any]]) -> 
 
 
 def analyze_incident(data: Dict[str, Any], context: Optional[Dict[str, Any]]) -> AnalyzeResponse:
-    """Analyze an incident and provide recommendations"""
+    """Analyze an incident and provide recommendations using RAG + LLM"""
     incident_type = data.get("type", "unknown")
     severity = data.get("severity", "unknown")
+    incident_id = data.get("id", "unknown")
+    device_id = data.get("device_id", None)
     
     insights = []
     actions = []
+    rag_sources = []
     
-    # Rule-based insights (in production, use LLM for more sophisticated analysis)
+    # Try to use RAG for enhanced analysis
+    rag_instance = initialize_rag()
+    if rag_instance is not None:
+        try:
+            # Build a better query based on incident type
+            query_terms = [incident_type]
+            
+            # Add context-specific terms
+            if "leak" in incident_type.lower():
+                query_terms.append("water emergency plumbing")
+            elif "freeze" in incident_type.lower():
+                query_terms.append("pipe freeze winterization")
+            elif "heater" in incident_type.lower() or "water heater" in incident_type.lower():
+                query_terms.append("water heater maintenance T&P valve")
+            elif "sump" in incident_type.lower():
+                query_terms.append("sump pump drainage")
+            elif "battery" in incident_type.lower() and device_id:
+                query_terms.append("device battery replacement maintenance")
+            
+            query = " ".join(query_terms)
+            
+            logger.info(f"Querying RAG for incident: {query}")
+            results = rag_instance.query(query, n_results=3)
+            
+            # Extract relevant information from RAG results
+            if results and len(results) > 0:
+                for result in results:
+                    relevance = result.get("relevance_score", 0.0)
+                    if relevance > 0.2:  # Lower threshold for more results
+                        source = result.get("metadata", {}).get("source", "Unknown")
+                        content = result.get("text", "")
+                        rag_sources.append({
+                            "source": source,
+                            "relevance": relevance,
+                            "excerpt": content[:200]
+                        })
+                        logger.info(f"Found relevant doc: {source} (relevance: {relevance:.3f})")
+                    else:
+                        logger.info(f"Skipping doc with low relevance: {result.get('metadata', {}).get('source', 'Unknown')} ({relevance:.3f})")
+        except Exception as e:
+            logger.error(f"RAG query failed: {e}")
+    
+    # Rule-based insights with RAG enhancement
     if "leak" in incident_type.lower():
         insights.append("Water leak detected - potential for property damage")
         actions.append("Locate and shut off water source immediately")
         actions.append("Check for visible damage and call plumber if needed")
         actions.append("Document damage for insurance purposes")
+        
+        # Add RAG-sourced insights if available
+        if rag_sources:
+            insights.append(f"Found {len(rag_sources)} relevant maintenance guides")
+            for src in rag_sources[:2]:  # Top 2 sources
+                insights.append(f"📖 {src['source']}: {src['excerpt'][:100]}...")
     
     elif "freeze" in incident_type.lower():
         insights.append("Freeze risk detected - pipes may be at risk")
         actions.append("Increase heating in affected area")
         actions.append("Open cabinet doors to allow warm air circulation")
         actions.append("Consider pipe insulation for long-term prevention")
+        
+        if rag_sources:
+            insights.append(f"Found {len(rag_sources)} relevant winterization guides")
+            for src in rag_sources[:2]:
+                insights.append(f"📖 {src['source']}: {src['excerpt'][:100]}...")
     
     elif "sump" in incident_type.lower():
         insights.append("Excessive sump pump activity - possible drainage issue")
         actions.append("Check for heavy rain or snow melt")
         actions.append("Inspect sump pump for proper operation")
         actions.append("Consider backup sump pump if not present")
+        
+        if rag_sources:
+            for src in rag_sources[:1]:
+                insights.append(f"📖 {src['source']}: {src['excerpt'][:100]}...")
     
     elif "battery" in incident_type.lower():
         insights.append("Device battery running low")
@@ -264,15 +365,106 @@ def analyze_incident(data: Dict[str, Any], context: Optional[Dict[str, Any]]) ->
     else:
         insights.append(f"Incident of type '{incident_type}' with severity '{severity}'")
         actions.append("Review incident details and take appropriate action")
+        
+        if rag_sources:
+            insights.append(f"Found {len(rag_sources)} relevant documents")
+            for src in rag_sources[:2]:
+                insights.append(f"📖 {src['source']}")
     
     analysis = f"Incident Analysis: {incident_type} (Severity: {severity})"
+    if rag_sources:
+        analysis += f" [Enhanced with {len(rag_sources)} document(s)]"
+    
+    metadata = {
+        "type": incident_type,
+        "severity": severity,
+        "incident_id": incident_id
+    }
+    
+    if rag_sources:
+        metadata["rag_sources"] = [
+            {"source": src["source"], "relevance": src["relevance"]}
+            for src in rag_sources
+        ]
     
     return AnalyzeResponse(
         analysis=analysis,
         insights=insights,
         actions=actions,
-        metadata={"type": incident_type, "severity": severity}
+        metadata=metadata
     )
+
+
+@app.post("/events/device")
+async def handle_device_event(event: dict, background_tasks: BackgroundTasks):
+    """
+    Handle device lifecycle events from HomeSight daemon
+    
+    Automatically fetches and ingests documentation when new devices are discovered.
+    Zero configuration required!
+    """
+    event_type = event.get("type", "")
+    
+    if event_type == "device.created":
+        device_data = event.get("data", {})
+        manufacturer = device_data.get("manufacturer", "")
+        model = device_data.get("model", "")
+        
+        if manufacturer and model:
+            logger.info(f"Device created: {manufacturer} {model} - queuing doc fetch")
+            
+            # Queue document fetch in background (don't block response)
+            background_tasks.add_task(fetch_device_docs, device_data)
+            
+            return {
+                "status": "queued",
+                "message": f"Queued doc fetch for {manufacturer} {model}"
+            }
+        else:
+            return {
+                "status": "skipped",
+                "message": "Device missing manufacturer or model metadata"
+            }
+    
+    return {"status": "ignored", "message": f"Unknown event type: {event_type}"}
+
+
+async def fetch_device_docs(device: dict):
+    """Background task to fetch and ingest device documentation"""
+    try:
+        fetcher = get_document_fetcher()
+        if fetcher:
+            success = await fetcher.fetch_for_device(device)
+            if success:
+                logger.info(f"Successfully fetched docs for {device.get('manufacturer')} {device.get('model')}")
+            else:
+                logger.warning(f"Could not fetch docs for {device.get('manufacturer')} {device.get('model')}")
+    except Exception as e:
+        logger.error(f"Error fetching docs: {e}")
+
+
+def get_document_fetcher():
+    """Initialize document fetcher (lazy load)"""
+    global document_fetcher, rag_engine
+    
+    if document_fetcher is not None:
+        return document_fetcher
+    
+    # Need RAG engine first
+    rag_instance = initialize_rag()
+    if rag_instance is None:
+        return None
+    
+    try:
+        from document_fetcher import DocumentAutoFetcher
+        
+        cache_dir = Path.home() / ".homesight" / "manuals"
+        document_fetcher = DocumentAutoFetcher(rag_instance, cache_dir)
+        logger.info(f"Document auto-fetcher initialized (cache: {cache_dir})")
+        return document_fetcher
+    except ImportError as e:
+        logger.warning(f"Could not initialize document fetcher: {e}")
+        return None
 
 
 @app.on_event("startup")
