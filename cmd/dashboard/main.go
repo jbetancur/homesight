@@ -432,7 +432,7 @@ func fetchData() tea.Cmd {
 		}
 
 		// Fetch incidents
-		resp, err = http.Get(apiURL + "/incidents")
+		resp, err = http.Get(apiURL + "/incidents?status=open")
 		if err != nil {
 			msg.err = fmt.Errorf("failed to fetch incidents: %w", err)
 			return msg

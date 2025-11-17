@@ -75,6 +75,11 @@ func (s *Service) Resolve(ctx context.Context, id string) error {
 	return s.repo.Upsert(ctx, incident)
 }
 
+// Delete removes an incident (for demo/testing purposes)
+func (s *Service) Delete(ctx context.Context, id string) error {
+	return s.repo.Delete(ctx, id)
+}
+
 // Close shuts down the incident service
 func (s *Service) Close() error {
 	return nil

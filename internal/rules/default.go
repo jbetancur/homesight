@@ -15,6 +15,7 @@ type DefaultRuleEngine struct {
 	deviceStates     map[string]deviceState
 	sumpPumpCycles   map[string][]time.Time
 	freezeThresholds map[string]float64
+	activeIncidents  map[string]*model.Incident // Track active incidents by rule+device key
 }
 
 type deviceState struct {
@@ -29,6 +30,7 @@ func NewDefaultRuleEngine() *DefaultRuleEngine {
 		deviceStates:     make(map[string]deviceState),
 		sumpPumpCycles:   make(map[string][]time.Time),
 		freezeThresholds: make(map[string]float64),
+		activeIncidents:  make(map[string]*model.Incident),
 	}
 }
 
@@ -86,8 +88,11 @@ func (e *DefaultRuleEngine) checkLeakDetection(event model.DeviceEvent) *model.I
 		return nil
 	}
 
+	incidentKey := fmt.Sprintf("leak_%s", event.DeviceID)
+
 	if leak {
-		return &model.Incident{
+		// Leak detected - create or update incident
+		incident := &model.Incident{
 			ID:          fmt.Sprintf("leak_%s_%d", event.DeviceID, event.Timestamp.Unix()),
 			Title:       "Water Leak Detected",
 			Description: fmt.Sprintf("Leak sensor %s detected water", event.SensorID),
@@ -102,6 +107,18 @@ func (e *DefaultRuleEngine) checkLeakDetection(event model.DeviceEvent) *model.I
 			CreatedAt: time.Now(),
 			UpdatedAt: time.Now(),
 		}
+		e.activeIncidents[incidentKey] = incident
+		return incident
+	}
+
+	// No leak - auto-resolve if incident exists
+	if activeIncident, exists := e.activeIncidents[incidentKey]; exists {
+		now := time.Now()
+		activeIncident.Status = model.StatusResolved
+		activeIncident.ResolvedAt = &now
+		activeIncident.UpdatedAt = now
+		delete(e.activeIncidents, incidentKey)
+		return activeIncident
 	}
 
 	return nil
@@ -119,8 +136,11 @@ func (e *DefaultRuleEngine) checkFreezeRisk(event model.DeviceEvent) *model.Inci
 		threshold = t
 	}
 
+	incidentKey := fmt.Sprintf("freeze_%s", event.DeviceID)
+
 	if temp < threshold {
-		return &model.Incident{
+		// Temperature below threshold - create or update incident
+		incident := &model.Incident{
 			ID:          fmt.Sprintf("freeze_%s_%d", event.DeviceID, event.Timestamp.Unix()),
 			Title:       "Freeze Risk Detected",
 			Description: fmt.Sprintf("Temperature %.1f°F is below freeze threshold of %.1f°F", temp, threshold),
@@ -136,6 +156,18 @@ func (e *DefaultRuleEngine) checkFreezeRisk(event model.DeviceEvent) *model.Inci
 			CreatedAt: time.Now(),
 			UpdatedAt: time.Now(),
 		}
+		e.activeIncidents[incidentKey] = incident
+		return incident
+	}
+
+	// Temperature safe - auto-resolve if incident exists
+	if activeIncident, exists := e.activeIncidents[incidentKey]; exists {
+		now := time.Now()
+		activeIncident.Status = model.StatusResolved
+		activeIncident.ResolvedAt = &now
+		activeIncident.UpdatedAt = now
+		delete(e.activeIncidents, incidentKey)
+		return activeIncident
 	}
 
 	return nil
@@ -192,8 +224,12 @@ func (e *DefaultRuleEngine) checkBatteryLow(event model.DeviceEvent) *model.Inci
 		return nil
 	}
 
-	if battery < 20.0 {
-		return &model.Incident{
+	incidentKey := fmt.Sprintf("battery_%s", event.DeviceID)
+	threshold := 20.0
+
+	if battery < threshold {
+		// Low battery - create or update incident
+		incident := &model.Incident{
 			ID:          fmt.Sprintf("battery_%s_%d", event.DeviceID, event.Timestamp.Unix()),
 			Title:       "Low Battery",
 			Description: fmt.Sprintf("Device battery at %.0f%%", battery),
@@ -208,6 +244,18 @@ func (e *DefaultRuleEngine) checkBatteryLow(event model.DeviceEvent) *model.Inci
 			CreatedAt: time.Now(),
 			UpdatedAt: time.Now(),
 		}
+		e.activeIncidents[incidentKey] = incident
+		return incident
+	}
+
+	// Battery OK - auto-resolve if incident exists
+	if activeIncident, exists := e.activeIncidents[incidentKey]; exists {
+		now := time.Now()
+		activeIncident.Status = model.StatusResolved
+		activeIncident.ResolvedAt = &now
+		activeIncident.UpdatedAt = now
+		delete(e.activeIncidents, incidentKey)
+		return activeIncident
 	}
 
 	return nil

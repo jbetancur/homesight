@@ -11,6 +11,7 @@ import (
 	"github.com/homesight/homesight/internal/db"
 	"github.com/homesight/homesight/internal/incidents"
 	"github.com/homesight/homesight/internal/metrics"
+	"github.com/homesight/homesight/internal/model"
 )
 
 // Server is the REST API server
@@ -57,12 +58,18 @@ func (s *Server) setupRoutes() {
 		r.Get("/", s.listIncidents)
 		r.Get("/{id}", s.getIncident)
 		r.Post("/{id}/resolve", s.resolveIncident)
+		// Demo/Testing endpoints - In production, guard with admin authentication
+		r.Post("/", s.createIncident)       // Manual incident creation (testing only)
+		r.Delete("/{id}", s.deleteIncident) // Hard delete (testing/cleanup only)
 	})
 
 	// Devices
 	s.router.Route("/devices", func(r chi.Router) {
 		r.Get("/", s.listDevices)
 		r.Get("/{id}", s.getDevice)
+		// Demo/Testing endpoints - In production, guard with admin authentication
+		r.Post("/", s.createDevice)       // Manual device creation (testing only - normally auto-discovered)
+		r.Delete("/{id}", s.deleteDevice) // Hard delete (testing/cleanup only)
 	})
 
 	// Metrics
@@ -244,4 +251,90 @@ func (s *Server) aiAnalyze(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(resp)
+}
+
+// ==================================================================================
+// Demo/Testing Endpoints - In production, add admin authentication middleware
+// ==================================================================================
+// NOTE: These endpoints are for testing and demos. In a real deployment:
+// - Devices should be auto-discovered via integrations (Zigbee2MQTT, LAN, etc.)
+// - Incidents are auto-created by the rule engine and auto-resolved when conditions clear
+// - Manual creation/deletion should require admin privileges
+
+// createDevice manually creates a device (normally auto-discovered via integrations)
+func (s *Server) createDevice(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+
+	var device model.Device
+	if err := json.NewDecoder(r.Body).Decode(&device); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	// Set timestamps
+	now := time.Now()
+	device.CreatedAt = now
+	device.UpdatedAt = now
+
+	if err := s.deviceRepo.Upsert(ctx, &device); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(device)
+}
+
+// deleteDevice permanently removes a device (for cleanup/testing only)
+func (s *Server) deleteDevice(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	id := chi.URLParam(r, "id")
+
+	if err := s.deviceRepo.Delete(ctx, id); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// createIncident manually creates an incident (normally auto-created by rule engine)
+func (s *Server) createIncident(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+
+	var incident model.Incident
+	if err := json.NewDecoder(r.Body).Decode(&incident); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	// Set timestamps
+	now := time.Now()
+	incident.CreatedAt = now
+	incident.UpdatedAt = now
+	if incident.Status == "" {
+		incident.Status = "open"
+	}
+
+	if err := s.incidentService.CreateOrUpdate(ctx, &incident); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(incident)
+}
+
+// deleteIncident permanently removes an incident (for cleanup/testing only)
+// Note: Incidents normally auto-resolve when conditions clear. Use POST /{id}/resolve for manual resolution.
+func (s *Server) deleteIncident(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	id := chi.URLParam(r, "id")
+
+	if err := s.incidentService.Delete(ctx, id); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
 }

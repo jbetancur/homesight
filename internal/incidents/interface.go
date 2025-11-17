@@ -23,6 +23,9 @@ type IncidentService interface {
 	// Resolve marks an incident as resolved
 	Resolve(ctx context.Context, id string) error
 
+	// Delete removes an incident (for demo/testing purposes)
+	Delete(ctx context.Context, id string) error
+
 	// Close shuts down the incident service
 	Close() error
 }

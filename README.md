@@ -1,6 +1,75 @@
 # HomeSight
 
-HomeSight is a local-only home health and maintenance monitoring system for detecting leaks, monitoring sump pumps, freeze sensors, temperature sensors, and more.
+Local-only home monitoring system. Detects leaks, freeze risks, battery issues, and more.
+
+## What It Does
+
+- Monitors sensors via MQTT, Zigbee2MQTT, or LAN devices
+- Auto-creates incidents when problems are detected
+- Auto-resolves incidents when conditions clear
+- Stores everything locally in SQLite
+- Optional AI analysis for recommendations
+
+## Quick Start
+
+```bash
+# Build
+make build
+
+# Start everything
+./scripts/homesight.sh start
+
+# Open dashboard
+./scripts/homesight.sh dashboard
+
+# Check status
+./scripts/homesight.sh status
+```
+
+## Running the Demo
+
+```bash
+# Run interactive demo (simulates sensor lifecycle)
+./scripts/demo-interactive.sh
+
+# Clean up demo data
+./scripts/cleanup-demo.sh
+```
+
+The demo creates:
+- 6 test devices (leak sensor, sump pump, temperature sensors, door sensors)
+- 2 incidents (water leak, low battery)
+
+## API Endpoints
+
+### Health
+```bash
+curl http://localhost:8080/health
+```
+
+### Devices
+```bash
+# List all devices
+curl http://localhost:8080/devices
+
+# Get specific device
+curl http://localhost:8080/devices/{id}
+```
+
+### Incidents
+```bash
+# List all incidents
+curl http://localhost:8080/incidents
+
+# List only open incidents
+curl http://localhost:8080/incidents?status=open
+
+# Get specific incident
+curl http://localhost:8080/incidents/{id}
+
+# Manually resolve incident
+curl -X POST http://localhost:8080/incidents/{id}/resolve
+```
 
 ## Architecture
 
@@ -100,83 +169,157 @@ graph TB
     class MOSQUITTO,PROM bus
 ```
 
-**Components:**
+## Auto-Resolution
 
-- **Go Core Daemon** (`homesightd`): Main orchestrator and event processor
-- **Python AI Sidecar**: Local LLM inference and RAG service
-- **Prometheus**: Time-series metrics database (abstracted via interface)
-- **MQTT Broker**: Message bus for sensors and devices
-- **Zigbee2MQTT**: Zigbee and Thread device support
-- **SQLite**: Local database for devices, incidents, and configuration
-- **systemd**: Service supervision
+Incidents automatically resolve when:
+- **Leak sensors**: `leak=false` reported
+- **Temperature**: Rises above freeze threshold (35°F)
+- **Battery**: Level recovers above 20%
 
-## Design Principles
+No manual intervention needed in production.
 
-- **Interface-first**: All subsystems use Go interfaces for testability
-- **Local-only**: No cloud dependencies
-- **Go for orchestration**: Python only for LLM/AI workloads
-- **Modular**: Each component is independently testable
-- **Resilient**: Handles sensor outages, restarts, and partial failures
+## Rules Engine
 
-### One-Command Control
-
-```bash
-# Start everything (daemon + AI + Docker services)
-./scripts/homesight.sh start
-
-# Stop everything
-./scripts/homesight.sh status
-
-# Check status
-./scripts/homesight.sh status
-
-# Open interactive TUI dashboard
-./scripts/homesight.sh dashboard
-
-# View logs
-./scripts/homesight.sh logs daemon
-./scripts/homesight.sh logs ai
-```
-
-### Prerequisites
-
-- Go 1.25+
-- Python 3.10+
-- Docker & Docker Compose
-- SQLite3 (included)
-
-### Build & Run
-
-```bash
-# Build
-make build
-
-# Start all services
-./scripts/homesight.sh start
-
-# Test the API
-curl http://localhost:8080/health
-curl http://localhost:8080/devices
-curl http://localhost:8080/incidents
-```
-
-## Scripts
-
-- `homesight.sh` - Main control script (start/stop/restart/status)
-- `build.sh` - Build the Go binary
-- `verify.sh` - Verify installation and dependencies
-- `install.sh` - Install system-wide with systemd
+Built-in rules:
+- **Leak Detection** - Creates critical incident when water detected
+- **Freeze Risk** - High severity when temp < 35°F
+- **Low Battery** - Medium severity when < 20%
+- **Sump Pump Cycles** - Excessive cycling detection
+- **Device Offline** - Alerts when device stops reporting
 
 ## Configuration
 
-Configuration is stored in `config.yaml` (development) or `/etc/homesight/config.yaml` (production).
+Edit `config.yaml`:
 
-## Documentation
+```yaml
+server:
+  port: 8080
+  
+database:
+  path: "./data/homesight.db"
+  
+mqtt:
+  enabled: true
+  broker: "tcp://localhost:1883"
+  
+integrations:
+  zigbee: false
+  lan: false
+```
 
-- [QUICKSTART.md](QUICKSTART.md) - Getting started guide
-- [ARCHITECTURE.md](docs/ARCHITECTURE.md) - System architecture
-- [DEVELOPMENT.md](docs/DEVELOPMENT.md) - Development guide
-- [API.md](docs/API.md) - API reference
+## Control Script
+
+```bash
+./scripts/homesight.sh <command>
+
+Commands:
+  start              Start all services
+  stop               Stop all services  
+  restart [service]  Restart service(s)
+  status             Show service status
+  dashboard          Open TUI dashboard
+  logs <service>     View service logs
+```
+
+## Dashboard
+
+Interactive TUI with:
+- Real-time device list
+- Active incidents with severity colors
+- Auto-refresh every 5 seconds
+- Keyboard: `r` to refresh, `q` to quit
+
+## Project Structure
+
+```
+homesight/
+├── cmd/
+│   ├── homesightd/      # Main daemon
+│   └── dashboard/       # TUI dashboard
+├── internal/
+│   ├── api/             # REST API server
+│   ├── db/              # SQLite repositories
+│   ├── events/          # Event bus
+│   ├── incidents/       # Incident service
+│   ├── integrations/    # Device integrations
+│   ├── metrics/         # Prometheus metrics
+│   ├── model/           # Domain models
+│   └── rules/           # Rules engine
+├── ai-sidecar/          # Python AI service (optional)
+├── scripts/             # Control scripts
+├── data/                # SQLite database
+└── config.yaml          # Configuration
+```
+
+## Requirements
+
+- Go 1.25+
+- Python 3.10+ (for AI sidecar)
+- Docker (for MQTT broker)
+- SQLite3
+
+## Services
+
+- **homesightd** - Main daemon (port 8080)
+- **AI Sidecar** - Optional AI service (port 8001)
+- **MQTT Broker** - Mosquitto (port 1883)
+- **Prometheus** - Metrics (port 9090)
+
+## Development
+
+```bash
+# Build daemon and dashboard
+make build
+
+# Run tests (TODO)
+make test
+
+# Clean build artifacts
+make clean
+```
+
+## Adding Devices
+
+Devices are auto-discovered via integrations. For manual testing:
+
+```bash
+# Create test device (demo only)
+curl -X POST http://localhost:8080/devices \
+  -H "Content-Type: application/json" \
+  -d '{
+    "id": "test-sensor-001",
+    "name": "Test Sensor",
+    "type": "water_leak",
+    "integration": "mqtt",
+    "enabled": true
+  }'
+
+# Delete test device
+curl -X DELETE http://localhost:8080/devices/test-sensor-001
+```
+
+**Note**: In production, use auto-discovery instead of manual device creation.
+
+## Troubleshooting
+
+**Services won't start:**
+```bash
+./scripts/homesight.sh status
+tail -f .logs/daemon.log
+```
+
+**Database issues:**
+```bash
+sqlite3 data/homesight.db
+.tables
+SELECT * FROM incidents WHERE status='open';
+```
+
+**MQTT connection failed:**
+```bash
+docker ps  # Check if mosquitto is running
+docker logs homesight-mosquitto
+```
 
 ## License
 

@@ -1,70 +1,71 @@
 # HomeSight AI Sidecar
 
-Python-based AI service for HomeSight that handles all LLM inference and RAG operations.
+Optional Python service for AI-powered incident analysis.
 
-## Features
+## What It Does
 
-- Local LLM inference using llama.cpp
-- RAG (Retrieval-Augmented Generation) for home maintenance knowledge
-- REST API for chat and analysis
-- Metric anomaly detection
-- Incident analysis and recommendations
+- Analyzes incidents and suggests actions
+- Provides conversational interface for home maintenance questions
+- Runs completely local (no cloud dependencies)
 
-## Installation
+## Setup
 
 ```bash
+cd ai-sidecar
+python3 -m venv venv
+source venv/bin/activate
 pip install -r requirements.txt
 ```
 
-## Model Setup
-
-Place your GGUF model file in one of these locations:
-- `/var/lib/homesight/models/llama-2-7b-chat.gguf`
-- `./models/llama-2-7b-chat.gguf`
-- `~/models/llama-2-7b-chat.gguf`
-
-Recommended models:
-- Llama 2 7B Chat (GGUF format)
-- Mistral 7B Instruct (GGUF format)
-
-## Running
+## Run
 
 ```bash
+# Start the service
 python main.py
 ```
 
-The service will start on `http://localhost:8001`
+Service runs on `http://localhost:8001`
 
-## API Endpoints
+## Endpoints
 
 ### Health Check
 ```bash
-GET /health
+curl http://localhost:8001/health
 ```
 
 ### Chat
 ```bash
-POST /chat
-{
-  "message": "How do I winterize my pipes?",
-  "context": {}
-}
+curl -X POST http://localhost:8001/chat \
+  -H "Content-Type: application/json" \
+  -d '{"message": "How do I prevent frozen pipes?"}'
 ```
 
-### Analyze
+### Analyze Incident
 ```bash
-POST /analyze
-{
-  "type": "incident",
-  "data": {
-    "type": "leak_detected",
-    "severity": "critical"
-  }
-}
+curl -X POST http://localhost:8001/analyze \
+  -H "Content-Type: application/json" \
+  -d '{
+    "type": "incident",
+    "data": {
+      "type": "leak_detected",
+      "severity": "critical"
+    }
+  }'
 ```
 
-## Configuration
+## LLM Support
 
-Set environment variables:
-- `AI_MODEL_PATH`: Path to LLM model file
-- `AI_PORT`: Port to run service on (default: 8001)
+The service works with or without a local LLM:
+
+**With LLM**: Place a GGUF model file in `/var/lib/homesight/models/`
+**Without LLM**: Falls back to rule-based responses
+
+## Requirements
+
+- Python 3.10+
+- FastAPI
+- (Optional) llama-cpp-python for LLM support
+
+## Dependencies
+
+See `requirements.txt` for full list.
