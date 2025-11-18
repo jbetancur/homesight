@@ -2,7 +2,7 @@
 # Interactive demo script that simulates sensor lifecycle
 # Run this while watching the dashboard: ./scripts/homesight.sh dashboard
 
-API_URL="http://localhost:8080"
+API_URL="http://localhost:8080/api"
 
 # Colors
 GREEN='\033[0;32m'

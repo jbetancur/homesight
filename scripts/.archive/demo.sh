@@ -3,7 +3,7 @@
 
 echo "🏠 Creating demo data for HomeSight..."
 
-API_URL="http://localhost:8080"
+API_URL="http://localhost:8080/api"
 
 # Note: The current API only has GET endpoints for devices and incidents
 # In a real scenario, we'd add POST endpoints to create devices

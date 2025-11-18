@@ -39,37 +39,64 @@ function App() {
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
-    const fetchData = async () => {
+    // Hydrate initial state with API calls
+    Promise.all([
+      fetch(`${API_BASE}/devices`).then(res => res.json()),
+      fetch(`${API_BASE}/incidents`).then(res => res.json()),
+      fetch(`${API_BASE}/discovery`).then(res => res.json())
+    ]).then(([devicesData, incidentsData, discoveryData]) => {
+      setDevices(devicesData || [])
+      setIncidents(incidentsData || [])
+      setDiscovery(discoveryData?.devices || [])
+      setLoading(false)
+    }).catch((err) => {
+      console.error('Initial hydration error:', err)
+      setLoading(false)
+    })
+
+    // Subscribe to SSE for live updates (delta events)
+    const es = new EventSource(`${API_BASE}/events`)
+    es.onmessage = (event) => {
       try {
-        setLoading(true)
-        
-        const devicesRes = await fetch(`${API_BASE}/devices`)
-        if (devicesRes.ok) {
-          const devicesData = await devicesRes.json()
-          setDevices(devicesData || [])
+        const evt = JSON.parse(event.data)
+        switch (evt.type) {
+          case 'device_added':
+            setDevices(prev => {
+              const exists = prev.find(d => d.id === evt.data.id)
+              return exists ? prev : [...prev, evt.data]
+            })
+            break
+          case 'device_removed':
+            setDevices(prev => prev.filter(d => d.id !== evt.data.id))
+            break
+          case 'device_updated':
+            setDevices(prev => prev.map(d => d.id === evt.data.id ? evt.data : d))
+            break
+          case 'incident_added':
+            setIncidents(prev => {
+              const exists = prev.find(i => i.ID === evt.data.ID)
+              return exists ? prev : [...prev, evt.data]
+            })
+            break
+          case 'incident_removed':
+            setIncidents(prev => prev.filter(i => i.ID !== evt.data.id))
+            break
+          case 'incident_updated':
+            setIncidents(prev => prev.map(i => i.ID === evt.data.ID ? evt.data : i))
+            break
+          default:
+            // Ignore unknown event types
+            break
         }
-
-        const incidentsRes = await fetch(`${API_BASE}/incidents`)
-        if (incidentsRes.ok) {
-          const incidentsData = await incidentsRes.json()
-          setIncidents(incidentsData || [])
-        }
-
-        const discoveryRes = await fetch(`${API_BASE}/discovery`)
-        if (discoveryRes.ok) {
-          const discoveryData = await discoveryRes.json()
-          setDiscovery(discoveryData?.devices || [])
-        }
-      } catch (error) {
-        console.error('Error fetching data:', error)
-      } finally {
-        setLoading(false)
+      } catch (err) {
+        console.error('SSE event error:', err)
       }
     }
-
-    fetchData()
-    const interval = setInterval(fetchData, 5000)
-    return () => clearInterval(interval)
+    es.onerror = (err) => {
+      console.error('SSE connection error:', err)
+      es.close()
+    }
+    return () => es.close()
   }, [])
 
   const getSeverityColor = (severity: string) => {

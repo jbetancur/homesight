@@ -23,6 +23,7 @@ require (
 	github.com/charmbracelet/x/cellbuf v0.0.13-0.20250311204145-2c3ea96c31dd // indirect
 	github.com/charmbracelet/x/term v0.2.1 // indirect
 	github.com/erikgeiser/coninput v0.0.0-20211004153227-1c3628e74d0f // indirect
+	github.com/go-chi/cors v1.2.2 // indirect
 	github.com/gorilla/websocket v1.5.3 // indirect
 	github.com/grandcat/zeroconf v1.0.0 // indirect
 	github.com/json-iterator/go v1.1.12 // indirect

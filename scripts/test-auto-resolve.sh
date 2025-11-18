@@ -1,7 +1,7 @@
 #!/bin/bash
 # Test auto-resolution of incidents
 
-API_URL="http://localhost:8080"
+API_URL="http://localhost:8080/api"
 
 echo "🧪 Testing Auto-Resolution Feature"
 echo "==================================="

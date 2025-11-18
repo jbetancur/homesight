@@ -2,12 +2,14 @@ package api
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"sync"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
+	"github.com/go-chi/cors"
 	"github.com/homesight/homesight/internal/ai"
 	"github.com/homesight/homesight/internal/db"
 	"github.com/homesight/homesight/internal/discovery"
@@ -26,6 +28,7 @@ type Server struct {
 	addr              string
 	discoveryListener *discovery.MQTTDiscoveryListener
 	discoveryMutex    sync.RWMutex
+	eventBus          *EventBus
 }
 
 // NewServer creates a new API server
@@ -43,6 +46,7 @@ func NewServer(
 		metricsSink:     metricsSink,
 		aiClient:        aiClient,
 		addr:            addr,
+		eventBus:        NewEventBus(),
 	}
 
 	s.setupRoutes()
@@ -61,42 +65,55 @@ func (s *Server) setupRoutes() {
 	s.router.Use(middleware.Logger)
 	s.router.Use(middleware.Recoverer)
 	s.router.Use(middleware.Timeout(60 * time.Second))
+	s.router.Use(cors.Handler(cors.Options{
+		AllowedOrigins:   []string{"*"},
+		AllowedMethods:   []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
+		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type", "X-CSRF-Token"},
+		ExposedHeaders:   []string{"Link"},
+		AllowCredentials: false,
+		MaxAge:           300,
+	}))
 
 	s.router.Get("/health", s.handleHealth)
 
-	// Incidents
-	s.router.Route("/incidents", func(r chi.Router) {
-		r.Get("/", s.listIncidents)
-		r.Get("/{id}", s.getIncident)
-		r.Post("/{id}/resolve", s.resolveIncident)
-		// Demo/Testing endpoints - In production, guard with admin authentication
-		r.Post("/", s.createIncident)       // Manual incident creation (testing only)
-		r.Delete("/{id}", s.deleteIncident) // Hard delete (testing/cleanup only)
-	})
+	s.router.Route("/api", func(r chi.Router) {
+		// Incidents
+		r.Route("/incidents", func(r chi.Router) {
+			r.Get("/", s.listIncidents)
+			r.Get("/{id}", s.getIncident)
+			r.Post("/{id}/resolve", s.resolveIncident)
+			// Demo/Testing endpoints - In production, guard with admin authentication
+			r.Post("/", s.createIncident)       // Manual incident creation (testing only)
+			r.Delete("/{id}", s.deleteIncident) // Hard delete (testing/cleanup only)
+		})
 
-	// Devices
-	s.router.Route("/devices", func(r chi.Router) {
-		r.Get("/", s.listDevices)
-		r.Get("/{id}", s.getDevice)
-		// Demo/Testing endpoints - In production, guard with admin authentication
-		r.Post("/", s.createDevice)       // Manual device creation (testing only - normally auto-discovered)
-		r.Delete("/{id}", s.deleteDevice) // Hard delete (testing/cleanup only)
-	})
+		// Devices
+		r.Route("/devices", func(r chi.Router) {
+			r.Get("/", s.listDevices)
+			r.Get("/{id}", s.getDevice)
+			// Demo/Testing endpoints - In production, guard with admin authentication
+			r.Post("/", s.createDevice)       // Manual device creation (testing only - normally auto-discovered)
+			r.Delete("/{id}", s.deleteDevice) // Hard delete (testing/cleanup only)
+		})
 
-	// Metrics
-	s.router.Route("/metrics", func(r chi.Router) {
-		r.Get("/{sensorID}", s.getMetrics)
-	})
+		// Metrics
+		r.Route("/metrics", func(r chi.Router) {
+			r.Get("/{sensorID}", s.getMetrics)
+		})
 
-	// Discovery & Onboarding
-	s.router.Get("/api/discovery", s.handleDiscovery)
-	s.router.Post("/api/onboard/device", s.handleOnboardDevice)
-	s.router.Post("/api/onboard/broker", s.handleOnboardBroker)
+		// Discovery & Onboarding
+		r.Get("/discovery", s.handleDiscovery)
+		r.Post("/onboard/device", s.handleOnboardDevice)
+		r.Post("/onboard/broker", s.handleOnboardBroker)
 
-	// AI proxy
-	s.router.Route("/ai", func(r chi.Router) {
-		r.Post("/chat", s.aiChat)
-		r.Post("/analyze", s.aiAnalyze)
+		// AI proxy
+		r.Route("/ai", func(r chi.Router) {
+			r.Post("/chat", s.aiChat)
+			r.Post("/analyze", s.aiAnalyze)
+		})
+
+		// Events
+		r.Get("/events", s.handleEvents)
 	})
 }
 
@@ -269,6 +286,40 @@ func (s *Server) aiAnalyze(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(resp)
 }
 
+// toInterfaceSlice converts a slice of any type to a slice of empty interfaces
+
+// handleEvents streams real-time updates via SSE
+func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+
+	// Subscribe to event bus for delta events
+	ch := s.eventBus.Subscribe()
+	defer s.eventBus.Unsubscribe(ch)
+
+	heartbeat := time.NewTicker(15 * time.Second)
+	defer heartbeat.Stop()
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case event := <-ch:
+			data, _ := json.Marshal(event)
+			fmt.Fprintf(w, "data: %s\n\n", data)
+			if f, ok := w.(http.Flusher); ok {
+				f.Flush()
+			}
+		case <-heartbeat.C:
+			// Send SSE comment as heartbeat
+			fmt.Fprintf(w, ": heartbeat\n\n")
+			if f, ok := w.(http.Flusher); ok {
+				f.Flush()
+			}
+		}
+	}
+}
+
 // ==================================================================================
 // Demo/Testing Endpoints - In production, add admin authentication middleware
 // ==================================================================================
@@ -297,6 +348,11 @@ func (s *Server) createDevice(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Publish device added event
+	if s.eventBus != nil {
+		s.eventBus.Publish(Event{Type: DeviceAdded, Data: device})
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(device)
 }
@@ -309,6 +365,11 @@ func (s *Server) deleteDevice(w http.ResponseWriter, r *http.Request) {
 	if err := s.deviceRepo.Delete(ctx, id); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
+	}
+
+	// Publish device removed event
+	if s.eventBus != nil {
+		s.eventBus.Publish(Event{Type: DeviceRemoved, Data: map[string]string{"id": id}})
 	}
 
 	w.WriteHeader(http.StatusNoContent)
@@ -337,6 +398,11 @@ func (s *Server) createIncident(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Publish incident added event
+	if s.eventBus != nil {
+		s.eventBus.Publish(Event{Type: IncidentAdded, Data: incident})
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(incident)
 }
@@ -350,6 +416,11 @@ func (s *Server) deleteIncident(w http.ResponseWriter, r *http.Request) {
 	if err := s.incidentService.Delete(ctx, id); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
+	}
+
+	// Publish incident removed event
+	if s.eventBus != nil {
+		s.eventBus.Publish(Event{Type: IncidentRemoved, Data: map[string]string{"id": id}})
 	}
 
 	w.WriteHeader(http.StatusNoContent)
