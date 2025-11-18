@@ -70,3 +70,8 @@ docker/mosquitto/log/
 
 # Prometheus data
 prometheus-data/
+
+# Web UI
+web-ui/node_modules/
+web-ui/dist/
+web-ui/.vite/
