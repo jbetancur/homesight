@@ -41,6 +41,12 @@ func (s *Server) handleDiscovery(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Check if test mode is enabled
+	if r.URL.Query().Get("test") == "true" {
+		s.handleTestDiscovery(w, r)
+		return
+	}
+
 	// Run broker and device discovery in parallel
 	type discoveryResult struct {
 		brokers []DiscoveredBroker
@@ -165,6 +171,162 @@ func (s *Server) handleDiscovery(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(response)
 }
 
+// handleTestDiscovery returns simulated devices for testing/demo
+// This simulates discovery of various power/water/HVAC devices
+func (s *Server) handleTestDiscovery(w http.ResponseWriter, r *http.Request) {
+	now := time.Now()
+
+	// Simulate a wide range of power/water/HVAC devices for POC
+	devices := []DiscoveredDevice{
+		// Water safety & management devices
+		{
+			ID:           "water-heater-001",
+			Name:         "AO Smith Water Heater",
+			Type:         "water_heater",
+			Integration:  "mqtt",
+			Manufacturer: "AO Smith",
+			Model:        "EG12-50R-055D",
+			Metadata: map[string]string{
+				"capacity":     "50 gallons",
+				"power":        "4500W",
+			},
+			DiscoveredAt: now,
+		},
+		{
+			ID:           "sump-pump-basement",
+			Name:         "Zoeller Sump Pump",
+			Type:         "sump_pump",
+			Integration:  "mqtt",
+			Manufacturer: "Zoeller",
+			Model:        "M53",
+			Metadata: map[string]string{
+				"hp":           "1/3",
+				"flow_rate":    "43 GPM",
+			},
+			DiscoveredAt: now,
+		},
+		{
+			ID:           "kitchen-leak-sensor",
+			Name:         "Kitchen Sink Leak Detector",
+			Type:         "water_leak",
+			Integration:  "zigbee2mqtt",
+			Manufacturer: "Aqara",
+			Model:        "SJCGQ11LM",
+			DiscoveredAt: now,
+		},
+		{
+			ID:           "water-shutoff-main",
+			Name:         "Main Water Shutoff Valve",
+			Type:         "water_valve",
+			Integration:  "zwave",
+			Manufacturer: "Dome",
+			Model:        "DMWV1",
+			DiscoveredAt: now,
+		},
+		{
+			ID:           "bathroom-leak-sensor",
+			Name:         "Bathroom Leak Detector",
+			Type:         "water_leak",
+			Integration:  "zigbee2mqtt",
+			Manufacturer: "Aqara",
+			Model:        "SJCGQ11LM",
+			DiscoveredAt: now,
+		},
+
+		// HVAC devices
+		{
+			ID:           "thermostat-main-floor",
+			Name:         "Ecobee SmartThermostat",
+			Type:         "thermostat",
+			Integration:  "mqtt",
+			Manufacturer: "Ecobee",
+			Model:        "EB-STATE5-01",
+			Metadata: map[string]string{
+				"stages_heat":  "2",
+				"stages_cool":  "2",
+			},
+			DiscoveredAt: now,
+		},
+		{
+			ID:           "furnace-monitor",
+			Name:         "Trane Furnace Monitor",
+			Type:         "furnace",
+			Integration:  "esphome",
+			Manufacturer: "Trane",
+			Model:        "S9V2-VS100",
+			Metadata: map[string]string{
+				"btu":          "100000",
+				"efficiency":   "96% AFUE",
+			},
+			DiscoveredAt: now,
+		},
+		{
+			ID:           "hvac-temp-sensor-bedroom",
+			Name:         "Bedroom Temperature Sensor",
+			Type:         "temperature",
+			Integration:  "zigbee2mqtt",
+			Manufacturer: "Aqara",
+			Model:        "WSDCGQ11LM",
+			DiscoveredAt: now,
+		},
+
+		// Power monitoring devices
+		{
+			ID:           "circuit-monitor-main",
+			Name:         "Emporia Vue Energy Monitor",
+			Type:         "energy_monitor",
+			Integration:  "esphome",
+			Manufacturer: "Emporia",
+			Model:        "Vue-002",
+			Metadata: map[string]string{
+				"circuits":     "16",
+			},
+			DiscoveredAt: now,
+		},
+		{
+			ID:           "smart-plug-hvac",
+			Name:         "HVAC Equipment Smart Plug",
+			Type:         "smart_plug",
+			Integration:  "shelly",
+			Manufacturer: "Shelly",
+			Model:        "Plug S",
+			Metadata: map[string]string{
+				"max_load":     "2500W",
+			},
+			DiscoveredAt: now,
+		},
+		{
+			ID:           "backup-battery-sump",
+			Name:         "Sump Pump Battery Backup",
+			Type:         "battery_backup",
+			Integration:  "mqtt",
+			Manufacturer: "Wayne",
+			Model:        "ESP25",
+			DiscoveredAt: now,
+		},
+	}
+
+	// Simulate MQTT broker discovery
+	brokers := []DiscoveredBroker{
+		{
+			Name:         "Home Assistant",
+			Host:         "homeassistant.local",
+			Port:         1883,
+			URL:          "tcp://homeassistant.local:1883",
+			DiscoveredAt: now,
+		},
+	}
+
+	response := map[string]interface{}{
+		"brokers":   brokers,
+		"devices":   devices,
+		"test_mode": true,
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(response)
+}
+
 // handleOnboardBroker onboards a discovered MQTT broker
 func (s *Server) handleOnboardBroker(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -207,6 +369,10 @@ func (s *Server) handleOnboardDevice(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+
+	// Set last_seen to now when onboarding
+	device.LastSeen = time.Now()
+	device.Enabled = true
 
 	// Create the device using Upsert
 	if err := s.deviceRepo.Upsert(r.Context(), &device); err != nil {

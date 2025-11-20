@@ -164,23 +164,26 @@ HomeSight uses Retrieval-Augmented Generation (RAG) to provide context-aware inc
 
 ### Supported Manufacturers (Auto-Fetch)
 
-- **Aqara**: Water leak sensors, temperature sensors, door/window sensors
-- **Shelly**: Relays, sensors, smart plugs (coming soon)
-- **Generic**: Fallback templates for common devices
+The AI service uses OpenAI's GPT-4o-mini to intelligently search and fetch manufacturer documentation for any device. The system:
 
-Want more manufacturers? Contribute to the fetcher!
+- Automatically identifies device manufacturer and model from discovery metadata
+- Uses LLM-powered search to find official manuals and documentation
+- Downloads and caches PDFs locally for offline use
+- Indexes documents into the RAG vector database
+- Falls back to generic templates if specific docs aren't found
 
-### Current Knowledge Base
+**Dynamic Knowledge Base**: The RAG system builds its knowledge base automatically as you onboard devices. Each device onboarding triggers:
 
-- Aqara Water Leak Sensor Manual
-- Aqara Temperature & Humidity Sensor Manual
-- Aqara Door/Window Sensor Manual
-- Emergency Plumbing Guide
-- Water Heater Maintenance Manual
-- International Residential Code (IRC) - Plumbing
-- Home Winterization and Freeze Prevention Guide
+1. **Smart Document Discovery**: LLM searches for official manufacturer docs
+2. **Automatic Download**: PDFs cached to `~/.homesight/manuals/`
+3. **Background Indexing**: Documents embedded into ChromaDB
+4. **Instant Availability**: New docs immediately available for incident analysis
 
-More manuals are auto-fetched as devices are added!
+Check what's currently indexed:
+
+```bash
+curl http://localhost:8001/rag/status
+```
 
 ### Manual Override (Optional)
 
@@ -303,13 +306,13 @@ graph TB
     end
 
     subgraph "AI Sidecar :8001"
-        AI_API[FastAPI Server]
-        DOC_FETCH[Document Fetcher<br/>LLM-Powered]
-        RAG[RAG Engine<br/>- FastEmbed Local<br/>- ChromaDB Storage<br/>- Offline Queries]
+        AI_API[FastAPI Server<br/>- Incident Analysis<br/>- Chat Interface]
+        DOC_FETCH[Document Fetcher<br/>- LLM-Powered Search<br/>- Auto-Download PDFs]
+        RAG[RAG Engine<br/>- FastEmbed Embeddings<br/>- ChromaDB Vector DB<br/>- Semantic Search]
     end
-    
-    subgraph "Cloud Services (Optional)"
-        OPENAI[OpenAI API<br/>- GPT-4o-mini for Doc Finding<br/>- Used during setup only]
+
+    subgraph "Cloud Services (Setup Only)"
+        OPENAI[OpenAI API<br/>- GPT-4o-mini<br/>- Doc Discovery Only<br/>~$0.001 per device]
     end
 
     subgraph "Monitoring"
@@ -345,9 +348,10 @@ graph TB
     
     %% AI connections
     AI_CLIENT -->|HTTP| AI_API
-    AI_API --> RAG
-    DOC_FETCH -.->|Setup Only| OPENAI
-    DOC_FETCH --> RAG
+    AI_API -->|Incident Analysis| RAG
+    API -->|Device Onboarded Event| DOC_FETCH
+    DOC_FETCH -.->|Find Docs| OPENAI
+    DOC_FETCH -->|Index PDFs| RAG
     
     %% Metrics
     METRICS -->|Scrape| PROM
@@ -389,22 +393,38 @@ graph TB
 
 ### AI Architecture Details
 
-**Fully Offline Operation:**
-- **Embeddings**: FastEmbed (BAAI/bge-small-en-v1.5) runs locally - ~50MB model
-- **Vector Storage**: ChromaDB persists embeddings locally
-- **RAG Queries**: 100% offline after documents are indexed
-- **No API calls** during normal incident analysis
+**Hybrid Architecture (Local + Cloud):**
 
-**Optional Cloud Services (Setup Only):**
-- **OpenAI GPT-4o-mini**: Used only during device onboarding to intelligently find manufacturer documentation
-- **Cost**: ~$0.001 per device discovery (one-time)
-- **Fallback**: Template-based documentation if no API key provided
+**Local Components (Always Running):**
+
+- **Embeddings**: FastEmbed (BAAI/bge-small-en-v1.5) runs locally - ~50MB model
+- **Vector Storage**: ChromaDB persists all embeddings locally
+- **RAG Queries**: 100% offline semantic search and retrieval
+- **Incident Analysis**: All AI recommendations generated locally using RAG context
+
+**Cloud Services (Device Onboarding Only):**
+
+- **OpenAI GPT-4o-mini**: Used when onboarding devices to find manufacturer documentation
+- **Trigger**: Automatic webhook from main daemon when device is discovered
+- **Process**: LLM searches web for device manuals → downloads PDF → indexes locally
+- **Cost**: ~$0.001 per device (one-time)
+- **Fallback**: Generic templates if no API key provided
+
+**Workflow:**
+
+1. **Discovery**: Device found via MQTT/mDNS
+2. **Onboarding**: User adds device through UI
+3. **Auto-Fetch**: AI service receives webhook, uses OpenAI to find manual
+4. **Index**: PDF downloaded and embedded into local ChromaDB
+5. **Analysis**: Future incidents use local RAG (no cloud calls)
 
 **Benefits:**
-- ✅ Privacy: Data never leaves your network during operation
-- ✅ Fast: Local embeddings, no API latency
-- ✅ Reliable: Works without internet after setup
-- ✅ Cost-effective: Only pay for initial document discovery (~$0.50/year)
+
+- ✅ Privacy: Incident data never leaves your network
+- ✅ Fast: Local embeddings, no API latency for analysis
+- ✅ Reliable: Works offline after initial device setup
+- ✅ Cost-effective: ~$0.001 per device, zero ongoing costs
+- ✅ Dynamic: Knowledge base grows automatically with your home
 
 ## Auto-Resolution
 

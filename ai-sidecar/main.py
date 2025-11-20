@@ -6,6 +6,7 @@ It provides a REST API for chat, metric analysis, and incident explanation.
 """
 
 from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Dict, List, Optional, Any
 import uvicorn
@@ -23,6 +24,15 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(title="HomeSight AI Service")
 
+# Add CORS middleware to allow frontend requests
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # In production, specify your frontend URL
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 # Global instances (lazy loaded)
 llm = None
 rag_engine = None
@@ -31,13 +41,27 @@ document_fetcher = None
 # Load config to get OpenAI API key
 def load_config():
     """Load configuration from config.yaml"""
-    config_path = os.getenv("HOMESIGHT_CONFIG", "../config.yaml")
-    config_file = Path(__file__).parent.parent / config_path if not os.path.isabs(config_path) else Path(config_path)
-    
-    if not config_file.exists():
-        logger.warning(f"Config file not found at {config_file}")
+    config_path = os.getenv("HOMESIGHT_CONFIG", "config.yaml")
+
+    # Try multiple locations
+    possible_paths = [
+        Path(config_path) if os.path.isabs(config_path) else None,
+        Path(__file__).parent.parent / config_path,
+        Path.cwd() / config_path,
+        Path.cwd().parent / config_path,
+    ]
+
+    config_file = None
+    for path in possible_paths:
+        if path and path.exists():
+            config_file = path
+            break
+
+    if not config_file:
+        logger.warning(f"Config file not found. Tried: {[str(p) for p in possible_paths if p]}")
         return {}
-    
+
+    logger.info(f"Loading config from: {config_file}")
     try:
         with open(config_file, 'r') as f:
             return yaml.safe_load(f) or {}
@@ -71,47 +95,29 @@ class AnalyzeResponse(BaseModel):
 
 
 def initialize_llm():
-    """Initialize the LLM model (lazy loading)"""
+    """Initialize the OpenAI client (lazy loading)"""
     global llm
-    
+
     if llm is not None:
         return llm
-    
+
     try:
-        from llama_cpp import Llama
-        
-        # Look for model in common locations
-        model_paths = [
-            "/var/lib/homesight/models/llama-2-7b-chat.gguf",
-            "./models/llama-2-7b-chat.gguf",
-            str(Path.home() / "models" / "llama-2-7b-chat.gguf"),
-        ]
-        
-        model_path = None
-        for path in model_paths:
-            if Path(path).exists():
-                model_path = path
-                break
-        
-        if not model_path:
-            logger.warning("No LLM model found, using mock responses")
+        from openai import OpenAI
+
+        api_key = config.get("ai", {}).get("openai_api_key")
+        if not api_key:
+            logger.warning("No OpenAI API key found in config")
             return None
-        
-        logger.info(f"Loading LLM model from {model_path}")
-        llm = Llama(
-            model_path=model_path,
-            n_ctx=2048,
-            n_threads=4,
-            n_gpu_layers=0,  # Set > 0 if using GPU
-        )
-        logger.info("LLM model loaded successfully")
+
+        llm = OpenAI(api_key=api_key)
+        logger.info("OpenAI client initialized successfully")
         return llm
-        
+
     except ImportError:
-        logger.warning("llama-cpp-python not installed, using mock responses")
+        logger.error("openai package not installed")
         return None
     except Exception as e:
-        logger.error(f"Failed to load LLM: {e}")
+        logger.error(f"Failed to initialize OpenAI client: {e}")
         return None
 
 
@@ -162,25 +168,29 @@ def initialize_rag():
         return None
 
 
-def generate_response(prompt: str) -> str:
-    """Generate a response using LLM or mock"""
+def generate_response(prompt: str, system_prompt: str = None) -> str:
+    """Generate a response using OpenAI"""
     llm_instance = initialize_llm()
-    
+
     if llm_instance is None:
-        # Mock response when LLM is not available
-        return f"[Mock Response] I understand you're asking about: {prompt[:100]}. In a production environment, this would be answered by a local LLM."
-    
+        return "AI service is not configured. Please check your OpenAI API key in config.yaml."
+
     try:
-        output = llm_instance(
-            prompt,
+        messages = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append({"role": "user", "content": prompt})
+
+        response = llm_instance.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=messages,
             max_tokens=512,
             temperature=0.7,
-            stop=["Human:", "\n\n"],
         )
-        return output["choices"][0]["text"].strip()
+        return response.choices[0].message.content.strip()
     except Exception as e:
-        logger.error(f"LLM generation failed: {e}")
-        return "I apologize, but I'm having trouble generating a response right now."
+        logger.error(f"OpenAI API call failed: {e}")
+        return f"I apologize, but I'm having trouble generating a response: {str(e)}"
 
 
 @app.get("/health")
@@ -228,21 +238,35 @@ async def rag_status():
 
 @app.post("/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest):
-    """Chat endpoint for conversational AI"""
+    """Chat endpoint for conversational AI with RAG enhancement"""
     try:
-        # Build context-aware prompt
-        context_str = ""
-        if request.context:
-            context_str = f"\nContext: {request.context}\n"
-        
-        prompt = f"""You are a helpful home maintenance assistant for HomeSight, a home monitoring system.
+        # Build system prompt
+        system_prompt = "You are a helpful home maintenance assistant for HomeSight, a home monitoring system. Provide clear, actionable advice for homeowners dealing with device issues and incidents."
 
-{context_str}
-Human: {request.message}
-Assistant: """
-        
-        response = generate_response(prompt)
-        return ChatResponse(response=response)
+        # Build user message with context
+        user_message = request.message
+        if request.context:
+            user_message = f"Context: {request.context}\n\nQuestion: {request.message}"
+
+        # Try to enhance with RAG if relevant
+        rag_context = ""
+        rag_instance = initialize_rag()
+        if rag_instance is not None:
+            try:
+                results = rag_instance.query(request.message, n_results=2)
+                if results and len(results) > 0:
+                    rag_context = "\n\nRelevant documentation:\n"
+                    for result in results:
+                        if result.get("relevance_score", 0) > 0.3:
+                            source = result.get("metadata", {}).get("source", "Unknown")
+                            text = result.get("text", "")[:300]
+                            rag_context += f"\n- {source}: {text}\n"
+            except Exception as e:
+                logger.error(f"RAG enhancement failed for chat: {e}")
+
+        full_message = user_message + rag_context
+        response_text = generate_response(full_message, system_prompt)
+        return ChatResponse(response=response_text)
         
     except Exception as e:
         logger.error(f"Chat error: {e}")
