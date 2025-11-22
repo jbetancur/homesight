@@ -49,8 +49,26 @@ services:
       - "host.docker.internal:host-gateway"
     # To give access to host devices (USB / serial), add 'devices' entries here or mount them at runtime.
 
+  grafana:
+    image: grafana/grafana:latest
+    container_name: homesight-grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./docker/grafana/provisioning:/etc/grafana/provisioning:ro
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+    networks:
+      - homesight
+
 volumes:
   prometheus_data:
+  grafana_data:
 
 networks:
   homesight:

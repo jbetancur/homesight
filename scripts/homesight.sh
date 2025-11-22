@@ -95,11 +95,12 @@ start_docker() {
     echo -e "${GREEN}Starting Docker services...${NC}"
 
     cd "$PROJECT_DIR"
-    docker-compose up -d prometheus 2>/dev/null
+    docker-compose up -d prometheus grafana 2>/dev/null
 
     if [ $? -eq 0 ]; then
         echo -e "${GREEN}✅ Docker services started${NC}"
         echo "   Prometheus: http://localhost:9090"
+        echo "   Grafana: http://localhost:3000 (admin/admin)"
     else
         echo -e "${YELLOW}⚠️  Docker services not started${NC}"
     fi
@@ -165,7 +166,7 @@ show_status() {
     # AI Sidecar
     if docker ps --format '{{.Names}}' 2>/dev/null | grep -q '^homesight-ai-sidecar$'; then
         echo -e "${GREEN}✅ AI Sidecar: Running in Docker${NC}"
-        if curl -s --max-time 2 http://localhost:8001/health > /dev/null 2>&1; then
+        if curl -s --max-time 5 http://localhost:8001/health > /dev/null 2>&1; then
             echo "   └─ API: http://localhost:8001 (healthy)"
         else
             echo "   └─ API: Not responding"
@@ -224,9 +225,9 @@ case "${1:-}" in
         start_ai
         start_docker
 
-        # Wait for services to be fully ready (AI sidecar takes longer)
+        # Wait for services to be fully ready (AI sidecar loads LLM model)
         echo "Waiting for services to be ready..."
-        sleep 4
+        sleep 15
 
         echo ""
         show_status
@@ -261,9 +262,9 @@ case "${1:-}" in
         start_ai
         start_docker
 
-        # Wait for services to be fully ready (AI sidecar takes longer)
+        # Wait for services to be fully ready (AI sidecar loads LLM model)
         echo "Waiting for services to be ready..."
-        sleep 4
+        sleep 15
 
         echo ""
         show_status

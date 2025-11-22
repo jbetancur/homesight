@@ -11,6 +11,7 @@ Clean, modular architecture with:
 
 from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import Response
 import uvicorn
 import logging
 from pathlib import Path
@@ -18,6 +19,9 @@ from contextlib import asynccontextmanager
 
 # Configuration
 from config import get_config
+
+# Metrics
+from metrics import get_metrics, active_sessions
 
 # Models
 from models.chat import ChatRequest, ChatResponse
@@ -162,6 +166,10 @@ async def lifespan(app: FastAPI):
             try:
                 await asyncio.sleep(2)  # Update every 2 seconds
                 global cached_health_status
+
+                active_session_count = len(session_service._sessions) if session_service else 0
+                doc_count = getattr(rag_engine, '_cached_count', 0) if rag_engine else 0
+
                 cached_health_status = {
                     "status": "healthy",
                     "llm": {
@@ -169,12 +177,16 @@ async def lifespan(app: FastAPI):
                     } if llm_provider else {"available": False},
                     "rag": {
                         "available": rag_engine is not None,
-                        "documents": getattr(rag_engine, '_cached_count', 0) if rag_engine else 0
+                        "documents": doc_count
                     },
                     "sessions": {
-                        "active": len(session_service._sessions) if session_service else 0
+                        "active": active_session_count
                     }
                 }
+
+                # Update Prometheus metrics
+                active_sessions.set(active_session_count)
+
             except Exception as e:
                 logger.error(f"Error updating health status: {e}")
 
@@ -219,6 +231,17 @@ async def health_check():
     database queries, or other operations.
     """
     return cached_health_status
+
+
+# Prometheus metrics endpoint
+@app.get("/metrics")
+async def metrics():
+    """Prometheus metrics endpoint
+
+    Returns metrics in Prometheus text format.
+    Scrape this endpoint with Prometheus to collect performance data.
+    """
+    return Response(content=get_metrics(), media_type="text/plain; charset=utf-8")
 
 
 # Chat endpoint with multi-turn conversation and function calling
