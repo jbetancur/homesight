@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -20,15 +21,17 @@ import (
 
 // Server is the REST API server
 type Server struct {
-	router            *chi.Mux
-	incidentService   incidents.IncidentService
-	deviceRepo        db.DeviceRepository
-	metricsSink       metrics.MetricsSink
-	aiClient          ai.Client
-	addr              string
-	discoveryListener *discovery.MQTTDiscoveryListener
-	discoveryMutex    sync.RWMutex
-	eventBus          *EventBus
+	router              *chi.Mux
+	incidentService     incidents.IncidentService
+	deviceRepo          db.DeviceRepository
+	sensorRepo          db.SensorRepository
+	knowledgeBaseRepo   db.KnowledgeBaseRepository
+	metricsSink         metrics.MetricsSink
+	aiClient            ai.Client
+	addr                string
+	discoveryListener   *discovery.MQTTDiscoveryListener
+	discoveryMutex      sync.RWMutex
+	eventBus            *EventBus
 }
 
 // NewServer creates a new API server
@@ -36,17 +39,21 @@ func NewServer(
 	addr string,
 	incidentService incidents.IncidentService,
 	deviceRepo db.DeviceRepository,
+	sensorRepo db.SensorRepository,
+	knowledgeBaseRepo db.KnowledgeBaseRepository,
 	metricsSink metrics.MetricsSink,
 	aiClient ai.Client,
 ) *Server {
 	s := &Server{
-		router:          chi.NewRouter(),
-		incidentService: incidentService,
-		deviceRepo:      deviceRepo,
-		metricsSink:     metricsSink,
-		aiClient:        aiClient,
-		addr:            addr,
-		eventBus:        NewEventBus(),
+		router:            chi.NewRouter(),
+		incidentService:   incidentService,
+		deviceRepo:        deviceRepo,
+		sensorRepo:        sensorRepo,
+		knowledgeBaseRepo: knowledgeBaseRepo,
+		metricsSink:       metricsSink,
+		aiClient:          aiClient,
+		addr:              addr,
+		eventBus:          NewEventBus(),
 	}
 
 	s.setupRoutes()
@@ -97,8 +104,11 @@ func (s *Server) setupRoutes() {
 		r.Route("/devices", func(r chi.Router) {
 			r.Get("/", s.listDevices)
 			r.Get("/{id}", s.getDevice)
-			r.Post("/{id}/reingest-docs", s.handleReingestDeviceDocs)   // Re-trigger document discovery for a device
-			r.Post("/{id}/docs-status", s.handleUpdateDeviceDocsStatus) // Update device documentation status (called by AI sidecar)
+			r.Get("/{id}/sensors", s.listDeviceSensors)
+			r.Get("/{id}/sensors/{sensorID}", s.getDeviceSensor)
+			r.Get("/{id}/knowledge-base", s.getDeviceKnowledgeBase)
+			r.Post("/{id}/reingest-docs", s.handleReingestDeviceDocs) // Re-trigger document discovery for a device
+			r.Post("/{id}/docs-status", s.handleUpdateDeviceDocsStatus) // Update device documentation status and generate KB articles (called by AI sidecar)
 			// Demo/Testing endpoints - In production, guard with admin authentication
 			r.Post("/", s.createDevice)       // Manual device creation (testing only - normally auto-discovered)
 			r.Delete("/{id}", s.deleteDevice) // Hard delete (testing/cleanup only)
@@ -136,38 +146,6 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		"status": "healthy",
 		"time":   time.Now().Format(time.RFC3339),
 	})
-}
-
-// handleSystemStatus returns summary stats and service list
-// Individual service status endpoints (/api/status/{service}) are called by UI
-func (s *Server) handleSystemStatus(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-
-	// Summary counts (fast, no blocking calls)
-	devices, _ := s.deviceRepo.List(ctx)
-	openIncidents, _ := s.incidentService.List(ctx, map[string]any{"status": "open"})
-	allIncidents, _ := s.incidentService.List(ctx, map[string]any{})
-
-	// Service list (no health checks here - UI calls individual endpoints)
-	services := map[string]interface{}{
-		"ai_sidecar":     map[string]string{"name": "AI Sidecar"},
-		"prometheus":     map[string]string{"name": "Prometheus", "url": "http://localhost:9090"},
-		"database":       map[string]string{"name": "SQLite Database"},
-		"mqtt_discovery": map[string]string{"name": "MQTT Discovery"},
-	}
-
-	status := map[string]interface{}{
-		"timestamp": time.Now().Format(time.RFC3339),
-		"services":  services,
-		"summary": map[string]interface{}{
-			"devices":         len(devices),
-			"open_incidents":  len(openIncidents),
-			"total_incidents": len(allIncidents),
-		},
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(status)
 }
 
 // handleAIStatus returns AI sidecar health status
@@ -350,6 +328,274 @@ func (s *Server) getMetrics(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(points)
 }
 
+// listDeviceSensors returns all sensors for a device
+func (s *Server) listDeviceSensors(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	deviceID := chi.URLParam(r, "id")
+
+	// Verify device exists
+	device, err := s.deviceRepo.Get(ctx, deviceID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if device == nil {
+		http.Error(w, "device not found", http.StatusNotFound)
+		return
+	}
+
+	// Get sensors for this device
+	sensors, err := s.sensorRepo.ListByDevice(ctx, deviceID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(sensors)
+}
+
+// getDeviceSensor returns a specific sensor for a device
+func (s *Server) getDeviceSensor(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	deviceID := chi.URLParam(r, "id")
+	sensorID := chi.URLParam(r, "sensorID")
+
+	// Verify device exists
+	device, err := s.deviceRepo.Get(ctx, deviceID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if device == nil {
+		http.Error(w, "device not found", http.StatusNotFound)
+		return
+	}
+
+	// Get sensor
+	sensor, err := s.sensorRepo.Get(ctx, sensorID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if sensor == nil {
+		http.Error(w, "sensor not found", http.StatusNotFound)
+		return
+	}
+
+	// Verify sensor belongs to this device
+	if sensor.DeviceID != deviceID {
+		http.Error(w, "sensor not found", http.StatusNotFound)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(sensor)
+}
+
+// getDeviceKnowledgeBase retrieves pre-generated knowledge base articles for a device from database
+func (s *Server) getDeviceKnowledgeBase(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	deviceID := chi.URLParam(r, "id")
+
+	// Verify device exists
+	device, err := s.deviceRepo.Get(ctx, deviceID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if device == nil {
+		http.Error(w, "device not found", http.StatusNotFound)
+		return
+	}
+
+	// Retrieve pre-generated articles from database
+	dbArticles, err := s.knowledgeBaseRepo.GetByDevice(ctx, deviceID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Convert database articles to JSON format
+	articles := []map[string]interface{}{}
+	for _, article := range dbArticles {
+		articles = append(articles, map[string]interface{}{
+			"title":       article.Title,
+			"type":        article.Type,
+			"source":      article.Source,
+			"description": article.Description,
+			"available":   article.Available,
+		})
+	}
+
+	// Return knowledge base response
+	knowledgeBase := map[string]interface{}{
+		"device_id":     deviceID,
+		"device_name":   device.Name,
+		"docs_status":   device.DocsStatus,
+		"docs_ingested": device.DocsIngested,
+		"ingested_at":   device.DocsIngestedAt,
+		"articles":      articles,
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(knowledgeBase)
+}
+
+// generateDeviceKnowledgeBase generates and stores knowledge base articles for a device
+func (s *Server) generateDeviceKnowledgeBase(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	deviceID := chi.URLParam(r, "id")
+
+	// Verify device exists
+	device, err := s.deviceRepo.Get(ctx, deviceID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if device == nil {
+		http.Error(w, "device not found", http.StatusNotFound)
+		return
+	}
+
+	// Build device info for AI queries
+	deviceInfo := fmt.Sprintf("%s (%s) - %s device", device.Name, device.Type, device.Integration)
+	if device.Metadata != nil {
+		if mfg, ok := device.Metadata["manufacturer"]; ok {
+			if model, ok := device.Metadata["model"]; ok {
+				deviceInfo = fmt.Sprintf("%s - %s %s", device.Name, mfg, model)
+			}
+		}
+	}
+
+	// Create a timeout context for AI calls
+	aiCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+
+	// Generate articles concurrently from AI sidecar
+	articles := []map[string]interface{}{}
+	overviewChan := make(chan string, 1)
+	troubleshootChan := make(chan string, 1)
+	docChan := make(chan string, 1)
+
+	// Overview - launch concurrent
+	go func() {
+		overviewResp, err := s.aiClient.Chat(aiCtx, ai.ChatRequest{
+			Message: fmt.Sprintf("Provide a comprehensive overview of the %s device. Include typical use cases, key features, and maintenance tips. Keep it concise.", deviceInfo),
+		})
+		if err == nil && overviewResp.Response != "" {
+			overviewChan <- overviewResp.Response
+		}
+		close(overviewChan)
+	}()
+
+	// Troubleshooting - launch concurrent
+	go func() {
+		troubleshootResp, err := s.aiClient.Chat(aiCtx, ai.ChatRequest{
+			Message: fmt.Sprintf("Provide a troubleshooting guide for the %s device. List common issues and solutions. Keep it concise.", deviceInfo),
+		})
+		if err == nil && troubleshootResp.Response != "" {
+			troubleshootChan <- troubleshootResp.Response
+		}
+		close(troubleshootChan)
+	}()
+
+	// Documentation - launch concurrent
+	go func() {
+		if device.Metadata != nil && device.Metadata["manufacturer"] != "" {
+			docResp, err := s.aiClient.Chat(aiCtx, ai.ChatRequest{
+				Message: fmt.Sprintf("Summarize the official technical specifications and documentation for the %s. Include important settings, specifications, and compatibility information. Keep it concise.", deviceInfo),
+			})
+			if err == nil && docResp.Response != "" {
+				docChan <- docResp.Response
+			}
+		}
+		close(docChan)
+	}()
+
+	// Collect results with defaults
+	overviewContent := "Comprehensive overview of " + device.Name + " including typical use cases, configuration, and maintenance"
+	troubleshootContent := "Common issues and solutions for " + device.Name
+	docContent := "Official manual and technical specifications"
+
+	// Wait for results or timeout
+	overviewContent = getValue(overviewChan, overviewContent)
+	troubleshootContent = getValue(troubleshootChan, troubleshootContent)
+	docContent = getValue(docChan, docContent)
+
+	// Delete existing articles for this device
+	if err := s.knowledgeBaseRepo.DeleteByDevice(ctx, deviceID); err != nil {
+		http.Error(w, fmt.Sprintf("failed to delete old articles: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	now := time.Now()
+
+	// Store Device Overview
+	overviewArticle := &db.KnowledgeBaseArticle{
+		ID:          fmt.Sprintf("%s-overview", deviceID),
+		DeviceID:    deviceID,
+		Title:       "Device Overview",
+		Type:        "generated",
+		Source:      "AI-Generated Knowledge Base",
+		Description: overviewContent,
+		Available:   true,
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}
+	if err := s.knowledgeBaseRepo.Upsert(ctx, overviewArticle); err != nil {
+		http.Error(w, fmt.Sprintf("failed to store overview article: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	// Store Troubleshooting Guide
+	troubleshootArticle := &db.KnowledgeBaseArticle{
+		ID:          fmt.Sprintf("%s-troubleshoot", deviceID),
+		DeviceID:    deviceID,
+		Title:       "Troubleshooting Guide",
+		Type:        "generated",
+		Source:      "AI-Generated Knowledge Base",
+		Description: troubleshootContent,
+		Available:   true,
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}
+	if err := s.knowledgeBaseRepo.Upsert(ctx, troubleshootArticle); err != nil {
+		http.Error(w, fmt.Sprintf("failed to store troubleshoot article: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	// Store Official Documentation if available
+	if device.Metadata != nil && device.Metadata["manufacturer"] != "" {
+		docArticle := &db.KnowledgeBaseArticle{
+			ID:          fmt.Sprintf("%s-official-docs", deviceID),
+			DeviceID:    deviceID,
+			Title:       "Official Documentation",
+			Type:        "manufacturer",
+			Source:      "Official " + device.Metadata["manufacturer"] + " Documentation",
+			Description: docContent,
+			Available:   true,
+			CreatedAt:   now,
+			UpdatedAt:   now,
+		}
+		if err := s.knowledgeBaseRepo.Upsert(ctx, docArticle); err != nil {
+			http.Error(w, fmt.Sprintf("failed to store official docs article: %v", err), http.StatusInternalServerError)
+			return
+		}
+	}
+
+	// Return success with generated articles
+	response := map[string]interface{}{
+		"device_id": deviceID,
+		"status":    "success",
+		"message":   "Knowledge base articles generated and stored successfully",
+		"articles":  len(articles) + 2, // overview + troubleshoot + optional docs
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(response)
+}
+
 // aiChat proxies chat requests to AI sidecar
 func (s *Server) aiChat(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
@@ -389,8 +635,6 @@ func (s *Server) aiAnalyze(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(resp)
 }
-
-// toInterfaceSlice converts a slice of any type to a slice of empty interfaces
 
 // handleEvents streams real-time updates via SSE
 func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
@@ -533,4 +777,15 @@ func (s *Server) deleteIncident(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// getValue receives a value from a channel with a timeout fallback
+func getValue(ch <-chan string, defaultValue string) string {
+	select {
+	case value, ok := <-ch:
+		if ok && value != "" {
+			return value
+		}
+		return defaultValue
+	}
 }

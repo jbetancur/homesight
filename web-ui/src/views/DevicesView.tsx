@@ -1,5 +1,6 @@
 
 import { useEffect, useState, useRef, useCallback } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { Table, Badge, Loader, Stack, Title, Text, Card, Group, Paper, Button, Modal, ActionIcon, Tooltip } from '@mantine/core';
 import { Wifi, CheckCircle, Activity, Trash2, RefreshCw, FileText } from 'lucide-react';
 import { useEventSubscription } from '../useEventSubscription';
@@ -21,6 +22,7 @@ function getDeviceStatus(lastSeen: string) {
 }
 
 export function DevicesView() {
+  const navigate = useNavigate();
   const [devices, setDevices] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [offboardingId, setOffboardingId] = useState<string | null>(null);
@@ -183,11 +185,11 @@ export function DevicesView() {
               {devices.map((device: any) => {
                 const status = getDeviceStatus(device.last_seen);
                 return (
-                  <Table.Tr key={device.id}>
+                  <Table.Tr key={device.id} style={{ cursor: 'pointer' }} onClick={() => navigate(`/devices/${device.id}/overview`)}>
                     <Table.Td>
                       <Group gap="xs">
                         <Activity size={16} />
-                        <Text fw={500}>{device.name}</Text>
+                        <Text fw={500} style={{ color: '#228be6', textDecoration: 'underline' }}>{device.name}</Text>
                       </Group>
                     </Table.Td>
                     <Table.Td>

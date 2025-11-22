@@ -2,12 +2,16 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strconv"
 	"sync"
 	"time"
 
+	"github.com/homesight/homesight/internal/ai"
+	"github.com/homesight/homesight/internal/db"
 	"github.com/homesight/homesight/internal/discovery"
 	"github.com/homesight/homesight/internal/model"
 )
@@ -528,10 +532,146 @@ func (s *Server) handleUpdateDeviceDocsStatus(w http.ResponseWriter, r *http.Req
 		s.eventBus.Publish(Event{Type: DeviceUpdated, Data: device})
 	}
 
+	// Auto-generate knowledge base articles if docs were successfully ingested
+	if updateReq.Ingested && updateReq.Status == "success" {
+		// Launch knowledge base generation in the background to avoid blocking
+		go s.generateAndStoreKnowledgeBase(device)
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"status":  "updated",
 		"message": "Device documentation status updated",
 		"device":  device.ID,
 	})
+}
+
+// generateAndStoreKnowledgeBase generates knowledge base articles and stores them in the database
+func (s *Server) generateAndStoreKnowledgeBase(device *model.Device) {
+	// Build device info for AI queries
+	deviceInfo := fmt.Sprintf("%s (%s) - %s device", device.Name, device.Type, device.Integration)
+	if device.Metadata != nil {
+		if mfg, ok := device.Metadata["manufacturer"]; ok {
+			if model, ok := device.Metadata["model"]; ok {
+				deviceInfo = fmt.Sprintf("%s - %s %s", device.Name, mfg, model)
+			}
+		}
+	}
+
+	// Create a timeout context for AI calls
+	aiCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	// Generate articles concurrently from AI sidecar
+	overviewChan := make(chan string, 1)
+	troubleshootChan := make(chan string, 1)
+	docChan := make(chan string, 1)
+
+	// Overview
+	go func() {
+		overviewResp, err := s.aiClient.Chat(aiCtx, ai.ChatRequest{
+			Message: fmt.Sprintf("Provide a comprehensive overview of the %s device. Include typical use cases, key features, and maintenance tips. Keep it concise.", deviceInfo),
+		})
+		if err == nil && overviewResp.Response != "" {
+			overviewChan <- overviewResp.Response
+		}
+		close(overviewChan)
+	}()
+
+	// Troubleshooting
+	go func() {
+		troubleshootResp, err := s.aiClient.Chat(aiCtx, ai.ChatRequest{
+			Message: fmt.Sprintf("Provide a troubleshooting guide for the %s device. List common issues and solutions. Keep it concise.", deviceInfo),
+		})
+		if err == nil && troubleshootResp.Response != "" {
+			troubleshootChan <- troubleshootResp.Response
+		}
+		close(troubleshootChan)
+	}()
+
+	// Documentation
+	go func() {
+		if device.Metadata != nil && device.Metadata["manufacturer"] != "" {
+			docResp, err := s.aiClient.Chat(aiCtx, ai.ChatRequest{
+				Message: fmt.Sprintf("Summarize the official technical specifications and documentation for the %s. Include important settings, specifications, and compatibility information. Keep it concise.", deviceInfo),
+			})
+			if err == nil && docResp.Response != "" {
+				docChan <- docResp.Response
+			}
+		}
+		close(docChan)
+	}()
+
+	// Collect results with defaults
+	overviewContent := "Comprehensive overview of " + device.Name + " including typical use cases, configuration, and maintenance"
+	troubleshootContent := "Common issues and solutions for " + device.Name
+	docContent := "Official manual and technical specifications"
+
+	// Wait for results or timeout
+	overviewContent = getValue(overviewChan, overviewContent)
+	troubleshootContent = getValue(troubleshootChan, troubleshootContent)
+	docContent = getValue(docChan, docContent)
+
+	ctx := context.Background()
+
+	// Delete existing articles for this device
+	if err := s.knowledgeBaseRepo.DeleteByDevice(ctx, device.ID); err != nil {
+		fmt.Printf("Warning: failed to delete old KB articles for %s: %v\n", device.ID, err)
+		return
+	}
+
+	now := time.Now()
+
+	// Store Device Overview
+	overviewArticle := &db.KnowledgeBaseArticle{
+		ID:          fmt.Sprintf("%s-overview", device.ID),
+		DeviceID:    device.ID,
+		Title:       "Device Overview",
+		Type:        "generated",
+		Source:      "AI-Generated Knowledge Base",
+		Description: overviewContent,
+		Available:   true,
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}
+	if err := s.knowledgeBaseRepo.Upsert(ctx, overviewArticle); err != nil {
+		fmt.Printf("Warning: failed to store overview article for %s: %v\n", device.ID, err)
+		return
+	}
+
+	// Store Troubleshooting Guide
+	troubleshootArticle := &db.KnowledgeBaseArticle{
+		ID:          fmt.Sprintf("%s-troubleshoot", device.ID),
+		DeviceID:    device.ID,
+		Title:       "Troubleshooting Guide",
+		Type:        "generated",
+		Source:      "AI-Generated Knowledge Base",
+		Description: troubleshootContent,
+		Available:   true,
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}
+	if err := s.knowledgeBaseRepo.Upsert(ctx, troubleshootArticle); err != nil {
+		fmt.Printf("Warning: failed to store troubleshoot article for %s: %v\n", device.ID, err)
+		return
+	}
+
+	// Store Official Documentation if available
+	if device.Metadata != nil && device.Metadata["manufacturer"] != "" {
+		docArticle := &db.KnowledgeBaseArticle{
+			ID:          fmt.Sprintf("%s-official-docs", device.ID),
+			DeviceID:    device.ID,
+			Title:       "Official Documentation",
+			Type:        "manufacturer",
+			Source:      "Official " + device.Metadata["manufacturer"] + " Documentation",
+			Description: docContent,
+			Available:   true,
+			CreatedAt:   now,
+			UpdatedAt:   now,
+		}
+		if err := s.knowledgeBaseRepo.Upsert(ctx, docArticle); err != nil {
+			fmt.Printf("Warning: failed to store official docs article for %s: %v\n", device.ID, err)
+			return
+		}
+	}
 }

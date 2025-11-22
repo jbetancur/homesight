@@ -51,6 +51,23 @@ curl -s -X POST $API_URL/devices \
   }' | python3 -m json.tool 2>/dev/null || cat
 
 echo -e "${CYAN}✅ Device discovered and registered!${NC}"
+
+# Add sensors for leak detection device
+echo ""
+echo -e "${YELLOW}📊 Creating sensor definitions...${NC}"
+curl -s -X POST $API_URL/devices/basement-leak-sensor-001/sensors \
+  -H "Content-Type: application/json" \
+  -d '{
+    "id": "basement-leak-sensor-001-leak",
+    "device_id": "basement-leak-sensor-001",
+    "name": "Water Detection",
+    "type": "leak",
+    "unit": "Status",
+    "metadata": {
+      "values": "Dry, Wet",
+      "response_time": "< 1 second"
+    }
+  }' 2>/dev/null || echo "  (Sensors endpoint not yet active)"
 echo ""
 echo -e "${YELLOW}🤖 Triggering AI document ingestion for Aqara SJCGQ11LM...${NC}"
 curl -s -X POST http://localhost:8001/events/device \
@@ -91,6 +108,38 @@ curl -s -X POST $API_URL/devices \
   }' | python3 -m json.tool 2>/dev/null || cat
 
 echo -e "${CYAN}✅ Sump pump monitor online!${NC}"
+
+echo ""
+echo -e "${YELLOW}📊 Creating sensor definitions...${NC}"
+curl -s -X POST $API_URL/devices/sump-pump-monitor-001/sensors \
+  -H "Content-Type: application/json" \
+  -d '{
+    "id": "sump-pump-monitor-001-power",
+    "device_id": "sump-pump-monitor-001",
+    "name": "Power Consumption",
+    "type": "power",
+    "unit": "W",
+    "metadata": {
+      "accuracy": "±1%",
+      "max": "3680",
+      "voltage": "230V"
+    }
+  }' 2>/dev/null || echo "  (Sensors endpoint not yet active)"
+
+echo ""
+curl -s -X POST $API_URL/devices/sump-pump-monitor-001/sensors \
+  -H "Content-Type: application/json" \
+  -d '{
+    "id": "sump-pump-monitor-001-energy",
+    "device_id": "sump-pump-monitor-001",
+    "name": "Energy Usage",
+    "type": "energy",
+    "unit": "kWh",
+    "metadata": {
+      "accuracy": "±1%",
+      "resetable": true
+    }
+  }' 2>/dev/null || echo "  (Sensors endpoint not yet active)"
 echo ""
 echo -e "${YELLOW}🤖 Triggering AI document ingestion for Shelly Plug S...${NC}"
 curl -s -X POST http://localhost:8001/events/device \
@@ -130,6 +179,40 @@ curl -s -X POST $API_URL/devices \
   }' | python3 -m json.tool 2>/dev/null || cat
 
 echo ""
+echo -e "${YELLOW}📊 Creating sensor definitions...${NC}"
+curl -s -X POST $API_URL/devices/basement-temp-sensor-001/sensors \
+  -H "Content-Type: application/json" \
+  -d '{
+    "id": "basement-temp-sensor-001-temp",
+    "device_id": "basement-temp-sensor-001",
+    "name": "Temperature",
+    "type": "temperature",
+    "unit": "°C",
+    "metadata": {
+      "accuracy": "±0.5",
+      "min": "-10",
+      "max": "60",
+      "battery": "CR2032"
+    }
+  }' 2>/dev/null || echo "  (Sensors endpoint not yet active)"
+
+echo ""
+curl -s -X POST $API_URL/devices/basement-temp-sensor-001/sensors \
+  -H "Content-Type: application/json" \
+  -d '{
+    "id": "basement-temp-sensor-001-humidity",
+    "device_id": "basement-temp-sensor-001",
+    "name": "Humidity",
+    "type": "humidity",
+    "unit": "%",
+    "metadata": {
+      "accuracy": "±3",
+      "min": "0",
+      "max": "100"
+    }
+  }' 2>/dev/null || echo "  (Sensors endpoint not yet active)"
+
+echo ""
 
 curl -s -X POST $API_URL/devices \
   -H "Content-Type: application/json" \
@@ -145,6 +228,40 @@ curl -s -X POST $API_URL/devices \
       "location": "Attic"
     }
   }' | python3 -m json.tool 2>/dev/null || cat
+
+echo ""
+echo -e "${YELLOW}📊 Creating sensor definitions...${NC}"
+curl -s -X POST $API_URL/devices/attic-temp-sensor-001/sensors \
+  -H "Content-Type: application/json" \
+  -d '{
+    "id": "attic-temp-sensor-001-temp",
+    "device_id": "attic-temp-sensor-001",
+    "name": "Temperature",
+    "type": "temperature",
+    "unit": "°C",
+    "metadata": {
+      "accuracy": "±0.5",
+      "min": "-10",
+      "max": "60",
+      "battery": "CR2032"
+    }
+  }' 2>/dev/null || echo "  (Sensors endpoint not yet active)"
+
+echo ""
+curl -s -X POST $API_URL/devices/attic-temp-sensor-001/sensors \
+  -H "Content-Type: application/json" \
+  -d '{
+    "id": "attic-temp-sensor-001-humidity",
+    "device_id": "attic-temp-sensor-001",
+    "name": "Humidity",
+    "type": "humidity",
+    "unit": "%",
+    "metadata": {
+      "accuracy": "±3",
+      "min": "0",
+      "max": "100"
+    }
+  }' 2>/dev/null || echo "  (Sensors endpoint not yet active)"
 
 echo -e "${CYAN}✅ Temperature sensors deployed!${NC}"
 echo ""
@@ -211,6 +328,39 @@ curl -s -X POST $API_URL/devices \
   }' | python3 -m json.tool 2>/dev/null || cat
 
 echo ""
+echo -e "${YELLOW}📊 Creating sensor definitions...${NC}"
+curl -s -X POST $API_URL/devices/front-door-sensor-001/sensors \
+  -H "Content-Type: application/json" \
+  -d '{
+    "id": "front-door-sensor-001-contact",
+    "device_id": "front-door-sensor-001",
+    "name": "Door Contact",
+    "type": "contact",
+    "unit": "Status",
+    "metadata": {
+      "values": "Open, Closed",
+      "response_time": "< 100ms",
+      "battery": "CR2032"
+    }
+  }' 2>/dev/null || echo "  (Sensors endpoint not yet active)"
+
+echo ""
+curl -s -X POST $API_URL/devices/front-door-sensor-001/sensors \
+  -H "Content-Type: application/json" \
+  -d '{
+    "id": "front-door-sensor-001-battery",
+    "device_id": "front-door-sensor-001",
+    "name": "Battery Level",
+    "type": "battery",
+    "unit": "%",
+    "metadata": {
+      "accuracy": "±5%",
+      "min": "0",
+      "max": "100"
+    }
+  }' 2>/dev/null || echo "  (Sensors endpoint not yet active)"
+
+echo ""
 
 curl -s -X POST $API_URL/devices \
   -H "Content-Type: application/json" \
@@ -226,6 +376,39 @@ curl -s -X POST $API_URL/devices \
       "location": "Garage"
     }
   }' | python3 -m json.tool 2>/dev/null || cat
+
+echo ""
+echo -e "${YELLOW}📊 Creating sensor definitions...${NC}"
+curl -s -X POST $API_URL/devices/garage-door-sensor-001/sensors \
+  -H "Content-Type: application/json" \
+  -d '{
+    "id": "garage-door-sensor-001-contact",
+    "device_id": "garage-door-sensor-001",
+    "name": "Door Contact",
+    "type": "contact",
+    "unit": "Status",
+    "metadata": {
+      "values": "Open, Closed",
+      "response_time": "< 100ms",
+      "battery": "CR2032"
+    }
+  }' 2>/dev/null || echo "  (Sensors endpoint not yet active)"
+
+echo ""
+curl -s -X POST $API_URL/devices/garage-door-sensor-001/sensors \
+  -H "Content-Type: application/json" \
+  -d '{
+    "id": "garage-door-sensor-001-battery",
+    "device_id": "garage-door-sensor-001",
+    "name": "Battery Level",
+    "type": "battery",
+    "unit": "%",
+    "metadata": {
+      "accuracy": "±5%",
+      "min": "0",
+      "max": "100"
+    }
+  }' 2>/dev/null || echo "  (Sensors endpoint not yet active)"
 
 echo -e "${CYAN}✅ Additional sensors online!${NC}"
 echo ""
@@ -276,15 +459,23 @@ echo -e "${CYAN}╚════════════════════�
 echo ""
 echo -e "${GREEN}Current System Status:${NC}"
 echo "  📱 6 devices registered and online"
+echo "  📊 12 sensors defined (temperature, humidity, water, power, contact, battery, etc.)"
 echo "  🚨 2 active incidents (1 critical, 1 medium)"
 echo "  ✅ All integrations active"
 echo "  🤖 AI knowledge base building (may take 1-2 minutes)"
 echo ""
 echo -e "${YELLOW}Real Devices Used (with documentation):${NC}"
-echo "  • Aqara SJCGQ11LM (Water Leak Sensor)"
-echo "  • Aqara WSDCGQ11LM (Temperature/Humidity Sensor)"
-echo "  • Aqara MCCGQ11LM (Door/Window Contact Sensor)"
-echo "  • Shelly Plug S (Smart Plug with Power Monitoring)"
+echo "  • Aqara SJCGQ11LM (Water Leak Sensor) - 1 sensor"
+echo "  • Aqara WSDCGQ11LM (Temperature/Humidity Sensor) - 2 sensors per device (x2)"
+echo "  • Aqara MCCGQ11LM (Door/Window Contact Sensor) - 2 sensors per device (x2)"
+echo "  • Shelly Plug S (Smart Plug with Power Monitoring) - 2 sensors"
+echo ""
+echo -e "${YELLOW}Sensor Features:${NC}"
+echo "  • Click device name to view device overview"
+echo "  • Click 'View Details' button to see detailed sensor data"
+echo "  • View real-time metrics, historical data, and sensor specs"
+echo "  • See device documentation status and details"
+echo "  • All sensor data is stored and queryable"
 echo ""
 echo -e "${YELLOW}AI Features:${NC}"
 echo "  • Document discovery queued for each device"

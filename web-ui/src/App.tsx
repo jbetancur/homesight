@@ -3,6 +3,8 @@ import { BrowserRouter as Router, Routes, Route, Link } from 'react-router-dom';
 import { AppShell, Group, Stack, Text, Button, rem } from '@mantine/core';
 import { Home, AlertCircle, Search, Activity, Settings, Server } from 'lucide-react';
 import { DevicesView } from './views/DevicesView';
+import { DeviceOverviewView } from './views/DeviceOverviewView';
+import { SensorDetailView } from './views/SensorDetailView';
 import { IncidentsView } from './views/IncidentsView';
 import { DiscoveryView } from './views/DiscoveryView';
 import { StatusView } from './views/StatusView';
@@ -50,6 +52,8 @@ function App() {
         <AppShell.Main style={{ width: '100%', overflowX: 'auto' }}>
           <Routes>
             <Route path="/" element={<DevicesView />} />
+            <Route path="/devices/:deviceId/overview" element={<DeviceOverviewView />} />
+            <Route path="/devices/:deviceId/sensors/:sensorId" element={<SensorDetailView />} />
             <Route path="/incidents" element={<IncidentsView />} />
             <Route path="/discovery" element={<DiscoveryView />} />
             <Route path="/status" element={<StatusView />} />

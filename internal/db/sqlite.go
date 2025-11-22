@@ -143,10 +143,24 @@ func (s *SQLiteDB) initSchema() error {
 			FOREIGN KEY (zone_id) REFERENCES zones(id)
 		);
 
+		CREATE TABLE IF NOT EXISTS knowledge_base_articles (
+			id TEXT PRIMARY KEY,
+			device_id TEXT NOT NULL,
+			title TEXT NOT NULL,
+			type TEXT,
+			source TEXT,
+			description TEXT,
+			available BOOLEAN DEFAULT 1,
+			created_at DATETIME NOT NULL,
+			updated_at DATETIME NOT NULL,
+			FOREIGN KEY (device_id) REFERENCES devices(id)
+		);
+
 		CREATE INDEX IF NOT EXISTS idx_incidents_status ON incidents(status);
 		CREATE INDEX IF NOT EXISTS idx_incidents_device ON incidents(device_id);
 		CREATE INDEX IF NOT EXISTS idx_devices_zone ON devices(zone_id);
 		CREATE INDEX IF NOT EXISTS idx_sensors_device ON sensors(device_id);
+		CREATE INDEX IF NOT EXISTS idx_knowledge_base_device ON knowledge_base_articles(device_id);
 	`
 
 	_, err := s.db.Exec(schema)
@@ -252,6 +266,83 @@ func (r *DeviceRepo) Delete(ctx context.Context, id string) error {
 	return err
 }
 
+// SensorRepo implements SensorRepository
+type SensorRepo struct {
+	db *sql.DB
+}
+
+// NewSensorRepo creates a new sensor repository
+func NewSensorRepo(db *SQLiteDB) *SensorRepo {
+	return &SensorRepo{db: db.db}
+}
+
+func (r *SensorRepo) Get(ctx context.Context, id string) (*model.Sensor, error) {
+	var s model.Sensor
+	var metadataJSON sql.NullString
+
+	err := r.db.QueryRowContext(ctx,
+		`SELECT id, device_id, name, type, unit, metadata, created_at, updated_at
+		 FROM sensors WHERE id = ?`, id).Scan(
+		&s.ID, &s.DeviceID, &s.Name, &s.Type, &s.Unit, &metadataJSON, &s.CreatedAt, &s.UpdatedAt)
+
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	if metadataJSON.Valid {
+		json.Unmarshal([]byte(metadataJSON.String), &s.Metadata)
+	}
+
+	return &s, nil
+}
+
+func (r *SensorRepo) ListByDevice(ctx context.Context, deviceID string) ([]model.Sensor, error) {
+	rows, err := r.db.QueryContext(ctx,
+		`SELECT id, device_id, name, type, unit, metadata, created_at, updated_at
+		 FROM sensors WHERE device_id = ? ORDER BY name`, deviceID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	sensors := make([]model.Sensor, 0)
+	for rows.Next() {
+		var s model.Sensor
+		var metadataJSON sql.NullString
+
+		if err := rows.Scan(&s.ID, &s.DeviceID, &s.Name, &s.Type, &s.Unit, &metadataJSON, &s.CreatedAt, &s.UpdatedAt); err != nil {
+			return nil, err
+		}
+
+		if metadataJSON.Valid {
+			json.Unmarshal([]byte(metadataJSON.String), &s.Metadata)
+		}
+
+		sensors = append(sensors, s)
+	}
+
+	return sensors, nil
+}
+
+func (r *SensorRepo) Upsert(ctx context.Context, sensor *model.Sensor) error {
+	metadataJSON, _ := json.Marshal(sensor.Metadata)
+	sensor.UpdatedAt = time.Now()
+
+	_, err := r.db.ExecContext(ctx,
+		`INSERT OR REPLACE INTO sensors (id, device_id, name, type, unit, metadata, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		sensor.ID, sensor.DeviceID, sensor.Name, sensor.Type, sensor.Unit, string(metadataJSON), sensor.CreatedAt, sensor.UpdatedAt)
+	return err
+}
+
+func (r *SensorRepo) Delete(ctx context.Context, id string) error {
+	_, err := r.db.ExecContext(ctx, `DELETE FROM sensors WHERE id = ?`, id)
+	return err
+}
+
 // IncidentRepo implements IncidentRepository
 type IncidentRepo struct {
 	db *sql.DB
@@ -347,5 +438,51 @@ func (r *IncidentRepo) Upsert(ctx context.Context, incident *model.Incident) err
 
 func (r *IncidentRepo) Delete(ctx context.Context, id string) error {
 	_, err := r.db.ExecContext(ctx, `DELETE FROM incidents WHERE id = ?`, id)
+	return err
+}
+
+// KnowledgeBaseRepo implements KnowledgeBaseRepository
+type KnowledgeBaseRepo struct {
+	db *sql.DB
+}
+
+// NewKnowledgeBaseRepo creates a new knowledge base repository
+func NewKnowledgeBaseRepo(db *SQLiteDB) *KnowledgeBaseRepo {
+	return &KnowledgeBaseRepo{db: db.db}
+}
+
+func (r *KnowledgeBaseRepo) GetByDevice(ctx context.Context, deviceID string) ([]KnowledgeBaseArticle, error) {
+	rows, err := r.db.QueryContext(ctx,
+		`SELECT id, device_id, title, type, source, description, available, created_at, updated_at
+		 FROM knowledge_base_articles WHERE device_id = ? ORDER BY created_at`, deviceID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var articles []KnowledgeBaseArticle
+	for rows.Next() {
+		var article KnowledgeBaseArticle
+		err := rows.Scan(&article.ID, &article.DeviceID, &article.Title, &article.Type, &article.Source,
+			&article.Description, &article.Available, &article.CreatedAt, &article.UpdatedAt)
+		if err != nil {
+			return nil, err
+		}
+		articles = append(articles, article)
+	}
+	return articles, rows.Err()
+}
+
+func (r *KnowledgeBaseRepo) Upsert(ctx context.Context, article *KnowledgeBaseArticle) error {
+	_, err := r.db.ExecContext(ctx,
+		`INSERT OR REPLACE INTO knowledge_base_articles (id, device_id, title, type, source, description, available, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		article.ID, article.DeviceID, article.Title, article.Type, article.Source,
+		article.Description, article.Available, article.CreatedAt, article.UpdatedAt)
+	return err
+}
+
+func (r *KnowledgeBaseRepo) DeleteByDevice(ctx context.Context, deviceID string) error {
+	_, err := r.db.ExecContext(ctx, `DELETE FROM knowledge_base_articles WHERE device_id = ?`, deviceID)
 	return err
 }

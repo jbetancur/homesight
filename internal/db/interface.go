@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"time"
 
 	"github.com/homesight/homesight/internal/model"
 )
@@ -61,4 +62,24 @@ type TaskRepository interface {
 	List(ctx context.Context, filters map[string]any) ([]model.Task, error)
 	Upsert(ctx context.Context, task *model.Task) error
 	Delete(ctx context.Context, id string) error
+}
+
+// KnowledgeBaseArticle represents a knowledge base article
+type KnowledgeBaseArticle struct {
+	ID          string
+	DeviceID    string
+	Title       string
+	Type        string
+	Source      string
+	Description string
+	Available   bool
+	CreatedAt   time.Time
+	UpdatedAt   time.Time
+}
+
+// KnowledgeBaseRepository manages knowledge base article persistence
+type KnowledgeBaseRepository interface {
+	GetByDevice(ctx context.Context, deviceID string) ([]KnowledgeBaseArticle, error)
+	Upsert(ctx context.Context, article *KnowledgeBaseArticle) error
+	DeleteByDevice(ctx context.Context, deviceID string) error
 }
