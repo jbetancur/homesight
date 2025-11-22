@@ -11,68 +11,79 @@ from chromadb.config import Settings
 from typing import List, Dict, Any, Optional
 from pathlib import Path
 import logging
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
+import threading
 
 logger = logging.getLogger(__name__)
 
 
 class RAGEngine:
     """RAG engine using ChromaDB with FastEmbed for fully offline operation"""
-    
+
     def __init__(self, persist_directory: str = "./rag-db", openai_api_key: Optional[str] = None):
         """
         Initialize RAG engine with persistent storage and local FastEmbed embeddings
-        
+
         Note: openai_api_key parameter kept for backwards compatibility but not used for embeddings.
         OpenAI may still be used elsewhere (e.g., document fetching).
         """
         self.persist_directory = Path(persist_directory)
         self.persist_directory.mkdir(parents=True, exist_ok=True)
-        
+
         # Initialize ChromaDB client
         self.client = chromadb.PersistentClient(
             path=str(self.persist_directory),
             settings=Settings(anonymized_telemetry=False)
         )
-        
+
         # Use FastEmbed for local, offline embeddings
         logger.info("Using FastEmbed for local embeddings (BAAI/bge-small-en-v1.5)...")
         from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
-        
+
         # ChromaDB's DefaultEmbeddingFunction uses sentence-transformers
         # For fastembed, we'll create a custom embedding function
         try:
             from fastembed import TextEmbedding
-            
+
             class FastEmbedFunction:
                 def __init__(self):
                     # Use BAAI/bge-small-en-v1.5 - lightweight and efficient
                     self.model = TextEmbedding(model_name="BAAI/bge-small-en-v1.5")
-                
+
                 def __call__(self, input: List[str]) -> List[List[float]]:
                     embeddings = list(self.model.embed(input))
                     return embeddings
-                
+
                 def embed_query(self, input: List[str]) -> List[List[float]]:
                     """Alias for __call__ - required by ChromaDB 1.3+"""
                     return self.__call__(input)
-                
+
                 @staticmethod
                 def name() -> str:
                     return "BAAI/bge-small-en-v1.5"
-            
+
             self.embedding_function = FastEmbedFunction()
             logger.info("FastEmbed initialized successfully - fully offline operation enabled")
-            
+
         except ImportError:
             logger.error("FastEmbed not installed. Install with: pip install fastembed")
             raise
-        
+
         # Get or create collection
         self.collection = self.client.get_or_create_collection(
             name="homesight_docs",
             embedding_function=self.embedding_function,
             metadata={"description": "Home maintenance and device documentation"}
         )
+
+        # Async processing support
+        # Use 4 workers to handle concurrent embedding operations without blocking API
+        self._executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="rag-worker")
+        self._ingestion_lock = threading.Lock()
+        self._ingestion_queue: asyncio.Queue = None
+        self._ingestion_worker_task = None
+
         logger.info("RAG engine initialized with local embeddings (offline mode)")
     
     def add_document(
@@ -81,19 +92,98 @@ class RAGEngine:
         metadata: Dict[str, Any],
         doc_id: Optional[str] = None
     ):
-        """Add a document to the vector database"""
+        """Add a document to the vector database (synchronous - use for single docs)"""
         # Generate ID if not provided
         if doc_id is None:
             doc_id = f"doc_{hash(text)}"
-        
+
         # Add to collection (ChromaDB handles embedding automatically)
         self.collection.add(
             documents=[text],
             metadatas=[metadata],
             ids=[doc_id]
         )
-        
+
         logger.info(f"Added document: {doc_id} from {metadata.get('source', 'unknown')}")
+
+    def add_documents_batch(
+        self,
+        documents: List[Dict[str, Any]],
+        batch_size: int = 10
+    ):
+        """
+        Add multiple documents in batches (non-blocking)
+
+        Args:
+            documents: List of dicts with 'text', 'metadata', and optional 'doc_id'
+            batch_size: Number of documents to process at once (default: 10)
+
+        This method processes documents in batches to avoid memory exhaustion.
+        Batching reduces the number of times the embedding model is loaded.
+        """
+        if not documents:
+            return
+
+        logger.info(f"Starting batched ingestion of {len(documents)} documents (batch_size={batch_size})")
+
+        # Process in batches
+        for i in range(0, len(documents), batch_size):
+            batch = documents[i:i + batch_size]
+
+            texts = []
+            metadatas = []
+            ids = []
+
+            for doc in batch:
+                text = doc.get('text', '')
+                metadata = doc.get('metadata', {})
+                doc_id = doc.get('doc_id', f"doc_{hash(text)}")
+
+                texts.append(text)
+                metadatas.append(metadata)
+                ids.append(doc_id)
+
+            # Add batch to collection (ChromaDB batches embeddings internally)
+            with self._ingestion_lock:
+                self.collection.add(
+                    documents=texts,
+                    metadatas=metadatas,
+                    ids=ids
+                )
+
+            logger.info(f"Ingested batch {i//batch_size + 1}/{(len(documents)-1)//batch_size + 1} ({len(batch)} docs)")
+
+        # Update cached count after ingestion
+        try:
+            self._cached_count = self.collection.count()
+        except:
+            pass
+
+        logger.info(f"Completed batched ingestion of {len(documents)} documents")
+
+    async def add_documents_async(
+        self,
+        documents: List[Dict[str, Any]],
+        batch_size: int = 10
+    ):
+        """
+        Add documents asynchronously without blocking the event loop
+
+        Args:
+            documents: List of dicts with 'text', 'metadata', and optional 'doc_id'
+            batch_size: Number of documents to process at once
+
+        This runs the CPU-intensive embedding work in a thread pool to keep
+        the API responsive during document ingestion.
+        """
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(
+            self._executor,
+            self.add_documents_batch,
+            documents,
+            batch_size
+        )
+        logger.info(f"Async ingestion completed for {len(documents)} documents")
     
     def query(
         self,
@@ -134,8 +224,19 @@ class RAGEngine:
         return formatted_results
     
     def get_stats(self) -> Dict[str, Any]:
-        """Get RAG database statistics"""
-        count = self.collection.count()
+        """Get RAG database statistics (non-blocking)"""
+        try:
+            # Try to get count without blocking too long
+            # If ingestion is happening, this might be slow, so we cache it
+            if hasattr(self, '_cached_count'):
+                count = self._cached_count
+            else:
+                count = self.collection.count()
+                self._cached_count = count
+        except Exception as e:
+            logger.warning(f"Error getting collection count: {e}")
+            count = -1
+
         return {
             "total_documents": count,
             "persist_directory": str(self.persist_directory),
@@ -144,90 +245,7 @@ class RAGEngine:
         }
 
 
-def demo_rag():
-    """Demo the RAG engine with sample documents"""
-    engine = RAGEngine()
-    
-    # Add some sample docs
-    sample_docs = [
-        {
-            "text": "Aqara SJCGQ11LM water leak sensor has a 2-year battery life. The LED indicator flashes when water is detected. Test monthly by applying water to the detection probe.",
-            "metadata": {
-                "source": "Aqara SJCGQ11LM Manual",
-                "device_type": "water_leak",
-                "manufacturer": "Aqara",
-                "section": "operation"
-            }
-        },
-        {
-            "text": "For basement water leaks: 1) Immediately shut off the main water valve 2) Turn off electrical power to the affected area 3) Remove standing water 4) Contact a licensed plumber 5) Document damage with photos for insurance",
-            "metadata": {
-                "source": "Plumbing Emergency Guide",
-                "topic": "leak_response",
-                "category": "emergency"
-            }
-        },
-        {
-            "text": "Water heater T&P (temperature and pressure) valve leaks are common. Check if the valve is properly seated. If dripping continues, the valve may need replacement. This is a safety device - do not cap or plug it.",
-            "metadata": {
-                "source": "Water Heater Maintenance",
-                "appliance": "water_heater",
-                "issue": "leak"
-            }
-        },
-        {
-            "text": "IRC Section P2801.5 requires drain pans under water heaters in attic and basement installations. Pan must be at least 1.5 inches deep and drain to an approved location.",
-            "metadata": {
-                "source": "International Residential Code",
-                "code": "IRC P2801.5",
-                "topic": "water_heater",
-                "category": "building_code"
-            }
-        },
-        {
-            "text": "Freeze protection: Pipes in unheated areas should be insulated with foam pipe insulation. During extreme cold, let faucets drip slightly and open cabinet doors to allow warm air circulation.",
-            "metadata": {
-                "source": "Winterization Guide",
-                "topic": "freeze_prevention",
-                "season": "winter"
-            }
-        }
-    ]
-    
-    print("Adding sample documents...")
-    for doc in sample_docs:
-        engine.add_document(
-            text=doc["text"],
-            metadata=doc["metadata"]
-        )
-    
-    # Test queries
-    print("\n" + "="*60)
-    print("Testing RAG retrieval:")
-    print("="*60)
-    
-    queries = [
-        "water leak in basement",
-        "freeze protection for pipes",
-        "water heater dripping",
-        "building code requirements"
-    ]
-    
-    for query in queries:
-        print(f"\nQuery: {query}")
-        print("-" * 40)
-        results = engine.query(query, n_results=2)
-        for i, result in enumerate(results, 1):
-            print(f"\n{i}. Source: {result['metadata'].get('source', 'Unknown')}")
-            print(f"   Text: {result['text'][:100]}...")
-            print(f"   Relevance score: {1 - result['distance']:.3f}")
-    
-    # Show stats
-    print("\n" + "="*60)
-    stats = engine.get_stats()
-    print(f"RAG Stats: {stats['total_documents']} documents indexed")
-    print("="*60)
-
-
 if __name__ == "__main__":
-    demo_rag()
+    # RAG engine can be tested with real documents via the ingest script
+    print("Use ingest-docs.py to add manufacturer documentation to the RAG engine")
+    print("Or use the /rag/ingest endpoint to add documents via API")

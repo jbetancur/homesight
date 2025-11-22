@@ -1,10 +1,11 @@
 
 import { BrowserRouter as Router, Routes, Route, Link } from 'react-router-dom';
 import { AppShell, Group, Stack, Text, Button, rem } from '@mantine/core';
-import { Home, AlertCircle, Search, Activity, Settings } from 'lucide-react';
+import { Home, AlertCircle, Search, Activity, Settings, Server } from 'lucide-react';
 import { DevicesView } from './views/DevicesView';
 import { IncidentsView } from './views/IncidentsView';
 import { DiscoveryView } from './views/DiscoveryView';
+import { StatusView } from './views/StatusView';
 
 function App() {
   return (
@@ -29,6 +30,7 @@ function App() {
             <Button fullWidth component={Link} to="/" variant="light" color="blue" leftSection={<Activity size={18} />}>Devices</Button>
             <Button fullWidth component={Link} to="/incidents" variant="light" color="blue" leftSection={<AlertCircle size={18} />}>Incidents</Button>
             <Button fullWidth component={Link} to="/discovery" variant="light" color="blue" leftSection={<Search size={18} />}>Discovery</Button>
+            <Button fullWidth component={Link} to="/status" variant="light" color="blue" leftSection={<Server size={18} />}>Status</Button>
             <Group mt="auto">
               <Settings size={22} color="#868e96" />
               <Text size="sm" c="dimmed">Settings</Text>
@@ -50,6 +52,7 @@ function App() {
             <Route path="/" element={<DevicesView />} />
             <Route path="/incidents" element={<IncidentsView />} />
             <Route path="/discovery" element={<DiscoveryView />} />
+            <Route path="/status" element={<StatusView />} />
           </Routes>
         </AppShell.Main>
       </AppShell>

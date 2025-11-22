@@ -29,7 +29,7 @@ echo -e "${BLUE}"
 cat << "EOF"
 ╔══════════════════════════════════════════════════════════════╗
 ║                                                              ║
-║              🏠  HomeSight Installer  🏠                      ║
+║              🏠  HomeSight Installer  🏠                    ║
 ║                                                              ║
 ║     Smart Home Intelligence & Device Management              ║
 ║                                                              ║

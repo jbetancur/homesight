@@ -16,13 +16,17 @@ type Client interface {
 
 // ChatRequest is a chat message sent to the AI
 type ChatRequest struct {
-	Message string                 `json:"message"`
-	Context map[string]interface{} `json:"context,omitempty"`
+	Message   string                 `json:"message"`
+	SessionID string                 `json:"session_id,omitempty"` // For multi-turn conversations
+	Context   map[string]interface{} `json:"context,omitempty"`
 }
 
 // ChatResponse is the AI's response to a chat message
 type ChatResponse struct {
-	Response string `json:"response"`
+	Response     string                   `json:"response"`
+	SessionID    string                   `json:"session_id"`              // Session ID for conversation continuity
+	ActionsTaken []map[string]interface{} `json:"actions_taken,omitempty"` // Actions executed (function calls)
+	Metadata     map[string]interface{}   `json:"metadata,omitempty"`
 }
 
 // AnalyzeRequest requests analysis of metrics or incidents

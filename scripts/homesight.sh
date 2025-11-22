@@ -10,26 +10,26 @@ LOG_DIR="$PROJECT_DIR/.logs"
 GREEN='\033[0;32m'
 RED='\033[0;31m'
 YELLOW='\033[1;33m'
-NC='\033[0m' # No Color
+NC='\033[0m'
 
 mkdir -p "$PID_DIR" "$LOG_DIR"
 
 start_daemon() {
     echo -e "${GREEN}Starting HomeSight Daemon...${NC}"
-    
+
     if [ -f "$PID_DIR/daemon.pid" ] && kill -0 $(cat "$PID_DIR/daemon.pid") 2>/dev/null; then
         echo -e "${YELLOW}Daemon already running (PID: $(cat "$PID_DIR/daemon.pid"))${NC}"
         return 0
     fi
-    
+
     cd "$PROJECT_DIR"
     export HOMESIGHT_CONFIG="$PROJECT_DIR/config.yaml"
     mkdir -p data
-    
+
     nohup ./bin/homesightd > "$LOG_DIR/daemon.log" 2>&1 &
     echo $! > "$PID_DIR/daemon.pid"
     sleep 2
-    
+
     if kill -0 $(cat "$PID_DIR/daemon.pid") 2>/dev/null; then
         echo -e "${GREEN}✅ Daemon started (PID: $(cat "$PID_DIR/daemon.pid"))${NC}"
         echo "   API: http://localhost:8080"
@@ -41,115 +41,92 @@ start_daemon() {
 }
 
 start_ai() {
-    echo -e "${GREEN}Starting AI Sidecar...${NC}"
-    
-    if [ -f "$PID_DIR/ai.pid" ] && kill -0 $(cat "$PID_DIR/ai.pid") 2>/dev/null; then
-        echo -e "${YELLOW}AI Sidecar already running (PID: $(cat "$PID_DIR/ai.pid"))${NC}"
-        return 0
-    fi
-    
-    if [ ! -d "$PROJECT_DIR/ai-sidecar/venv" ]; then
-        echo -e "${YELLOW}Creating Python virtual environment...${NC}"
-        cd "$PROJECT_DIR/ai-sidecar"
-        python3 -m venv venv
-        source venv/bin/activate
-        pip install --upgrade pip -q
-        pip install -r requirements.txt -q
-        cd "$PROJECT_DIR"
-    fi
-    
-    cd "$PROJECT_DIR/ai-sidecar"
-    source venv/bin/activate
-    nohup python main.py > "$LOG_DIR/ai.log" 2>&1 &
-    echo $! > "$PID_DIR/ai.pid"
+    echo -e "${GREEN}Starting AI Sidecar (Docker)...${NC}"
+
     cd "$PROJECT_DIR"
-    sleep 2
-    
-    if kill -0 $(cat "$PID_DIR/ai.pid") 2>/dev/null; then
-        echo -e "${GREEN}✅ AI Sidecar started (PID: $(cat "$PID_DIR/ai.pid"))${NC}"
+
+    # Stop any existing container
+    docker-compose stop ai-sidecar 2>/dev/null || true
+    docker-compose rm -f ai-sidecar 2>/dev/null || true
+
+    # Kill any host processes on port 8001
+    if lsof -ti:8001 >/dev/null 2>&1; then
+        echo -e "${YELLOW}Killing process on port 8001...${NC}"
+        lsof -ti:8001 | xargs kill -9 2>/dev/null || true
+        sleep 2
+    fi
+
+    # Start with docker-compose
+    docker-compose up -d ai-sidecar
+
+    if [ $? -eq 0 ]; then
+        echo -e "${GREEN}✅ AI Sidecar started in Docker${NC}"
         echo "   API: http://localhost:8001"
     else
         echo -e "${RED}❌ Failed to start AI sidecar${NC}"
-        rm -f "$PID_DIR/ai.pid"
         return 1
     fi
 }
 
 start_docker() {
     echo -e "${GREEN}Starting Docker services...${NC}"
-    
+
     cd "$PROJECT_DIR"
-    sudo docker compose up -d 2>/dev/null
-    
+    docker-compose up -d prometheus 2>/dev/null
+
     if [ $? -eq 0 ]; then
         echo -e "${GREEN}✅ Docker services started${NC}"
-        echo "   MQTT: tcp://localhost:1883"
         echo "   Prometheus: http://localhost:9090"
     else
-        echo -e "${YELLOW}⚠️  Docker services not started (optional)${NC}"
+        echo -e "${YELLOW}⚠️  Docker services not started${NC}"
     fi
 }
 
 stop_daemon() {
     echo -e "${YELLOW}Stopping HomeSight Daemon...${NC}"
-    
+
     if [ -f "$PID_DIR/daemon.pid" ]; then
         PID=$(cat "$PID_DIR/daemon.pid")
-        if kill -0 $PID 2>/dev/null; then
-            kill $PID
-            sleep 1
-            if kill -0 $PID 2>/dev/null; then
-                kill -9 $PID 2>/dev/null
-            fi
-            echo -e "${GREEN}✅ Daemon stopped${NC}"
-        else
-            echo -e "${YELLOW}Daemon not running${NC}"
-        fi
+        kill $PID 2>/dev/null || true
+        sleep 1
+        kill -9 $PID 2>/dev/null || true
         rm -f "$PID_DIR/daemon.pid"
-    else
-        # Fallback: kill by name
-        pkill -f "homesightd" 2>/dev/null && echo -e "${GREEN}✅ Daemon stopped${NC}"
     fi
+
+    pkill -9 -f "homesightd" 2>/dev/null || true
+    lsof -ti:8080 2>/dev/null | xargs kill -9 2>/dev/null || true
+
+    echo -e "${GREEN}✅ Daemon stopped${NC}"
 }
 
 stop_ai() {
     echo -e "${YELLOW}Stopping AI Sidecar...${NC}"
-    
-    if [ -f "$PID_DIR/ai.pid" ]; then
-        PID=$(cat "$PID_DIR/ai.pid")
-        if kill -0 $PID 2>/dev/null; then
-            kill $PID
-            sleep 1
-            if kill -0 $PID 2>/dev/null; then
-                kill -9 $PID 2>/dev/null
-            fi
-            echo -e "${GREEN}✅ AI Sidecar stopped${NC}"
-        else
-            echo -e "${YELLOW}AI Sidecar not running${NC}"
-        fi
-        rm -f "$PID_DIR/ai.pid"
-    else
-        # Fallback: kill by name
-        pkill -f "ai-sidecar.*main.py" 2>/dev/null && echo -e "${GREEN}✅ AI Sidecar stopped${NC}"
-    fi
+
+    cd "$PROJECT_DIR"
+    docker-compose stop ai-sidecar 2>/dev/null || true
+    docker-compose rm -f ai-sidecar 2>/dev/null || true
+
+    pkill -9 -f "python.*main.py" 2>/dev/null || true
+    pkill -9 -f "uvicorn" 2>/dev/null || true
+    lsof -ti:8001 2>/dev/null | xargs kill -9 2>/dev/null || true
+
+    echo -e "${GREEN}✅ AI Sidecar stopped${NC}"
 }
 
 stop_docker() {
     echo -e "${YELLOW}Stopping Docker services...${NC}"
-    
+
     cd "$PROJECT_DIR"
-    sudo docker compose down 2>/dev/null
-    
-    if [ $? -eq 0 ]; then
-        echo -e "${GREEN}✅ Docker services stopped${NC}"
-    fi
+    docker-compose down 2>/dev/null || true
+
+    echo -e "${GREEN}✅ Docker services stopped${NC}"
 }
 
 show_status() {
     echo "🏠 HomeSight System Status"
     echo "=========================="
     echo ""
-    
+
     # Daemon
     if [ -f "$PID_DIR/daemon.pid" ] && kill -0 $(cat "$PID_DIR/daemon.pid") 2>/dev/null; then
         echo -e "${GREEN}✅ Daemon: Running (PID: $(cat "$PID_DIR/daemon.pid"))${NC}"
@@ -161,48 +138,50 @@ show_status() {
     else
         echo -e "${RED}❌ Daemon: Not running${NC}"
     fi
-    
+
     # AI Sidecar
-    if [ -f "$PID_DIR/ai.pid" ] && kill -0 $(cat "$PID_DIR/ai.pid") 2>/dev/null; then
-        echo -e "${GREEN}✅ AI Sidecar: Running (PID: $(cat "$PID_DIR/ai.pid"))${NC}"
+    if docker ps --format '{{.Names}}' 2>/dev/null | grep -q '^homesight-ai-sidecar$'; then
+        echo -e "${GREEN}✅ AI Sidecar: Running in Docker${NC}"
         if curl -s http://localhost:8001/health > /dev/null 2>&1; then
-            echo "   └─ Service: http://localhost:8001 (healthy)"
+            echo "   └─ API: http://localhost:8001 (healthy)"
         else
-            echo "   └─ Service: Not responding"
+            echo "   └─ API: Not responding"
         fi
     else
         echo -e "${RED}❌ AI Sidecar: Not running${NC}"
     fi
-    
+
     # Docker
     echo ""
     echo "Docker Services:"
-    if sudo docker ps --format "table {{.Names}}\t{{.Status}}" 2>/dev/null | grep -E "mosquitto|prometheus" > /dev/null; then
-        sudo docker ps --format "  ✅ {{.Names}}: {{.Status}}" 2>/dev/null | grep -E "mosquitto|prometheus"
+    if docker ps --format "table {{.Names}}\t{{.Status}}" 2>/dev/null | grep -E "prometheus" > /dev/null; then
+        docker ps --format "  ✅ {{.Names}}: {{.Status}}" 2>/dev/null | grep -E "prometheus"
     else
         echo -e "  ${RED}❌ No Docker services running${NC}"
     fi
-    
+
     echo ""
     echo "Logs:"
     echo "  Daemon: tail -f $LOG_DIR/daemon.log"
-    echo "  AI:     tail -f $LOG_DIR/ai.log"
+    echo "  AI:     docker-compose logs -f ai-sidecar"
 }
 
-show_logs() {
-    local service=$1
-    case "$service" in
-        daemon)
-            tail -f "$LOG_DIR/daemon.log"
-            ;;
-        ai)
-            tail -f "$LOG_DIR/ai.log"
-            ;;
-        *)
-            echo "Available logs: daemon, ai"
-            echo "Usage: $0 logs [daemon|ai]"
-            ;;
-    esac
+clean_all() {
+    echo -e "${RED}🧹 Cleaning all HomeSight processes...${NC}"
+
+    stop_daemon
+    stop_ai
+    stop_docker
+
+    # Clean up PIDs
+    rm -f "$PID_DIR"/*.pid 2>/dev/null || true
+
+    # Clean up ports
+    for port in 8080 8001 9090; do
+        lsof -ti:$port 2>/dev/null | xargs kill -9 2>/dev/null || true
+    done
+
+    echo -e "${GREEN}✅ Clean complete${NC}"
 }
 
 case "${1:-}" in
@@ -222,13 +201,16 @@ case "${1:-}" in
         stop_ai
         stop_docker
         ;;
+    clean)
+        clean_all
+        ;;
     restart)
         echo "🏠 Restarting HomeSight..."
         echo ""
         stop_daemon
         stop_ai
         stop_docker
-        sleep 1
+        sleep 3
         start_daemon
         start_ai
         start_docker
@@ -239,57 +221,24 @@ case "${1:-}" in
         show_status
         ;;
     logs)
-        show_logs "${2:-}"
-        ;;
-    dashboard)
-        echo "🏠 Opening HomeSight Dashboard..."
-        "$PROJECT_DIR/bin/homesight-dashboard"
-        ;;
-    start-daemon)
-        start_daemon
-        ;;
-    start-ai)
-        start_ai
-        ;;
-    start-docker)
-        start_docker
-        ;;
-    stop-daemon)
-        stop_daemon
-        ;;
-    stop-ai)
-        stop_ai
-        ;;
-    stop-docker)
-        stop_docker
+        case "${2:-}" in
+            daemon) tail -f "$LOG_DIR/daemon.log" ;;
+            ai) docker-compose logs -f ai-sidecar ;;
+            *) echo "Usage: $0 logs [daemon|ai]" ;;
+        esac
         ;;
     *)
         echo "🏠 HomeSight Control Script"
         echo ""
-        echo "Usage: $0 {start|stop|restart|status|logs|dashboard}"
+        echo "Usage: $0 {start|stop|restart|clean|status|logs}"
         echo ""
         echo "Commands:"
-        echo "  start          Start all services (daemon + AI + docker)"
-        echo "  stop           Stop all services"
-        echo "  restart        Restart all services"
-        echo "  status         Show service status"
-        echo "  logs [service] Show logs (daemon or ai)"
-        echo "  dashboard      Open interactive TUI dashboard"
-        echo ""
-        echo "Individual controls:"
-        echo "  start-daemon   Start only the daemon"
-        echo "  start-ai       Start only the AI sidecar"
-        echo "  start-docker   Start only Docker services"
-        echo "  stop-daemon    Stop only the daemon"
-        echo "  stop-ai        Stop only the AI sidecar"
-        echo "  stop-docker    Stop only Docker services"
-        echo ""
-        echo "Examples:"
-        echo "  $0 start           # Start everything"
-        echo "  $0 stop            # Stop everything"
-        echo "  $0 status          # Check status"
-        echo "  $0 dashboard       # Open TUI dashboard"
-        echo "  $0 logs daemon     # View daemon logs"
+        echo "  start    Start all services"
+        echo "  stop     Stop all services"
+        echo "  restart  Restart all services"
+        echo "  clean    Kill all processes and clean ports"
+        echo "  status   Show service status"
+        echo "  logs     Show logs (daemon or ai)"
         exit 1
         ;;
 esac

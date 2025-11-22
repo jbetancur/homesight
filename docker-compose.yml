@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   prometheus:
     image: prom/prometheus:latest
@@ -17,6 +15,28 @@ services:
     restart: unless-stopped
     networks:
       - homesight
+
+  ai-sidecar:
+    build:
+      context: .
+      dockerfile: docker/ai-sidecar/Dockerfile
+    image: homesight-ai-sidecar
+    container_name: homesight-ai-sidecar
+    ports:
+      - "8001:8001"
+    volumes:
+      - ~/.homesight/manuals:/root/.homesight/manuals:rw
+      # Persist RAG database and downloaded models on the host so data
+      # survives container recreation and large files need not be baked into
+      # the image.
+      - ~/.homesight/rag:/var/lib/homesight/rag:rw
+      # NOTE: Don't mount /app/models as it hides the Python package modules
+      # - ~/.homesight/models:/app/models:rw
+      - /etc/localtime:/etc/localtime:ro
+    restart: unless-stopped
+    networks:
+      - homesight
+    # To give access to host devices (USB / serial), add 'devices' entries here or mount them at runtime.
 
 volumes:
   prometheus_data:

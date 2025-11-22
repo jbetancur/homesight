@@ -98,3 +98,8 @@ func (c *HTTPClient) Analyze(ctx context.Context, req AnalyzeRequest) (AnalyzeRe
 func (c *HTTPClient) Close() error {
 	return nil
 }
+
+// GetBaseURL returns the base URL of the AI service
+func (c *HTTPClient) GetBaseURL() string {
+	return c.baseURL
+}

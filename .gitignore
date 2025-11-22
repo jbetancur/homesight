@@ -27,6 +27,11 @@ homesightd
 **/rag-db/
 *.bin
 
+# AI Models (too large for git)
+ai-sidecar/models/*.gguf
+ai-sidecar/models/*.bin
+*.gguf
+
 # Python
 __pycache__/
 *.py[cod]

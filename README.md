@@ -375,17 +375,20 @@ graph TB
 ### Key Architecture Notes
 
 **MQTT Client, Not Server:**
+
 - HomeSight connects to external Mosquitto as MQTT client
 - Does not embed/bundle MQTT broker
 - Supports multiple broker connections simultaneously
 - Auto-discovers brokers via mDNS (`_mqtt._tcp`)
 
 **Discovery Architecture:**
+
 - **mDNS Discovery**: Finds brokers, Matter devices, LAN devices, Z-Wave JS gateways
 - **MQTT Discovery Listener**: Parses Home Assistant, Homie, and Tasmota discovery messages
 - **Zero-config**: No manual device entry required
 
 **Integration Types:**
+
 - **MQTT Integration**: Generic MQTT client for device state and control
 - **Zigbee2MQTT**: Wrapper around MQTT client using `zigbee2mqtt` base topic
 - **LAN Integration**: HTTP/REST polling for Shelly, Tasmota, ESPHome

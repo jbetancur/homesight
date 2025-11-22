@@ -2,7 +2,11 @@ fastapi>=0.115.0
 uvicorn[standard]>=0.32.0
 pydantic>=2.10.0
 pyyaml>=6.0
-openai>=2.0.0  # For LLM-powered document finding
+openai>=2.0.0  # For document discovery only
+
+# Local LLM
+llama-cpp-python>=0.2.90  # For local Llama inference
+huggingface-hub>=0.24.0   # For automatic model downloads
 
 # RAG Dependencies
 chromadb>=1.0.0
@@ -10,3 +14,9 @@ fastembed>=0.7.0  # Lightweight local embeddings
 pypdf>=6.0.0
 httpx>=0.28.0
 beautifulsoup4>=4.12.0
+
+## Optional conversion helpers
+# PDF conversion via wkhtmltopdf (python wrapper)
+pdfkit>=1.0.0
+# Headless Chromium fallback for complex pages
+pyppeteer>=0.2.6

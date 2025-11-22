@@ -2,9 +2,13 @@ database:
   path: ./data/homesight.db
 
 mqtt:
-  broker_url: "tcp://homeassistant:1883"  # Your Home Assistant MQTT (mDNS not available on your network)
-  username: "john"    # Set your MQTT username here
-  password: ''    # Set your MQTT password here
+  # Optional: Specify a single broker URL for manual configuration
+  # If empty, HomeSight auto-discovers ALL MQTT brokers on the network via mDNS (_mqtt._tcp)
+  broker_url: ""  # Leave empty for auto-discovery (recommended)
+
+  # Credentials (applied to all discovered brokers)
+  username: ""
+  password: ""
 
 prometheus:
   url: http://localhost:9090
@@ -12,6 +16,33 @@ prometheus:
 ai:
   service_url: http://localhost:8001
   openai_api_key: ""
+
+  # LLM Configuration
+  llm:
+    provider: "hybrid"  # Hybrid: OpenAI for chat/analysis, local for fallback
+
+    # Local LLM settings (Llama 3.2 3B - no auth required)
+    # For 8B: Change repo_id to bartowski/Llama-3.2-8B-Instruct-GGUF and set HF_TOKEN env var
+    local:
+      model_path: "./models/llama-3.2-3b-instruct.gguf"
+      auto_download: true  # Automatically download model if not found
+
+      # Model source for auto-download (HuggingFace)
+      # 3B model works without authentication, 8B requires HF_TOKEN
+      download_source:
+        repo_id: "bartowski/Llama-3.2-3B-Instruct-GGUF"
+        filename: "Llama-3.2-3B-Instruct-Q4_K_M.gguf"
+
+      # Runtime settings
+      n_ctx: 4096          # Context window size
+      n_threads: 4         # CPU threads (auto-detect based on CPU cores)
+      n_gpu_layers: 0      # 0 = CPU only, 35+ = full GPU (if CUDA available)
+      temperature: 0.7     # Sampling temperature (0.0-1.0)
+
+    # OpenAI settings (for document discovery only)
+    openai:
+      model: "gpt-4o-mini"
+      fallback: false    # Don't fallback to OpenAI for chat
 
 api:
   addr: :8080

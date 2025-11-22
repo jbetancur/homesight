@@ -3,9 +3,11 @@ package rules
 import (
 	"context"
 	"fmt"
+	"log"
 	"sync"
 	"time"
 
+	"github.com/homesight/homesight/internal/db"
 	"github.com/homesight/homesight/internal/model"
 )
 
@@ -16,6 +18,7 @@ type DefaultRuleEngine struct {
 	sumpPumpCycles   map[string][]time.Time
 	freezeThresholds map[string]float64
 	activeIncidents  map[string]*model.Incident // Track active incidents by rule+device key
+	deviceRepo       db.DeviceRepository        // For looking up device details
 }
 
 type deviceState struct {
@@ -25,13 +28,32 @@ type deviceState struct {
 }
 
 // NewDefaultRuleEngine creates a new rule engine with standard rules
-func NewDefaultRuleEngine() *DefaultRuleEngine {
+func NewDefaultRuleEngine(deviceRepo db.DeviceRepository) *DefaultRuleEngine {
 	return &DefaultRuleEngine{
 		deviceStates:     make(map[string]deviceState),
 		sumpPumpCycles:   make(map[string][]time.Time),
 		freezeThresholds: make(map[string]float64),
 		activeIncidents:  make(map[string]*model.Incident),
+		deviceRepo:       deviceRepo,
 	}
+}
+
+// enrichIncident adds zone_id and asset_id from device lookup
+func (e *DefaultRuleEngine) enrichIncident(ctx context.Context, incident *model.Incident) {
+	if e.deviceRepo == nil || incident.DeviceID == "" {
+		return
+	}
+
+	device, err := e.deviceRepo.Get(ctx, incident.DeviceID)
+	if err != nil {
+		// Device not found or error - continue without enrichment
+		log.Printf("Failed to enrich incident %s with device details: %v", incident.ID, err)
+		return
+	}
+
+	// Populate zone and asset IDs from device
+	incident.ZoneID = device.ZoneID
+	incident.AssetID = device.AssetID
 }
 
 // Process evaluates an event and returns any triggered incidents
@@ -57,24 +79,29 @@ func (e *DefaultRuleEngine) Process(ctx context.Context, event model.DeviceEvent
 	switch sensorType {
 	case "leak_sensor", "water_sensor":
 		if inc := e.checkLeakDetection(event); inc != nil {
+			e.enrichIncident(ctx, inc)
 			incidents = append(incidents, *inc)
 		}
 	case "temperature":
 		if inc := e.checkFreezeRisk(event); inc != nil {
+			e.enrichIncident(ctx, inc)
 			incidents = append(incidents, *inc)
 		}
 	case "sump_pump":
 		if inc := e.checkSumpPumpCycles(event); inc != nil {
+			e.enrichIncident(ctx, inc)
 			incidents = append(incidents, *inc)
 		}
 	case "battery":
 		if inc := e.checkBatteryLow(event); inc != nil {
+			e.enrichIncident(ctx, inc)
 			incidents = append(incidents, *inc)
 		}
 	}
 
 	// Check device offline
 	if inc := e.checkDeviceOffline(event); inc != nil {
+		e.enrichIncident(ctx, inc)
 		incidents = append(incidents, *inc)
 	}
 

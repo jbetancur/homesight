@@ -51,6 +51,20 @@ curl -s -X POST $API_URL/devices \
   }' | python3 -m json.tool 2>/dev/null || cat
 
 echo -e "${CYAN}✅ Device discovered and registered!${NC}"
+echo ""
+echo -e "${YELLOW}🤖 Triggering AI document ingestion for Aqara SJCGQ11LM...${NC}"
+curl -s -X POST http://localhost:8001/events/device \
+  -H "Content-Type: application/json" \
+  -d '{
+    "type": "device.created",
+    "data": {
+      "id": "basement-leak-sensor-001",
+      "manufacturer": "Aqara",
+      "model": "SJCGQ11LM",
+      "type": "water_leak"
+    }
+  }' | python3 -m json.tool 2>/dev/null || echo "  (AI sidecar not running - manual docs will be needed)"
+echo -e "${CYAN}   Documentation discovery queued in background${NC}"
 pause
 
 # Step 2: Add sump pump monitor
@@ -77,6 +91,20 @@ curl -s -X POST $API_URL/devices \
   }' | python3 -m json.tool 2>/dev/null || cat
 
 echo -e "${CYAN}✅ Sump pump monitor online!${NC}"
+echo ""
+echo -e "${YELLOW}🤖 Triggering AI document ingestion for Shelly Plug S...${NC}"
+curl -s -X POST http://localhost:8001/events/device \
+  -H "Content-Type: application/json" \
+  -d '{
+    "type": "device.created",
+    "data": {
+      "id": "sump-pump-monitor-001",
+      "manufacturer": "Shelly",
+      "model": "Plug S",
+      "type": "power_monitor"
+    }
+  }' | python3 -m json.tool 2>/dev/null || echo "  (AI sidecar not running)"
+echo -e "${CYAN}   Documentation discovery queued in background${NC}"
 pause
 
 # Step 3: Add temperature sensors
@@ -119,6 +147,20 @@ curl -s -X POST $API_URL/devices \
   }' | python3 -m json.tool 2>/dev/null || cat
 
 echo -e "${CYAN}✅ Temperature sensors deployed!${NC}"
+echo ""
+echo -e "${YELLOW}🤖 Triggering AI document ingestion for Aqara WSDCGQ11LM...${NC}"
+curl -s -X POST http://localhost:8001/events/device \
+  -H "Content-Type: application/json" \
+  -d '{
+    "type": "device.created",
+    "data": {
+      "id": "basement-temp-sensor-001",
+      "manufacturer": "Aqara",
+      "model": "WSDCGQ11LM",
+      "type": "temperature"
+    }
+  }' | python3 -m json.tool 2>/dev/null || echo "  (AI sidecar not running)"
+echo -e "${CYAN}   Documentation discovery queued in background${NC}"
 pause
 
 # Step 4: Simulate an incident
@@ -186,6 +228,20 @@ curl -s -X POST $API_URL/devices \
   }' | python3 -m json.tool 2>/dev/null || cat
 
 echo -e "${CYAN}✅ Additional sensors online!${NC}"
+echo ""
+echo -e "${YELLOW}🤖 Triggering AI document ingestion for Aqara MCCGQ11LM...${NC}"
+curl -s -X POST http://localhost:8001/events/device \
+  -H "Content-Type: application/json" \
+  -d '{
+    "type": "device.created",
+    "data": {
+      "id": "front-door-sensor-001",
+      "manufacturer": "Aqara",
+      "model": "MCCGQ11LM",
+      "type": "contact"
+    }
+  }' | python3 -m json.tool 2>/dev/null || echo "  (AI sidecar not running)"
+echo -e "${CYAN}   Documentation discovery queued in background${NC}"
 pause
 
 # Step 6: Add a warning incident
@@ -222,6 +278,25 @@ echo -e "${GREEN}Current System Status:${NC}"
 echo "  📱 6 devices registered and online"
 echo "  🚨 2 active incidents (1 critical, 1 medium)"
 echo "  ✅ All integrations active"
+echo "  🤖 AI knowledge base building (may take 1-2 minutes)"
+echo ""
+echo -e "${YELLOW}Real Devices Used (with documentation):${NC}"
+echo "  • Aqara SJCGQ11LM (Water Leak Sensor)"
+echo "  • Aqara WSDCGQ11LM (Temperature/Humidity Sensor)"
+echo "  • Aqara MCCGQ11LM (Door/Window Contact Sensor)"
+echo "  • Shelly Plug S (Smart Plug with Power Monitoring)"
+echo ""
+echo -e "${YELLOW}AI Features:${NC}"
+echo "  • Document discovery queued for each device"
+echo "  • Knowledge base will contain:"
+echo "    - Manufacturer PDFs and manuals"
+echo "    - Support forum discussions"
+echo "    - Community troubleshooting guides"
+echo "  • AI analysis will cite specific sources"
+echo "  • Check incidents view for AI recommendations"
+echo ""
+echo -e "${YELLOW}To check knowledge base status:${NC}"
+echo "  curl http://localhost:8001/rag/status | jq"
 echo ""
 echo -e "${YELLOW}To clean up demo data:${NC}"
 echo "  ./scripts/cleanup-demo.sh"

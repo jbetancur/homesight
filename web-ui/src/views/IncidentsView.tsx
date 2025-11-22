@@ -30,9 +30,12 @@ import {
   Clock
 } from 'lucide-react';
 import { useEventSubscription } from '../useEventSubscription';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
+import rehypeSanitize from 'rehype-sanitize';
 
 const API_BASE = 'http://localhost:8080/api';
-const AI_API_BASE = 'http://localhost:8001';
+// AI routes are now proxied through Go API at /api/ai/*
 
 function getSeverityColor(severity?: string) {
   if (!severity || typeof severity !== 'string') return 'gray';
@@ -101,7 +104,7 @@ export function IncidentsView() {
     }));
 
     try {
-      const response = await fetch(`${AI_API_BASE}/analyze`, {
+      const response = await fetch(`${API_BASE}/ai/analyze`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -180,7 +183,7 @@ export function IncidentsView() {
     setChatLoading(true);
 
     try {
-      const response = await fetch(`${AI_API_BASE}/chat`, {
+      const response = await fetch(`${API_BASE}/ai/chat`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -267,7 +270,11 @@ export function IncidentsView() {
                     {getStatusIcon(incident.status)}
                     <div>
                       <Text fw={600} size="md">{incident.title}</Text>
-                      <Text size="xs" c="dimmed">{new Date(incident.createdAt).toLocaleString()}</Text>
+                      <Text size="xs" c="dimmed">
+                        {incident.created_at && !isNaN(new Date(incident.created_at).getTime())
+                          ? new Date(incident.created_at).toLocaleString()
+                          : 'Unknown date'}
+                      </Text>
                     </div>
                   </Group>
                   <Group gap="xs">
@@ -283,6 +290,22 @@ export function IncidentsView() {
                 </Group>
 
                 <Text size="sm">{incident.description}</Text>
+
+                {/* Device Metadata */}
+                <Group gap="xs" wrap="wrap">
+                  {incident.device_id && (
+                    <Badge variant="dot" size="sm" color="gray">Device: {incident.device_id}</Badge>
+                  )}
+                  {incident.sensor_id && (
+                    <Badge variant="dot" size="sm" color="gray">Sensor: {incident.sensor_id}</Badge>
+                  )}
+                  {incident.rule_name && (
+                    <Badge variant="dot" size="sm" color="blue">Rule: {incident.rule_name}</Badge>
+                  )}
+                  {incident.zone_id && incident.zone_id !== "N/A" && (
+                    <Badge variant="dot" size="sm" color="teal">Zone: {incident.zone_id}</Badge>
+                  )}
+                </Group>
 
                 <Collapse in={isExpanded}>
                   <Stack gap="md" mt="md">
@@ -304,6 +327,18 @@ export function IncidentsView() {
                         <Text size="sm" c="red">{recommendation.insights[0]}</Text>
                       ) : recommendation ? (
                         <Stack gap="sm">
+                          {/* Documentation Status Warning */}
+                          {recommendation.metadata?.documentation_available === false && (
+                            <Paper p="xs" withBorder style={{ backgroundColor: 'var(--mantine-color-yellow-0)', borderColor: 'var(--mantine-color-yellow-3)' }}>
+                              <Group gap="xs">
+                                <AlertCircle size={16} color="var(--mantine-color-yellow-7)" />
+                                <Text size="xs" c="yellow.9">
+                                  ⚠️ No device-specific documentation in knowledge base. Recommendations are generic.
+                                </Text>
+                              </Group>
+                            </Paper>
+                          )}
+
                           <Text size="sm">{recommendation.analysis}</Text>
 
                           {recommendation.insights && recommendation.insights.length > 0 && (
@@ -325,6 +360,34 @@ export function IncidentsView() {
                                   <List.Item key={idx}>{action}</List.Item>
                                 ))}
                               </List>
+                            </div>
+                          )}
+
+                          {/* Sources Section */}
+                          {recommendation.metadata?.sources_cited && recommendation.metadata.sources_cited.length > 0 && (
+                            <div>
+                              <Text size="xs" fw={600} mb={4} c="dimmed">Sources Referenced:</Text>
+                              <Group gap="xs">
+                                {recommendation.metadata.sources_cited.map((source: string, idx: number) => (
+                                  <Badge key={idx} variant="light" size="xs" color="blue">
+                                    {source}
+                                  </Badge>
+                                ))}
+                              </Group>
+                            </div>
+                          )}
+
+                          {/* RAG Sources (if available) */}
+                          {recommendation.metadata?.rag_sources && recommendation.metadata.rag_sources.length > 0 && (
+                            <div>
+                              <Text size="xs" fw={600} mb={4} c="dimmed">Knowledge Base Sources:</Text>
+                              <Stack gap={4}>
+                                {recommendation.metadata.rag_sources.map((source: any, idx: number) => (
+                                  <Text key={idx} size="xs" c="dimmed">
+                                    • {source.source} (relevance: {Math.round(source.relevance * 100)}%)
+                                  </Text>
+                                ))}
+                              </Stack>
                             </div>
                           )}
                         </Stack>
@@ -410,7 +473,22 @@ export function IncidentsView() {
                     maxWidth: '85%'
                   }}
                 >
-                  <Text size="sm">{msg.content}</Text>
+                  {msg.role === 'assistant' ? (
+                    <div style={{ whiteSpace: 'pre-wrap' }}>
+                      <ReactMarkdown
+                        remarkPlugins={[remarkGfm]}
+                        rehypePlugins={[rehypeSanitize]}
+                        children={msg.content}
+                        components={{
+                          p: ({node, ...props}) => <Text size="sm" {...props} />,
+                          li: ({node, ...props}) => <li style={{ marginLeft: 8 }} {...props} />,
+                          strong: ({node, ...props}) => <Text component="span" fw={700} {...props} />
+                        }}
+                      />
+                    </div>
+                  ) : (
+                    <Text size="sm">{msg.content}</Text>
+                  )}
                 </Paper>
               ))}
               {chatLoading && (
