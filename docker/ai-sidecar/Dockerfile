@@ -31,9 +31,8 @@ COPY ai-sidecar/ /app/
 
 EXPOSE 8001
 
-# Use uvicorn directly with optimal async settings
-# - host 0.0.0.0: Listen on all interfaces
-# - limit-concurrency 100: Max concurrent connections
-# - timeout-keep-alive 30: Keep connections alive for 30s
-# - loop asyncio: Use asyncio event loop (best for CPU-bound + I/O mix)
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8001", "--limit-concurrency", "100", "--timeout-keep-alive", "30", "--loop", "asyncio"]
+# Start app with uvicorn
+# Uvicorn will use multiple workers to handle concurrent requests
+# Queue remaining requests - the ThreadPoolExecutor will queue analyze jobs
+ENTRYPOINT ["sh", "-c"]
+CMD ["uvicorn main:app --host 0.0.0.0 --port 8001 --workers=2 --timeout-keep-alive 300 --loop asyncio"]

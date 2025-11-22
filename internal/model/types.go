@@ -31,17 +31,20 @@ type DeviceCommand struct {
 
 // Device represents a physical or logical device
 type Device struct {
-	ID          string            `json:"id"`
-	Name        string            `json:"name"`
-	Type        string            `json:"type"`
-	Integration string            `json:"integration"`
-	ZoneID      string            `json:"zone_id"`
-	AssetID     string            `json:"asset_id"`
-	Enabled     bool              `json:"enabled"`
-	LastSeen    time.Time         `json:"last_seen"`
-	Metadata    map[string]string `json:"metadata"`
-	CreatedAt   time.Time         `json:"created_at"`
-	UpdatedAt   time.Time         `json:"updated_at"`
+	ID              string            `json:"id"`
+	Name            string            `json:"name"`
+	Type            string            `json:"type"`
+	Integration     string            `json:"integration"`
+	ZoneID          string            `json:"zone_id"`
+	AssetID         string            `json:"asset_id"`
+	Enabled         bool              `json:"enabled"`
+	LastSeen        time.Time         `json:"last_seen"`
+	Metadata        map[string]string `json:"metadata"`
+	DocsIngested    bool              `json:"docs_ingested"`     // Whether documentation has been processed
+	DocsIngestedAt  *time.Time        `json:"docs_ingested_at"`  // When documentation was last processed
+	DocsStatus      string            `json:"docs_status"`       // pending/success/partial/error
+	CreatedAt       time.Time         `json:"created_at"`
+	UpdatedAt       time.Time         `json:"updated_at"`
 }
 
 // Sensor represents a sensor within a device

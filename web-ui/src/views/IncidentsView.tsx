@@ -77,25 +77,55 @@ export function IncidentsView() {
   const [technicianModal, setTechnicianModal] = useState<{open: boolean, incidentId: string | null}>({open: false, incidentId: null});
   const [technicianNotes, setTechnicianNotes] = useState('');
   const incidentsRef = useRef<any[]>([]);
+  const messagesEndRef = useRef<HTMLDivElement>(null);
+  const abortControllerRef = useRef<AbortController>(new AbortController());
+  const analysisAbortControllerRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
-    fetch(`${API_BASE}/incidents`).then(res => res.json()).then(data => {
-      const incidentList = data || [];
-      setIncidents(incidentList);
-      incidentsRef.current = incidentList;
-      setLoading(false);
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
 
-      // Auto-fetch AI recommendations for all incidents
-      incidentList.forEach((incident: any) => {
-        if (incident.id) {
-          fetchAIRecommendation(incident);
+    fetch(`${API_BASE}/incidents`, { signal: controller.signal })
+      .then(res => res.json())
+      .then(data => {
+        const incidentList = data || [];
+        setIncidents(incidentList);
+        incidentsRef.current = incidentList;
+        setLoading(false);
+      })
+      .catch(err => {
+        if (err.name !== 'AbortError') {
+          setLoading(false);
         }
       });
-    }).catch(() => setLoading(false));
+
+    // Cleanup: abort all pending requests when component unmounts
+    return () => {
+      controller.abort();
+      if (analysisAbortControllerRef.current) {
+        analysisAbortControllerRef.current.abort();
+      }
+    };
   }, []);
+
+  // Auto-scroll to bottom when new messages arrive
+  useEffect(() => {
+    if (messagesEndRef.current) {
+      messagesEndRef.current.scrollIntoView({ behavior: 'smooth' });
+    }
+  }, [chatMessages]);
 
   const fetchAIRecommendation = async (incident: any) => {
     const incidentId = incident.id;
+
+    // Cancel previous analysis if any
+    if (analysisAbortControllerRef.current) {
+      analysisAbortControllerRef.current.abort();
+    }
+
+    // Create new abort controller for this analysis
+    const controller = new AbortController();
+    analysisAbortControllerRef.current = controller;
 
     // Mark as loading
     setRecommendations(prev => ({
@@ -107,6 +137,7 @@ export function IncidentsView() {
       const response = await fetch(`${API_BASE}/ai/analyze`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        signal: controller.signal,
         body: JSON.stringify({
           type: 'incident',
           data: {
@@ -132,7 +163,13 @@ export function IncidentsView() {
       } else {
         throw new Error('AI service returned error');
       }
-    } catch (error) {
+    } catch (error: any) {
+      // Don't show error if request was aborted (user expanded different incident or component unmounted)
+      if (error.name === 'AbortError') {
+        console.log('AI recommendation request cancelled');
+        return;
+      }
+
       console.error('Failed to fetch AI recommendation:', error);
       setRecommendations(prev => ({
         ...prev,
@@ -156,8 +193,7 @@ export function IncidentsView() {
         updated = [...updated, event.data];
         incidentsRef.current = updated;
         setIncidents(updated);
-        // Fetch AI recommendation for new incident
-        fetchAIRecommendation(event.data);
+        // Don't auto-fetch AI - wait for user to expand
       }
     } else if (event.type === "incident_updated") {
       updated = updated.map(i => i.id === event.data.id ? event.data : i);
@@ -167,8 +203,12 @@ export function IncidentsView() {
       updated = updated.filter(i => i.id !== event.data.id);
       incidentsRef.current = updated;
       setIncidents(updated);
+      // Cancel analysis if removed incident was being analyzed
+      if (analysisAbortControllerRef.current && expandedId === event.data.id) {
+        analysisAbortControllerRef.current.abort();
+      }
     }
-  }, []);
+  }, [expandedId]);
   useEventSubscription(handleEvent);
 
   const handleChatSubmit = async () => {
@@ -282,7 +322,21 @@ export function IncidentsView() {
                     <Badge variant="light">{incident.status}</Badge>
                     <ActionIcon
                       variant="subtle"
-                      onClick={() => setExpandedId(isExpanded ? null : incident.id)}
+                      onClick={() => {
+                        if (isExpanded) {
+                          // Closing - cancel analysis
+                          setExpandedId(null);
+                          if (analysisAbortControllerRef.current) {
+                            analysisAbortControllerRef.current.abort();
+                          }
+                        } else {
+                          // Opening - only fetch analysis if not already cached
+                          setExpandedId(incident.id);
+                          if (!recommendations[incident.id]) {
+                            fetchAIRecommendation(incident);
+                          }
+                        }
+                      }}
                     >
                       {isExpanded ? <ChevronUp size={18} /> : <ChevronDown size={18} />}
                     </ActionIcon>
@@ -497,6 +551,7 @@ export function IncidentsView() {
                   <Text size="sm" c="dimmed">AI is thinking...</Text>
                 </Group>
               )}
+              <div ref={messagesEndRef} />
             </Stack>
           </ScrollArea>
 

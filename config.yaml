@@ -13,6 +13,13 @@ mqtt:
 prometheus:
   url: http://localhost:9090
 
+rag:
+  # Document ingestion batch sizes - tune these to balance between throughput and CPU usage
+  # Smaller batches = lower CPU spike but slower ingestion
+  # Larger batches = faster ingestion but higher CPU spike
+  batch_size_documents: 3      # For PDF/official documentation ingestion
+  batch_size_community: 2      # For community source (forum/reddit/etc) ingestion
+
 ai:
   service_url: http://localhost:8001
   openai_api_key: ""
@@ -44,8 +51,17 @@ ai:
       model: "gpt-4o-mini"
       fallback: false    # Don't fallback to OpenAI for chat
 
+    # Inference concurrency settings
+    inference:
+      max_worker_threads: 4      # ThreadPoolExecutor workers for LLM inference
+      max_concurrent_tasks: 4    # Semaphore limit for concurrent analyze requests
+
 api:
   addr: :8080
+
+# Backend URL for AI sidecar to reach the Go API
+# Use host.docker.internal which works on WSL2, Docker Desktop Mac/Windows
+backend_url: "http://host.docker.internal:8080"
 
 integrations:
   matter: true   # Auto-discovers Matter devices via mDNS (requires native network)

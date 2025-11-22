@@ -25,6 +25,7 @@ services:
     ports:
       - "8001:8001"
     volumes:
+      - ./config.yaml:/app/config.yaml:ro
       - ~/.homesight/manuals:/root/.homesight/manuals:rw
       # Persist RAG database and downloaded models on the host so data
       # survives container recreation and large files need not be baked into
@@ -33,9 +34,19 @@ services:
       # NOTE: Don't mount /app/models as it hides the Python package modules
       # - ~/.homesight/models:/app/models:rw
       - /etc/localtime:/etc/localtime:ro
+      - ./.logs:/app/log:rw
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+        labels: "ai-sidecar"
     restart: unless-stopped
     networks:
       - homesight
+    # Allow container to reach host via host.docker.internal
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     # To give access to host devices (USB / serial), add 'devices' entries here or mount them at runtime.
 
 volumes:

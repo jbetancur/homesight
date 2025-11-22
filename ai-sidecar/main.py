@@ -31,14 +31,41 @@ from services.analysis_service import AnalysisService
 from services.document_service import DocumentService
 
 # LLM and RAG
-from llm.provider import HybridLLMProvider
+from llm.provider import HybridLLMProvider, _init_executor
 from rag.engine import RAGEngine
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
+# Queue management
+from analysis_queue import AnalysisQueue
+
+# Configure logging to both console and file
+log_dir = Path('/app/log')
+log_dir.mkdir(parents=True, exist_ok=True)
+log_file = log_dir / 'ai.log'
+
+# Configure root logger
+root_logger = logging.getLogger()
+root_logger.setLevel(logging.INFO)
+
+# File handler (to file)
+file_handler = logging.FileHandler(log_file)
+file_handler.setLevel(logging.INFO)
+file_formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+file_handler.setFormatter(file_formatter)
+
+# Console handler (to stdout)
+console_handler = logging.StreamHandler()
+console_handler.setLevel(logging.INFO)
+console_formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+console_handler.setFormatter(console_formatter)
+
+# Remove existing handlers to avoid duplication
+root_logger.handlers = []
+
+# Add new handlers
+root_logger.addHandler(file_handler)
+root_logger.addHandler(console_handler)
+
+# Create module logger
 logger = logging.getLogger(__name__)
 
 # Global service instances (initialized on startup)
@@ -48,6 +75,16 @@ session_service = None
 chat_service = None
 analysis_service = None
 document_service = None
+analysis_queue = None
+
+# Cached health status (updated periodically, never blocks)
+import asyncio
+cached_health_status = {
+    "status": "initializing",
+    "llm": {"available": False},
+    "rag": {"available": False, "documents": 0},
+    "sessions": {"active": 0}
+}
 
 
 @asynccontextmanager
@@ -56,7 +93,7 @@ async def lifespan(app: FastAPI):
     logger.info("🚀 Starting HomeSight AI Service")
 
     # Initialize services
-    global llm_provider, rag_engine, session_service, chat_service, analysis_service, document_service
+    global llm_provider, rag_engine, session_service, chat_service, analysis_service, document_service, analysis_queue
 
     try:
         config = get_config()
@@ -75,6 +112,9 @@ async def lifespan(app: FastAPI):
 
         stats = rag_engine.get_stats()
         logger.info(f"RAG loaded: {stats['total_documents']} documents")
+
+        # Initialize ThreadPoolExecutor with configured worker count
+        _init_executor(max_workers=config.llm.inference.max_worker_threads)
 
         # Initialize LLM provider
         logger.info("Initializing hybrid LLM provider...")
@@ -104,14 +144,47 @@ async def lifespan(app: FastAPI):
             openai_api_key=config.llm.openai_api_key
         )
 
+        # Initialize analysis queue with configured concurrency limit
+        analysis_queue = AnalysisQueue(max_concurrent=config.llm.inference.max_concurrent_tasks)
         logger.info("✅ All services initialized")
+        logger.info(f"Analysis queue: max_concurrent={config.llm.inference.max_concurrent_tasks}, "
+                    f"max_worker_threads={config.llm.inference.max_worker_threads}")
 
     except Exception as e:
         logger.error(f"Failed to initialize services: {e}")
         raise
 
+    # Start background task to update health status periodically
+    # This ensures health endpoint is NEVER blocked by inference work
+    async def update_health_status():
+        """Periodically update cached health status (never blocks)"""
+        while True:
+            try:
+                await asyncio.sleep(2)  # Update every 2 seconds
+                global cached_health_status
+                cached_health_status = {
+                    "status": "healthy",
+                    "llm": {
+                        "available": llm_provider is not None and llm_provider.is_available()
+                    } if llm_provider else {"available": False},
+                    "rag": {
+                        "available": rag_engine is not None,
+                        "documents": getattr(rag_engine, '_cached_count', 0) if rag_engine else 0
+                    },
+                    "sessions": {
+                        "active": len(session_service._sessions) if session_service else 0
+                    }
+                }
+            except Exception as e:
+                logger.error(f"Error updating health status: {e}")
+
+    # Start health status updater in background
+    health_task = asyncio.create_task(update_health_status())
+
     yield
 
+    # Cancel background task on shutdown
+    health_task.cancel()
     logger.info("Shutting down HomeSight AI Service")
 
 
@@ -139,22 +212,13 @@ app.add_middleware(
 # Health check
 @app.get("/health")
 async def health_check():
-    """Health check endpoint (lightweight, non-blocking)"""
-    # Don't call potentially blocking operations during health checks
-    # Just return basic availability status
-    return {
-        "status": "healthy",
-        "llm": {
-            "available": llm_provider is not None and llm_provider.is_available()
-        } if llm_provider else {"available": False},
-        "rag": {
-            "available": rag_engine is not None,
-            "documents": getattr(rag_engine, '_cached_count', 0) if rag_engine else 0
-        },
-        "sessions": {
-            "active": len(session_service._sessions) if session_service else 0
-        }
-    }
+    """Health check endpoint (instant response from cache, never blocks)
+
+    Returns cached health status updated by background task every 2 seconds.
+    This ensures the health endpoint is NEVER blocked by LLM inference,
+    database queries, or other operations.
+    """
+    return cached_health_status
 
 
 # Chat endpoint with multi-turn conversation and function calling
@@ -187,12 +251,19 @@ async def analyze(request: AnalyzeRequest):
     Analyze metrics or incidents using AI
 
     Uses LLM + RAG instead of hard-coded rules
+    Queued to prevent concurrent LLM inference from blocking other requests
     """
     if not analysis_service:
         raise HTTPException(status_code=503, detail="Analysis service not initialized")
+    if not analysis_queue:
+        raise HTTPException(status_code=503, detail="Analysis queue not initialized")
 
     try:
-        response = await analysis_service.analyze(request)
+        # Queue the analysis task to limit concurrent LLM inference
+        async def analyze_task():
+            return await analysis_service.analyze(request)
+
+        response = await analysis_queue.execute(analyze_task, task_id="analyze")
         return response
     except Exception as e:
         logger.error(f"Analysis error: {e}")
@@ -241,13 +312,55 @@ async def handle_device_event(event: dict, background_tasks: BackgroundTasks):
 async def discover_device_docs(device: dict):
     """Background task for comprehensive document discovery"""
     try:
+        device_id = device.get("id")
+        logger.info(f"Starting document discovery for device: {device_id}")
+
         if document_service:
             result = await document_service.discover_and_ingest_device_docs(device)
             logger.info(f"Doc discovery complete: {result}")
+
+            # Update device documentation status in Go backend
+            if device_id:
+                logger.info(f"Updating device {device_id} docs status in Go backend...")
+                await update_device_docs_status(device_id, result)
+                logger.info(f"Successfully updated device {device_id} docs status")
+            else:
+                logger.warning("Device ID not found in discovery result")
         else:
             logger.warning("Document service not available")
     except Exception as e:
-        logger.error(f"Error in document discovery: {e}")
+        logger.error(f"Error in document discovery: {e}", exc_info=True)
+
+
+async def update_device_docs_status(device_id: str, discovery_result: dict):
+    """Send document discovery result back to Go API"""
+    import httpx
+
+    try:
+        config = get_config()
+        status = discovery_result.get("status", "error")
+        ingested = status in ["success", "partial"]
+
+        update_payload = {
+            "status": status,
+            "ingested": ingested,
+            "ingested_at": None  # Let the Go backend set the timestamp
+        }
+
+        url = f"{config.backend_url}/api/devices/{device_id}/docs-status"
+        logger.info(f"Posting to {url} with payload: {update_payload}")
+
+        async with httpx.AsyncClient(timeout=15) as client:
+            response = await client.post(url, json=update_payload)
+
+            if response.status_code == 200:
+                logger.info(f"✅ Updated device {device_id} docs status: {status}")
+            else:
+                logger.warning(f"Failed to update device docs status. Status code: {response.status_code}, Response: {response.text}")
+    except httpx.ConnectTimeout:
+        logger.error(f"Connection timeout updating device {device_id} docs status - backend may be unreachable")
+    except Exception as e:
+        logger.error(f"Error updating device docs status: {e}", exc_info=True)
 
 
 # RAG status endpoint

@@ -1,11 +1,30 @@
 """Hybrid LLM provider supporting OpenAI with local fallback"""
 
 import logging
+import asyncio
+import os
 from typing import Optional, List, Dict, Any, Tuple
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
+from functools import partial
 import json
 
 logger = logging.getLogger(__name__)
+
+# Thread pool for blocking LLM operations
+# Initialized at module import time with configurable worker count
+# LLM inference is CPU-bound; excess threads add context switching overhead
+_llm_executor = None
+
+def _init_executor(max_workers: int = 4):
+    """Initialize ThreadPoolExecutor with specified worker count"""
+    global _llm_executor
+    if _llm_executor is None:
+        _llm_executor = ThreadPoolExecutor(
+            max_workers=max_workers,
+            thread_name_prefix="llm-"
+        )
+        logger.debug(f"ThreadPoolExecutor initialized with {max_workers} workers")
 
 
 class HybridLLMProvider:
@@ -261,6 +280,43 @@ class HybridLLMProvider:
         messages.append({"role": "user", "content": prompt})
 
         response, _ = self.chat(messages, tools=None, temperature=temperature, max_tokens=max_tokens)
+        return response
+
+    async def simple_generate_async(
+        self,
+        prompt: str,
+        system_prompt: Optional[str] = None,
+        temperature: float = 0.7,
+        max_tokens: int = 512
+    ) -> str:
+        """
+        Async text generation - runs blocking operations in thread pool
+
+        Args:
+            prompt: User prompt
+            system_prompt: Optional system instruction
+            temperature: Sampling temperature
+            max_tokens: Maximum tokens
+
+        Returns:
+            Generated text
+        """
+        messages = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append({"role": "user", "content": prompt})
+
+        # Run blocking chat operation in thread pool
+        loop = asyncio.get_event_loop()
+        # Use partial to pass all arguments cleanly
+        blocking_func = partial(
+            self.chat,
+            messages=messages,
+            tools=None,
+            temperature=temperature,
+            max_tokens=max_tokens
+        )
+        response, _ = await loop.run_in_executor(_llm_executor, blocking_func)
         return response
 
     def is_available(self) -> bool:

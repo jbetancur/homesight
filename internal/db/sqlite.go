@@ -85,6 +85,9 @@ func (s *SQLiteDB) initSchema() error {
 			enabled BOOLEAN DEFAULT 1,
 			last_seen DATETIME,
 			metadata TEXT,
+			docs_ingested BOOLEAN DEFAULT 0,
+			docs_ingested_at DATETIME,
+			docs_status TEXT DEFAULT 'pending',
 			created_at DATETIME NOT NULL,
 			updated_at DATETIME NOT NULL,
 			FOREIGN KEY (zone_id) REFERENCES zones(id),
@@ -169,11 +172,12 @@ func (r *DeviceRepo) Get(ctx context.Context, id string) (*model.Device, error) 
 	var d model.Device
 	var metadataJSON sql.NullString
 	var lastSeen sql.NullTime
+	var docsIngestedAt sql.NullTime
 
 	err := r.db.QueryRowContext(ctx,
-		`SELECT id, name, type, integration, zone_id, asset_id, enabled, last_seen, metadata, created_at, updated_at
+		`SELECT id, name, type, integration, zone_id, asset_id, enabled, last_seen, metadata, docs_ingested, docs_ingested_at, docs_status, created_at, updated_at
 		 FROM devices WHERE id = ?`, id).Scan(
-		&d.ID, &d.Name, &d.Type, &d.Integration, &d.ZoneID, &d.AssetID, &d.Enabled, &lastSeen, &metadataJSON, &d.CreatedAt, &d.UpdatedAt)
+		&d.ID, &d.Name, &d.Type, &d.Integration, &d.ZoneID, &d.AssetID, &d.Enabled, &lastSeen, &metadataJSON, &d.DocsIngested, &docsIngestedAt, &d.DocsStatus, &d.CreatedAt, &d.UpdatedAt)
 
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -185,6 +189,9 @@ func (r *DeviceRepo) Get(ctx context.Context, id string) (*model.Device, error) 
 	if lastSeen.Valid {
 		d.LastSeen = lastSeen.Time
 	}
+	if docsIngestedAt.Valid {
+		d.DocsIngestedAt = &docsIngestedAt.Time
+	}
 	if metadataJSON.Valid {
 		json.Unmarshal([]byte(metadataJSON.String), &d.Metadata)
 	}
@@ -194,7 +201,7 @@ func (r *DeviceRepo) Get(ctx context.Context, id string) (*model.Device, error) 
 
 func (r *DeviceRepo) List(ctx context.Context) ([]model.Device, error) {
 	rows, err := r.db.QueryContext(ctx,
-		`SELECT id, name, type, integration, zone_id, asset_id, enabled, last_seen, metadata, created_at, updated_at
+		`SELECT id, name, type, integration, zone_id, asset_id, enabled, last_seen, metadata, docs_ingested, docs_ingested_at, docs_status, created_at, updated_at
 		 FROM devices ORDER BY name`)
 	if err != nil {
 		return nil, err
@@ -206,13 +213,17 @@ func (r *DeviceRepo) List(ctx context.Context) ([]model.Device, error) {
 		var d model.Device
 		var metadataJSON sql.NullString
 		var lastSeen sql.NullTime
+		var docsIngestedAt sql.NullTime
 
-		if err := rows.Scan(&d.ID, &d.Name, &d.Type, &d.Integration, &d.ZoneID, &d.AssetID, &d.Enabled, &lastSeen, &metadataJSON, &d.CreatedAt, &d.UpdatedAt); err != nil {
+		if err := rows.Scan(&d.ID, &d.Name, &d.Type, &d.Integration, &d.ZoneID, &d.AssetID, &d.Enabled, &lastSeen, &metadataJSON, &d.DocsIngested, &docsIngestedAt, &d.DocsStatus, &d.CreatedAt, &d.UpdatedAt); err != nil {
 			return nil, err
 		}
 
 		if lastSeen.Valid {
 			d.LastSeen = lastSeen.Time
+		}
+		if docsIngestedAt.Valid {
+			d.DocsIngestedAt = &docsIngestedAt.Time
 		}
 		if metadataJSON.Valid {
 			json.Unmarshal([]byte(metadataJSON.String), &d.Metadata)
@@ -229,10 +240,10 @@ func (r *DeviceRepo) Upsert(ctx context.Context, device *model.Device) error {
 	device.UpdatedAt = time.Now()
 
 	_, err := r.db.ExecContext(ctx,
-		`INSERT OR REPLACE INTO devices (id, name, type, integration, zone_id, asset_id, enabled, last_seen, metadata, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT OR REPLACE INTO devices (id, name, type, integration, zone_id, asset_id, enabled, last_seen, metadata, docs_ingested, docs_ingested_at, docs_status, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		device.ID, device.Name, device.Type, device.Integration, device.ZoneID, device.AssetID, device.Enabled,
-		device.LastSeen, string(metadataJSON), device.CreatedAt, device.UpdatedAt)
+		device.LastSeen, string(metadataJSON), device.DocsIngested, device.DocsIngestedAt, device.DocsStatus, device.CreatedAt, device.UpdatedAt)
 	return err
 }
 

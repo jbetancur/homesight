@@ -60,6 +60,7 @@ func (s *Server) SetDiscoveryListener(listener *discovery.MQTTDiscoveryListener)
 	s.discoveryListener = listener
 }
 
+
 // setupRoutes configures the API routes
 func (s *Server) setupRoutes() {
 	s.router.Use(middleware.Logger)
@@ -75,7 +76,12 @@ func (s *Server) setupRoutes() {
 	}))
 
 	s.router.Get("/health", s.handleHealth)
-	s.router.Get("/api/status", s.handleSystemStatus)
+
+	// Individual service status endpoints (non-blocking, fast responses)
+	s.router.Get("/api/status/ai", s.handleAIStatus)
+	s.router.Get("/api/status/ai_sidecar", s.handleAIStatus)
+	s.router.Get("/api/status/prometheus", s.handlePrometheusStatus)
+	s.router.Get("/api/status/database", s.handleDatabaseStatus)
 
 	s.router.Route("/api", func(r chi.Router) {
 		// Incidents
@@ -92,6 +98,8 @@ func (s *Server) setupRoutes() {
 		r.Route("/devices", func(r chi.Router) {
 			r.Get("/", s.listDevices)
 			r.Get("/{id}", s.getDevice)
+			r.Post("/{id}/reingest-docs", s.handleReingestDeviceDocs) // Re-trigger document discovery for a device
+			r.Post("/{id}/docs-status", s.handleUpdateDeviceDocsStatus) // Update device documentation status (called by AI sidecar)
 			// Demo/Testing endpoints - In production, guard with admin authentication
 			r.Post("/", s.createDevice)       // Manual device creation (testing only - normally auto-discovered)
 			r.Delete("/{id}", s.deleteDevice) // Hard delete (testing/cleanup only)
@@ -131,100 +139,98 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleSystemStatus returns comprehensive system status for all components
+// handleSystemStatus returns summary stats and service list
+// Individual service status endpoints (/api/status/{service}) are called by UI
 func (s *Server) handleSystemStatus(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
-	services := make(map[string]interface{})
-
-	// Check AI Sidecar by trying to call it
-	aiStatus := map[string]interface{}{
-		"name": "AI Sidecar",
-	}
-	// Try a simple health check to AI service
-	aiClient := &http.Client{Timeout: 2 * time.Second}
-	if httpClient, ok := s.aiClient.(*ai.HTTPClient); ok {
-		aiStatus["url"] = httpClient.GetBaseURL()
-		if resp, err := aiClient.Get(httpClient.GetBaseURL() + "/health"); err == nil {
-			resp.Body.Close()
-			if resp.StatusCode == 200 {
-				aiStatus["status"] = "healthy"
-				// Try to read response body for details
-				var healthData map[string]interface{}
-				if err := json.NewDecoder(resp.Body).Decode(&healthData); err == nil {
-					aiStatus["details"] = healthData
-				}
-			} else {
-				aiStatus["status"] = "unhealthy"
-			}
-		} else {
-			aiStatus["status"] = "unavailable"
-			aiStatus["error"] = err.Error()
-		}
-	} else {
-		aiStatus["status"] = "unknown"
-	}
-	services["ai_sidecar"] = aiStatus
-
-	// Check Prometheus
-	prometheusStatus := map[string]interface{}{
-		"name": "Prometheus",
-		"url":  "http://localhost:9090",
-	}
-	promClient := &http.Client{Timeout: 2 * time.Second}
-	if resp, err := promClient.Get("http://localhost:9090/-/healthy"); err == nil {
-		resp.Body.Close()
-		if resp.StatusCode == 200 {
-			prometheusStatus["status"] = "healthy"
-		} else {
-			prometheusStatus["status"] = "unhealthy"
-		}
-	} else {
-		prometheusStatus["status"] = "unavailable"
-		prometheusStatus["error"] = err.Error()
-	}
-	services["prometheus"] = prometheusStatus
-
-	// Check Database
-	dbStatus := map[string]interface{}{
-		"name": "SQLite Database",
-	}
-	if _, err := s.deviceRepo.List(ctx); err == nil {
-		dbStatus["status"] = "healthy"
-	} else {
-		dbStatus["status"] = "unhealthy"
-		dbStatus["error"] = err.Error()
-	}
-	services["database"] = dbStatus
-
-	// Check MQTT Discovery
-	mqttStatus := map[string]interface{}{
-		"name": "MQTT Discovery",
-	}
-	s.discoveryMutex.RLock()
-	if s.discoveryListener != nil {
-		mqttStatus["status"] = "initialized"
-	} else {
-		mqttStatus["status"] = "not_initialized"
-	}
-	s.discoveryMutex.RUnlock()
-	services["mqtt_discovery"] = mqttStatus
-
-	// Summary counts
+	// Summary counts (fast, no blocking calls)
 	devices, _ := s.deviceRepo.List(ctx)
 	openIncidents, _ := s.incidentService.List(ctx, map[string]any{"status": "open"})
 	allIncidents, _ := s.incidentService.List(ctx, map[string]any{})
+
+	// Service list (no health checks here - UI calls individual endpoints)
+	services := map[string]interface{}{
+		"ai_sidecar":     map[string]string{"name": "AI Sidecar"},
+		"prometheus":     map[string]string{"name": "Prometheus", "url": "http://localhost:9090"},
+		"database":       map[string]string{"name": "SQLite Database"},
+		"mqtt_discovery": map[string]string{"name": "MQTT Discovery"},
+	}
 
 	status := map[string]interface{}{
 		"timestamp": time.Now().Format(time.RFC3339),
 		"services":  services,
 		"summary": map[string]interface{}{
-			"devices":          len(devices),
-			"open_incidents":   len(openIncidents),
-			"total_incidents":  len(allIncidents),
+			"devices":         len(devices),
+			"open_incidents":  len(openIncidents),
+			"total_incidents": len(allIncidents),
 		},
 	}
 
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(status)
+}
+
+// handleAIStatus returns AI sidecar health status
+func (s *Server) handleAIStatus(w http.ResponseWriter, r *http.Request) {
+	status := map[string]interface{}{"name": "AI Sidecar"}
+	aiClient := &http.Client{Timeout: 1 * time.Second}
+	if httpClient, ok := s.aiClient.(*ai.HTTPClient); ok {
+		status["url"] = httpClient.GetBaseURL()
+		if resp, err := aiClient.Get(httpClient.GetBaseURL() + "/health"); err == nil {
+			defer resp.Body.Close()
+			if resp.StatusCode == 200 {
+				status["status"] = "healthy"
+				var healthData map[string]interface{}
+				if err := json.NewDecoder(resp.Body).Decode(&healthData); err == nil {
+					status["details"] = healthData
+				}
+			} else {
+				status["status"] = "unhealthy"
+			}
+		} else {
+			status["status"] = "unavailable"
+			status["error"] = err.Error()
+		}
+	} else {
+		status["status"] = "unknown"
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(status)
+}
+
+// handlePrometheusStatus returns Prometheus health status
+func (s *Server) handlePrometheusStatus(w http.ResponseWriter, r *http.Request) {
+	status := map[string]interface{}{
+		"name": "Prometheus",
+		"url":  "http://localhost:9090",
+	}
+	promClient := &http.Client{Timeout: 1 * time.Second}
+	if resp, err := promClient.Get("http://localhost:9090/-/healthy"); err == nil {
+		resp.Body.Close()
+		if resp.StatusCode == 200 {
+			status["status"] = "healthy"
+		} else {
+			status["status"] = "unhealthy"
+		}
+	} else {
+		status["status"] = "unavailable"
+		status["error"] = err.Error()
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(status)
+}
+
+// handleDatabaseStatus returns database health status
+func (s *Server) handleDatabaseStatus(w http.ResponseWriter, r *http.Request) {
+	status := map[string]interface{}{"name": "SQLite Database"}
+	ctx := r.Context()
+	if _, err := s.deviceRepo.List(ctx); err == nil {
+		status["status"] = "healthy"
+	} else {
+		status["status"] = "unhealthy"
+		status["error"] = err.Error()
+	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(status)
 }
@@ -441,6 +447,7 @@ func (s *Server) createDevice(w http.ResponseWriter, r *http.Request) {
 	now := time.Now()
 	device.CreatedAt = now
 	device.UpdatedAt = now
+	device.LastSeen = now
 
 	if err := s.deviceRepo.Upsert(ctx, &device); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -451,6 +458,10 @@ func (s *Server) createDevice(w http.ResponseWriter, r *http.Request) {
 	if s.eventBus != nil {
 		s.eventBus.Publish(Event{Type: DeviceAdded, Data: device})
 	}
+
+	// Notify AI sidecar about the new device for document discovery
+	// This triggers automatic ingestion of device documentation (manuals, forums, etc.)
+	go s.notifyAIDeviceCreated(device)
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(device)

@@ -5,6 +5,7 @@ from typing import Dict, Any, Optional, List
 from pathlib import Path
 from rag.fetcher import DocumentAutoFetcher, LLMDocumentFinder
 from rag.engine import RAGEngine
+from config import get_config
 
 logger = logging.getLogger(__name__)
 
@@ -29,12 +30,19 @@ class DocumentService:
         self.cache_dir = cache_dir or Path.home() / ".homesight" / "manuals"
         self.cache_dir.mkdir(parents=True, exist_ok=True)
 
-        # Initialize document fetcher
+        # Get configuration
+        config = get_config()
+
+        # Initialize document fetcher with RAG config
         self.fetcher = DocumentAutoFetcher(
             rag_engine=rag_engine,
             cache_dir=self.cache_dir,
-            openai_api_key=openai_api_key
+            openai_api_key=openai_api_key,
+            rag_config=config.rag
         )
+
+        # Store batch size for community sources from config
+        self.batch_size_community = config.rag.batch_size_community
 
         # Initialize enhanced LLM finder
         self.llm_finder = LLMDocumentFinder(openai_api_key)
@@ -45,9 +53,9 @@ class DocumentService:
 
         Discovers:
         1. Official manufacturer documentation
-        2. Support forums and articles
-        3. Reddit discussions
-        4. Community troubleshooting guides
+        2. Support forums and articles (on initial discovery only)
+        3. Community troubleshooting guides (on initial discovery only)
+        4. Synthetic knowledge (on initial discovery only)
 
         Args:
             device: Dict with manufacturer, model, type
@@ -63,7 +71,7 @@ class DocumentService:
             logger.warning(f"Device missing manufacturer or model: {device}")
             return {"status": "error", "message": "Missing device info"}
 
-        logger.info(f"Starting comprehensive doc discovery for {manufacturer} {model}")
+        logger.info(f"Starting document discovery for {manufacturer} {model}")
 
         results = {
             "manufacturer": manufacturer,
@@ -71,7 +79,7 @@ class DocumentService:
             "sources_found": []
         }
 
-        # 1. Try official documentation first
+        # 1. Try official documentation first (always do this - fastest path)
         try:
             official_success = await self.fetcher.fetch_for_device(device)
             if official_success:
@@ -80,8 +88,11 @@ class DocumentService:
         except Exception as e:
             logger.error(f"Official doc fetch failed: {e}")
 
-        # 2. Discover community sources using LLM
-        if self.llm_finder.enabled:
+        # 2. Discover community sources using LLM (skip on reingest to reduce CPU)
+        # Community source discovery is only done on initial device creation
+        # Reingest operations focus on finding official documentation
+        # This reduces CPU/LLM overhead during reingest operations
+        if self.llm_finder.enabled and device.get("_initial_discovery", True):
             try:
                 community_docs = await self._discover_community_sources(
                     manufacturer=manufacturer,
@@ -96,13 +107,14 @@ class DocumentService:
             except Exception as e:
                 logger.error(f"Community source discovery failed: {e}")
 
-        # 3. Generate synthetic knowledge base entry (always available)
-        try:
-            await self._generate_synthetic_knowledge(device)
-            results["sources_found"].append("synthetic_knowledge")
-            logger.info("✅ Generated synthetic knowledge base entry")
-        except Exception as e:
-            logger.error(f"Synthetic knowledge generation failed: {e}")
+        # 3. Generate synthetic knowledge base entry (skip on reingest)
+        if device.get("_initial_discovery", True):
+            try:
+                await self._generate_synthetic_knowledge(device)
+                results["sources_found"].append("synthetic_knowledge")
+                logger.info("✅ Generated synthetic knowledge base entry")
+            except Exception as e:
+                logger.error(f"Synthetic knowledge generation failed: {e}")
 
         results["status"] = "success" if results["sources_found"] else "partial"
         results["total_sources"] = len(results["sources_found"])
@@ -272,8 +284,8 @@ Only include sources you're confident exist and are relevant."""
                 else:
                     documents.append({'text': text, 'metadata': metadata})
 
-                # Use async batch ingestion (non-blocking)
-                await self.rag.add_documents_async(documents, batch_size=5)
+                # Use async batch ingestion with smaller batches to reduce CPU spike
+                await self.rag.add_documents_async(documents, batch_size=self.batch_size_community)
 
                 logger.info(f"✅ Ingested content from {url}")
                 return True

@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http"
 	"strconv"
@@ -380,7 +381,157 @@ func (s *Server) handleOnboardDevice(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Notify AI sidecar about the new device for document discovery
+	// This triggers automatic ingestion of device documentation (manuals, forums, etc.)
+	go s.notifyAIDeviceCreated(device)
+
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(device)
+}
+
+// notifyAIDeviceCreated sends device creation event to AI sidecar for document discovery
+func (s *Server) notifyAIDeviceCreated(device model.Device) {
+	// Extract manufacturer and model from metadata
+	manufacturer := device.Metadata["manufacturer"]
+	model := device.Metadata["model"]
+
+	// Build event payload for AI sidecar
+	eventPayload := map[string]interface{}{
+		"type": "device.created",
+		"data": map[string]interface{}{
+			"id":           device.ID,
+			"name":         device.Name,
+			"manufacturer": manufacturer,
+			"model":        model,
+			"type":         device.Type,
+		},
+	}
+
+	// Send event to AI sidecar asynchronously
+	reqBody, err := json.Marshal(eventPayload)
+	if err != nil {
+		return
+	}
+
+	// POST to AI sidecar with timeout
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Post(
+		"http://localhost:8001/events/device",
+		"application/json",
+		bytes.NewBuffer(reqBody),
+	)
+	if err != nil {
+		return
+	}
+	defer resp.Body.Close()
+}
+
+// handleReingestDeviceDocs re-triggers document discovery for an existing device
+func (s *Server) handleReingestDeviceDocs(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Extract device ID from URL
+	deviceID := r.PathValue("id")
+	if deviceID == "" {
+		http.Error(w, "Device ID required", http.StatusBadRequest)
+		return
+	}
+
+	// Get the device
+	device, err := s.deviceRepo.Get(r.Context(), deviceID)
+	if err != nil {
+		http.Error(w, "Device not found", http.StatusNotFound)
+		return
+	}
+
+	// Set docs_status to "pending" immediately so UI updates
+	device.DocsStatus = "pending"
+	device.UpdatedAt = time.Now()
+	if err := s.deviceRepo.Upsert(r.Context(), device); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Emit device_updated event for real-time UI updates
+	if s.eventBus != nil {
+		s.eventBus.Publish(Event{Type: DeviceUpdated, Data: device})
+	}
+
+	// Trigger document discovery asynchronously
+	go s.notifyAIDeviceCreated(*device)
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"status":  "queued",
+		"message": "Document re-ingestion queued for device",
+		"device":  device.ID,
+	})
+}
+
+// handleUpdateDeviceDocsStatus updates device documentation ingestion status
+// Called by AI sidecar when document discovery completes
+func (s *Server) handleUpdateDeviceDocsStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Extract device ID from URL
+	deviceID := r.PathValue("id")
+	if deviceID == "" {
+		http.Error(w, "Device ID required", http.StatusBadRequest)
+		return
+	}
+
+	var updateReq struct {
+		Status    string `json:"status"`    // success/partial/error
+		Ingested  bool   `json:"ingested"`  // whether docs were successfully ingested
+		IngestedAt *time.Time `json:"ingested_at"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&updateReq); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	// Get the device
+	device, err := s.deviceRepo.Get(r.Context(), deviceID)
+	if err != nil {
+		http.Error(w, "Device not found", http.StatusNotFound)
+		return
+	}
+
+	// Update documentation status fields
+	device.DocsStatus = updateReq.Status
+	device.DocsIngested = updateReq.Ingested
+	if updateReq.IngestedAt != nil {
+		device.DocsIngestedAt = updateReq.IngestedAt
+	} else if updateReq.Ingested {
+		// If ingested but no timestamp provided, use current time
+		now := time.Now()
+		device.DocsIngestedAt = &now
+	}
+	device.UpdatedAt = time.Now()
+
+	// Save updated device
+	if err := s.deviceRepo.Upsert(r.Context(), device); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Emit device_updated event for real-time UI updates
+	if s.eventBus != nil {
+		s.eventBus.Publish(Event{Type: DeviceUpdated, Data: device})
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"status":  "updated",
+		"message": "Device documentation status updated",
+		"device":  device.ID,
+	})
 }

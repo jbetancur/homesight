@@ -10,6 +10,12 @@ from pydantic import BaseModel, Field
 logger = logging.getLogger(__name__)
 
 
+class InferenceConfig(BaseModel):
+    """Inference concurrency configuration"""
+    max_worker_threads: int = Field(default=4, description="ThreadPoolExecutor workers for LLM inference")
+    max_concurrent_tasks: int = Field(default=4, description="Semaphore limit for concurrent analyze requests")
+
+
 class LLMConfig(BaseModel):
     """LLM provider configuration"""
     provider: str = Field(default="hybrid", description="Provider type: 'openai', 'local', or 'hybrid'")
@@ -23,12 +29,17 @@ class LLMConfig(BaseModel):
     local_n_threads: int = 4
     local_n_gpu_layers: int = 0
 
+    # Inference concurrency settings
+    inference: InferenceConfig = Field(default_factory=InferenceConfig)
+
 
 class RAGConfig(BaseModel):
     """RAG engine configuration"""
     persist_directory: str = Field(default="/var/lib/homesight/rag")
     fallback_directory: str = Field(default="./data/rag")
     embedding_model: str = Field(default="BAAI/bge-small-en-v1.5")
+    batch_size_documents: int = Field(default=3, description="Batch size for PDF/official documentation ingestion")
+    batch_size_community: int = Field(default=2, description="Batch size for community source ingestion")
 
 
 class DocumentFetcherConfig(BaseModel):
@@ -105,10 +116,33 @@ class Config(BaseModel):
             if 'model' in openai_section:
                 llm_config_data['openai_model'] = openai_section['model']
 
+            # Inference concurrency settings
+            inference_section = llm_section.get('inference', {})
+            inference_config_data = {}
+            if 'max_worker_threads' in inference_section:
+                inference_config_data['max_worker_threads'] = inference_section['max_worker_threads']
+            if 'max_concurrent_tasks' in inference_section:
+                inference_config_data['max_concurrent_tasks'] = inference_section['max_concurrent_tasks']
+
+            if inference_config_data:
+                llm_config_data['inference'] = InferenceConfig(**inference_config_data)
+
+            # Extract backend_url from root level if present
+            backend_url = yaml_data.get('backend_url', 'http://localhost:8080')
+
+            # Build RAG config
+            rag_config_data = {}
+            rag_section = yaml_data.get('rag', {})
+            if 'batch_size_documents' in rag_section:
+                rag_config_data['batch_size_documents'] = rag_section['batch_size_documents']
+            if 'batch_size_community' in rag_section:
+                rag_config_data['batch_size_community'] = rag_section['batch_size_community']
+
             return cls(
                 llm=LLMConfig(**llm_config_data),
-                rag=RAGConfig(),
-                document_fetcher=DocumentFetcherConfig()
+                rag=RAGConfig(**rag_config_data),
+                document_fetcher=DocumentFetcherConfig(),
+                backend_url=backend_url
             )
 
         except Exception as e:

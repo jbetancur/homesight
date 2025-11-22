@@ -139,14 +139,24 @@ export function StatusView() {
   const [error, setError] = useState<string | null>(null);
   const [lastUpdate, setLastUpdate] = useState<Date>(new Date());
 
-  const fetchStatus = async () => {
+  const initializeStatus = async () => {
     try {
-      const response = await fetch(`${API_BASE}/api/status`);
-      if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`);
-      }
-      const data = await response.json();
-      setStatus(data);
+      // Initialize status with empty services
+      const initialStatus: SystemStatus = {
+        timestamp: new Date().toISOString(),
+        services: {
+          ai_sidecar: { name: 'AI Sidecar', status: 'unavailable' },
+          prometheus: { name: 'Prometheus', status: 'unavailable' },
+          database: { name: 'Database', status: 'unavailable' },
+          mqtt_discovery: { name: 'MQTT Discovery', status: 'unavailable' },
+        },
+        summary: {
+          devices: 0,
+          open_incidents: 0,
+          total_incidents: 0,
+        },
+      };
+      setStatus(initialStatus);
       setLastUpdate(new Date());
       setError(null);
     } catch (err) {
@@ -156,10 +166,54 @@ export function StatusView() {
     }
   };
 
+  const fetchServiceStatus = async (serviceName: keyof SystemStatus['services']) => {
+    try {
+      const response = await fetch(`${API_BASE}/api/status/${serviceName}`);
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
+      }
+      const data = await response.json();
+      setStatus(prev =>
+        prev ? {
+          ...prev,
+          services: {
+            ...prev.services,
+            [serviceName]: {
+              // Merge with existing service data to preserve name, url, etc.
+              ...prev.services[serviceName],
+              ...data
+            }
+          }
+        } : null
+      );
+    } catch (err) {
+      console.error(`Failed to fetch ${serviceName} status:`, err);
+    }
+  };
+
   useEffect(() => {
-    fetchStatus();
-    const interval = setInterval(fetchStatus, 10000); // Refresh every 10 seconds
-    return () => clearInterval(interval);
+    initializeStatus();
+
+    // Fetch all service statuses in parallel immediately
+    Promise.all([
+      fetchServiceStatus('ai_sidecar'),
+      fetchServiceStatus('prometheus'),
+      fetchServiceStatus('database')
+    ]);
+
+    // Then refresh them frequently
+    const serviceInterval = setInterval(() => {
+      Promise.all([
+        fetchServiceStatus('ai_sidecar'),
+        fetchServiceStatus('prometheus'),
+        fetchServiceStatus('database')
+      ]);
+      setLastUpdate(new Date());
+    }, 5000); // Every 5 seconds for individual services
+
+    return () => {
+      clearInterval(serviceInterval);
+    };
   }, []);
 
   if (loading) {

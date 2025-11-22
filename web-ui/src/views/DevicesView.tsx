@@ -1,7 +1,7 @@
 
 import { useEffect, useState, useRef, useCallback } from 'react';
 import { Table, Badge, Loader, Stack, Title, Text, Card, Group, Paper, Button, Modal, ActionIcon, Tooltip } from '@mantine/core';
-import { Wifi, CheckCircle, Activity, Trash2 } from 'lucide-react';
+import { Wifi, CheckCircle, Activity, Trash2, RefreshCw, FileText } from 'lucide-react';
 import { useEventSubscription } from '../useEventSubscription';
 
 const API_BASE = 'http://localhost:8080/api';
@@ -24,6 +24,7 @@ export function DevicesView() {
   const [devices, setDevices] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [offboardingId, setOffboardingId] = useState<string | null>(null);
+  const [reingestingId, setReingestingId] = useState<string | null>(null);
   const [confirmModal, setConfirmModal] = useState<{open: boolean, deviceId: string | null, deviceName: string}>({
     open: false,
     deviceId: null,
@@ -84,6 +85,28 @@ export function DevicesView() {
       console.error('Offboarding error:', error);
     } finally {
       setOffboardingId(null);
+    }
+  };
+
+  const handleReingestDocs = async (deviceId: string) => {
+    setReingestingId(deviceId);
+    try {
+      const response = await fetch(`${API_BASE}/devices/${deviceId}/reingest-docs`, {
+        method: 'POST',
+      });
+
+      if (response.ok) {
+        const data = await response.json();
+        alert(`Re-ingestion queued for device. ${data.message}`);
+      } else {
+        alert('Failed to queue re-ingestion');
+        console.error('Re-ingest failed:', response.statusText);
+      }
+    } catch (error) {
+      alert('Error queuing re-ingestion');
+      console.error('Re-ingest error:', error);
+    } finally {
+      setReingestingId(null);
     }
   };
 
@@ -152,6 +175,7 @@ export function DevicesView() {
                 <Table.Th>Model</Table.Th>
                 <Table.Th>Status</Table.Th>
                 <Table.Th>Last Seen</Table.Th>
+                <Table.Th>Documentation</Table.Th>
                 <Table.Th style={{ textAlign: 'center' }}>Actions</Table.Th>
               </Table.Tr>
             </Table.Thead>
@@ -182,22 +206,54 @@ export function DevicesView() {
                         {new Date(device.last_seen).toLocaleString()}
                       </Text>
                     </Table.Td>
-                    <Table.Td style={{ textAlign: 'center' }}>
-                      <Tooltip label="Offboard Device">
-                        <ActionIcon
-                          color="red"
-                          variant="subtle"
-                          onClick={() => setConfirmModal({
-                            open: true,
-                            deviceId: device.id,
-                            deviceName: device.name
-                          })}
-                          loading={offboardingId === device.id}
-                          disabled={offboardingId === device.id}
-                        >
-                          <Trash2 size={16} />
-                        </ActionIcon>
+                    <Table.Td>
+                      <Tooltip label={device.docs_ingested ? `Ingested at ${new Date(device.docs_ingested_at).toLocaleString()}` : 'Awaiting documentation ingestion'}>
+                        <Group gap="xs">
+                          <FileText size={16} color={device.docs_ingested ? '#40c057' : '#868e96'} />
+                          <Badge
+                            variant="light"
+                            color={
+                              device.docs_status === 'success' ? 'green' :
+                              device.docs_status === 'partial' ? 'blue' :
+                              device.docs_status === 'error' ? 'red' :
+                              'gray'
+                            }
+                            size="sm"
+                          >
+                            {device.docs_status || 'pending'}
+                          </Badge>
+                        </Group>
                       </Tooltip>
+                    </Table.Td>
+                    <Table.Td style={{ textAlign: 'center' }}>
+                      <Group gap={4} justify="center">
+                        <Tooltip label="Re-ingest Documentation">
+                          <ActionIcon
+                            color="blue"
+                            variant="subtle"
+                            onClick={() => handleReingestDocs(device.id)}
+                            loading={reingestingId === device.id}
+                            disabled={reingestingId === device.id}
+                          >
+                            <RefreshCw size={16} />
+                          </ActionIcon>
+                        </Tooltip>
+                        <Tooltip label="Offboard Device">
+                          <ActionIcon
+                            color="red"
+                            variant="subtle"
+                            onClick={() => setConfirmModal({
+                              open: true,
+                              deviceId: device.id,
+                              deviceName: device.name
+                            })}
+                            loading={offboardingId === device.id}
+                            disabled={offboardingId === device.id}
+                          >
+                            <Trash2 size={16} />
+                          </ActionIcon>
+                        </Tooltip>
+                      </Group>
                     </Table.Td>
                   </Table.Tr>
                 );

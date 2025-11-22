@@ -85,7 +85,7 @@ Respond in JSON format:
     "actions": ["action 1", "action 2"] or null
 }}"""
 
-        response = self.llm.simple_generate(
+        response = await self.llm.simple_generate_async(
             prompt=prompt,
             temperature=0.3,
             max_tokens=500
@@ -207,7 +207,7 @@ CRITICAL: Your advice must be SPECIFIC and ACTIONABLE, not generic platitudes.
 If documentation is provided, extract EXACT steps, part numbers, model information, and specifications.
 If NO documentation available, acknowledge this limitation and recommend specific sources to find information."""
 
-        response = self.llm.simple_generate(
+        response = await self.llm.simple_generate_async(
             prompt=prompt,
             system_prompt=system_prompt,
             temperature=0.4,

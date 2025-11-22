@@ -46,6 +46,7 @@ pip-log.txt
 pip-delete-this-directory.txt
 
 # IDE
+.claude/
 .vscode/
 .idea/
 *.swp

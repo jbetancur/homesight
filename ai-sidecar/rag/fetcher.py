@@ -37,78 +37,90 @@ class LLMDocumentFinder:
         manufacturer: str,
         model: str,
         device_type: Optional[str] = None
-    ) -> Optional[str]:
+    ) -> tuple:
         """
         Use GPT to find the most likely documentation URL
-        
+        Also returns search queries as fallback
+
         Returns:
-            URL to documentation PDF or support page, or None if not found
+            Tuple of (url, search_queries) or (None, []) if not found
         """
         if not self.enabled:
             logger.warning("LLM document finder not enabled - no API key")
-            return None
-        
+            return None, []
+
         try:
             from openai import AsyncOpenAI
             client = AsyncOpenAI(api_key=self.api_key)
-            
+
             device_info = f"{manufacturer} {model}"
             if device_type:
                 device_info += f" ({device_type})"
-            
+
             prompt = f"""Find the official documentation/manual URL for this device:
 
 Device: {device_info}
 
 Please provide:
-1. The official manufacturer support/documentation page URL
+1. The official manufacturer support/documentation page URL (most likely to exist)
 2. Direct PDF manual URL if available
-3. Alternative documentation sources if official not available
+3. Effective search queries to find the manual online (backup plan if direct URLs fail)
 
 Respond in JSON format:
 {{
     "official_support_url": "url here or null",
     "pdf_manual_url": "url here or null",
-    "search_queries": ["query 1", "query 2"],
+    "search_queries": ["manufacturer model manual", "manufacturer model pdf", "manufacturer support model"],
     "notes": "any helpful notes"
 }}
 
-Focus on official manufacturer sources first. Be conservative - only suggest URLs you're confident about."""
+IMPORTANT: Prioritize official manufacturer sources, but include search queries as a fallback strategy."""
 
             response = await client.chat.completions.create(
                 model="gpt-4o-mini",  # Cheap and fast
                 messages=[
-                    {"role": "system", "content": "You are a helpful assistant that finds official device documentation. Always prioritize manufacturer websites."},
+                    {"role": "system", "content": "You are a helpful assistant that finds official device documentation. Always prioritize manufacturer websites and provide effective search queries as fallback."},
                     {"role": "user", "content": prompt}
                 ],
                 temperature=0.3,  # Low temperature for factual responses
                 max_tokens=500
             )
-            
+
             content = response.choices[0].message.content
-            
-            # Parse JSON response
+
+            # Parse JSON response (handle markdown code blocks)
             try:
-                result = json.loads(content)
-                
-                # Return PDF URL if available, otherwise support page
+                # LLM might wrap JSON in markdown code blocks like ```json ... ```
+                json_str = content
+                if "```" in json_str:
+                    # Extract content between ``` markers
+                    start = json_str.find("{")
+                    end = json_str.rfind("}") + 1
+                    if start != -1 and end > start:
+                        json_str = json_str[start:end]
+
+                result = json.loads(json_str)
+
+                # Return PDF URL if available, otherwise support page, with search queries as fallback
+                search_queries = result.get("search_queries", [])
+
                 if result.get("pdf_manual_url"):
                     logger.info(f"LLM found PDF URL for {device_info}: {result['pdf_manual_url']}")
-                    return result["pdf_manual_url"]
+                    return result["pdf_manual_url"], search_queries
                 elif result.get("official_support_url"):
                     logger.info(f"LLM found support page for {device_info}: {result['official_support_url']}")
-                    return result["official_support_url"]
+                    return result["official_support_url"], search_queries
                 else:
-                    logger.warning(f"LLM couldn't find documentation for {device_info}")
-                    return None
-                    
+                    logger.warning(f"LLM couldn't find direct documentation URL for {device_info}, returning search queries")
+                    return None, search_queries
+
             except json.JSONDecodeError:
                 logger.error(f"LLM response not valid JSON: {content}")
-                return None
-                
+                return None, []
+
         except Exception as e:
             logger.error(f"Error using LLM to find documentation: {e}")
-            return None
+            return None, []
 
 
 class ManufacturerFetcher:
@@ -154,19 +166,29 @@ class GenericFetcher(ManufacturerFetcher):
             logger.info(f"{manufacturer or 'Generic'} {model} manual found in cache")
             return cached
 
-        # Use LLM to find documentation URL
+        # Use LLM to find documentation URL with search fallback
         if self.llm_finder and self.llm_finder.enabled:
-            doc_url = await self.llm_finder.find_documentation_url(
+            doc_url, search_queries = await self.llm_finder.find_documentation_url(
                 manufacturer=(manufacturer or ""),
                 model=model,
                 device_type=device_type
             )
 
+            # Try direct URL first
             if doc_url:
                 downloaded = await self._download_from_url(model, doc_url)
                 if downloaded:
                     return downloaded
-                logger.warning(f"Failed to download from LLM-provided URL: {doc_url}")
+                logger.warning(f"Failed to download from LLM-provided URL: {doc_url}, trying search fallback...")
+
+            # Fallback to search-based discovery if direct URL failed
+            # Limit to first 2 search queries to reduce CPU overhead
+            if search_queries:
+                for query in search_queries[:2]:
+                    logger.info(f"Searching for docs using query: {query}")
+                    found_url = await self._search_and_download(model, query)
+                    if found_url:
+                        return found_url
 
         logger.info(f"Could not find docs for {manufacturer or 'Unknown'} {model} using generic fetcher")
         return None
@@ -241,6 +263,106 @@ class GenericFetcher(ManufacturerFetcher):
             logger.error(f"Error downloading HTML docs from {url}: {e}")
             return None
 
+    async def _search_and_download(self, model: str, search_query: str) -> Optional[Path]:
+        """
+        Search for documentation using a web search engine and download the first relevant result.
+
+        Uses DuckDuckGo search as it doesn't require API keys.
+        Optimized to reduce CPU usage during parsing.
+        """
+        try:
+            import urllib.parse
+            from bs4 import BeautifulSoup
+            import base64
+
+            # Build DuckDuckGo search URL (simple GET request that returns HTML)
+            search_url = f"https://duckduckgo.com/html/?q={urllib.parse.quote(search_query)}"
+
+            logger.info(f"Searching for '{search_query}' via DuckDuckGo")
+
+            async with httpx.AsyncClient(timeout=15.0, follow_redirects=False) as client:
+                # Set User-Agent to avoid being blocked
+                headers = {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                }
+                response = await client.get(search_url, headers=headers)
+
+                if response.status_code != 200:
+                    logger.warning(f"Search failed: HTTP {response.status_code}")
+                    return None
+
+                # Parse search results and extract first few document links
+                # Use 'html.parser' which is faster than 'lxml' for this use case
+                soup = BeautifulSoup(response.text, 'html.parser')
+
+                # Find result links (DuckDuckGo HTML results use specific structure)
+                result_links = []
+                for link in soup.find_all('a', {'class': 'result__a'}, limit=10):
+                    href = link.get('href')
+                    if not href:
+                        continue
+
+                    # DuckDuckGo returns redirect URLs - extract the actual URL from uddg parameter
+                    if href.startswith('//duckduckgo.com/l/'):
+                        try:
+                            # Extract uddg parameter which contains base64-encoded URL
+                            parsed = urllib.parse.urlparse(f"https:{href}")
+                            params = urllib.parse.parse_qs(parsed.query)
+                            if 'uddg' in params:
+                                actual_url = params['uddg'][0]
+                                href = actual_url
+                        except Exception as e:
+                            logger.debug(f"Failed to extract URL from DuckDuckGo redirect: {e}")
+                            continue
+
+                    # Check if this looks like a documentation link
+                    if href and ('pdf' in href.lower() or 'manual' in link.get_text().lower() or 'support' in link.get_text().lower()):
+                        result_links.append(href)
+                        if len(result_links) >= 2:  # Reduce from 3 to 2 to minimize downloads
+                            break
+
+                # If no specific document links found, try the top general results
+                if not result_links:
+                    for link in soup.find_all('a', {'class': 'result__a'}, limit=3):
+                        href = link.get('href')
+                        if not href:
+                            continue
+
+                        # Extract actual URL from DuckDuckGo redirect
+                        if href.startswith('//duckduckgo.com/l/'):
+                            try:
+                                parsed = urllib.parse.urlparse(f"https:{href}")
+                                params = urllib.parse.parse_qs(parsed.query)
+                                if 'uddg' in params:
+                                    href = params['uddg'][0]
+                            except Exception as e:
+                                logger.debug(f"Failed to extract URL from DuckDuckGo redirect: {e}")
+                                continue
+
+                        if href:
+                            result_links.append(href)
+
+                logger.info(f"Found {len(result_links)} potential document links for '{search_query}'")
+
+                # Try to download from each result (limit to 2 attempts per query)
+                for url in result_links[:2]:
+                    try:
+                        logger.info(f"Trying to download from search result: {url[:60]}...")
+                        downloaded = await self._download_from_url(model, url)
+                        if downloaded:
+                            logger.info(f"✅ Successfully downloaded docs from search result: {url}")
+                            return downloaded
+                    except Exception as e:
+                        logger.debug(f"Failed to download from {url}: {e}")
+                        continue
+
+                logger.warning(f"Could not download any documents from search results for '{search_query}'")
+                return None
+
+        except Exception as e:
+            logger.error(f"Error during web search: {e}")
+            return None
+
 
 class DocumentAutoFetcher:
     """
@@ -256,14 +378,17 @@ class DocumentAutoFetcher:
         })
     """
     
-    def __init__(self, rag_engine, cache_dir: Path = None, openai_api_key: Optional[str] = None):
+    def __init__(self, rag_engine, cache_dir: Path = None, openai_api_key: Optional[str] = None, rag_config=None):
         self.rag = rag_engine
         self.cache_dir = cache_dir or Path.home() / ".homesight" / "manuals"
         self.cache_dir.mkdir(parents=True, exist_ok=True)
-        
+
+        # Store RAG configuration
+        self.batch_size_documents = (rag_config.batch_size_documents if rag_config else None) or 3
+
         # Initialize LLM document finder
         self.llm_finder = LLMDocumentFinder(openai_api_key)
-        
+
         # Initialize manufacturer fetchers with LLM support
         # Use only the generic fetcher for onboarding and caching
         self.fetchers = {}
@@ -372,8 +497,8 @@ class DocumentAutoFetcher:
                     'metadata': metadata
                 })
 
-            # Use async batch ingestion (non-blocking)
-            await self.rag.add_documents_async(documents, batch_size=10)
+            # Use async batch ingestion with smaller batches to reduce CPU spike
+            await self.rag.add_documents_async(documents, batch_size=self.batch_size_documents)
             logger.info(f"Ingested {doc_path.name} ({len(documents)} document(s))")
 
         except Exception as e:
