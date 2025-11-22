@@ -60,7 +60,6 @@ func (s *Server) SetDiscoveryListener(listener *discovery.MQTTDiscoveryListener)
 	s.discoveryListener = listener
 }
 
-
 // setupRoutes configures the API routes
 func (s *Server) setupRoutes() {
 	s.router.Use(middleware.Logger)
@@ -77,13 +76,13 @@ func (s *Server) setupRoutes() {
 
 	s.router.Get("/health", s.handleHealth)
 
-	// Individual service status endpoints (non-blocking, fast responses)
-	s.router.Get("/api/status/ai", s.handleAIStatus)
-	s.router.Get("/api/status/ai_sidecar", s.handleAIStatus)
-	s.router.Get("/api/status/prometheus", s.handlePrometheusStatus)
-	s.router.Get("/api/status/database", s.handleDatabaseStatus)
-
 	s.router.Route("/api", func(r chi.Router) {
+		// Individual service status endpoints (non-blocking, fast responses)
+		r.Get("/status/ai", s.handleAIStatus)
+		r.Get("/status/ai_sidecar", s.handleAIStatus)
+		r.Get("/status/prometheus", s.handlePrometheusStatus)
+		r.Get("/status/database", s.handleDatabaseStatus)
+
 		// Incidents
 		r.Route("/incidents", func(r chi.Router) {
 			r.Get("/", s.listIncidents)
@@ -98,7 +97,7 @@ func (s *Server) setupRoutes() {
 		r.Route("/devices", func(r chi.Router) {
 			r.Get("/", s.listDevices)
 			r.Get("/{id}", s.getDevice)
-			r.Post("/{id}/reingest-docs", s.handleReingestDeviceDocs) // Re-trigger document discovery for a device
+			r.Post("/{id}/reingest-docs", s.handleReingestDeviceDocs)   // Re-trigger document discovery for a device
 			r.Post("/{id}/docs-status", s.handleUpdateDeviceDocsStatus) // Update device documentation status (called by AI sidecar)
 			// Demo/Testing endpoints - In production, guard with admin authentication
 			r.Post("/", s.createDevice)       // Manual device creation (testing only - normally auto-discovered)

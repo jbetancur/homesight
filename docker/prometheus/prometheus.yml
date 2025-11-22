@@ -3,8 +3,10 @@ global:
   evaluation_interval: 15s
 
 scrape_configs:
-  - job_name: 'homesight'
+  - job_name: 'homesight-daemon'
     static_configs:
-      - targets: ['host.docker.internal:8080']
-        labels:
-          service: 'homesight-daemon'
+      - targets: ['host.docker.internal:7700']
+    
+  - job_name: 'ai-sidecar'
+    static_configs:
+      - targets: ['localhost:8001']

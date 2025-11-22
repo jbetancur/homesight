@@ -14,12 +14,34 @@ NC='\033[0m'
 
 mkdir -p "$PID_DIR" "$LOG_DIR"
 
+check_binaries() {
+    local missing=0
+
+    if [ ! -f "$PROJECT_DIR/bin/homesightd" ]; then
+        echo -e "${RED}❌ Missing: bin/homesightd${NC}"
+        missing=1
+    fi
+
+    return $missing
+}
+
 start_daemon() {
     echo -e "${GREEN}Starting HomeSight Daemon...${NC}"
 
     if [ -f "$PID_DIR/daemon.pid" ] && kill -0 $(cat "$PID_DIR/daemon.pid") 2>/dev/null; then
         echo -e "${YELLOW}Daemon already running (PID: $(cat "$PID_DIR/daemon.pid"))${NC}"
         return 0
+    fi
+
+    # Check if binary exists
+    if [ ! -f "$PROJECT_DIR/bin/homesightd" ]; then
+        echo -e "${RED}❌ Daemon binary not found: $PROJECT_DIR/bin/homesightd${NC}"
+        echo ""
+        echo "The binary may not be installed. Please check that:"
+        echo "  - The daemon binary has been installed to bin/homesightd"
+        echo "  - Installation package was properly deployed"
+        echo ""
+        return 1
     fi
 
     cd "$PROJECT_DIR"
@@ -35,6 +57,7 @@ start_daemon() {
         echo "   API: http://localhost:8080"
     else
         echo -e "${RED}❌ Failed to start daemon${NC}"
+        cat "$LOG_DIR/daemon.log"
         rm -f "$PID_DIR/daemon.pid"
         return 1
     fi
@@ -130,7 +153,7 @@ show_status() {
     # Daemon
     if [ -f "$PID_DIR/daemon.pid" ] && kill -0 $(cat "$PID_DIR/daemon.pid") 2>/dev/null; then
         echo -e "${GREEN}✅ Daemon: Running (PID: $(cat "$PID_DIR/daemon.pid"))${NC}"
-        if curl -s http://localhost:8080/health > /dev/null 2>&1; then
+        if curl -s --max-time 2 http://localhost:8080/health > /dev/null 2>&1; then
             echo "   └─ API: http://localhost:8080 (healthy)"
         else
             echo "   └─ API: Not responding"
@@ -142,7 +165,7 @@ show_status() {
     # AI Sidecar
     if docker ps --format '{{.Names}}' 2>/dev/null | grep -q '^homesight-ai-sidecar$'; then
         echo -e "${GREEN}✅ AI Sidecar: Running in Docker${NC}"
-        if curl -s http://localhost:8001/health > /dev/null 2>&1; then
+        if curl -s --max-time 2 http://localhost:8001/health > /dev/null 2>&1; then
             echo "   └─ API: http://localhost:8001 (healthy)"
         else
             echo "   └─ API: Not responding"
@@ -188,9 +211,23 @@ case "${1:-}" in
     start)
         echo "🏠 Starting HomeSight..."
         echo ""
+
+        # Check binaries first
+        if ! check_binaries; then
+            echo ""
+            echo "❌ Missing required binaries. Please ensure binaries are installed."
+            echo ""
+            exit 1
+        fi
+
         start_daemon
         start_ai
         start_docker
+
+        # Wait for services to be fully ready (AI sidecar takes longer)
+        echo "Waiting for services to be ready..."
+        sleep 4
+
         echo ""
         show_status
         ;;
@@ -207,6 +244,15 @@ case "${1:-}" in
     restart)
         echo "🏠 Restarting HomeSight..."
         echo ""
+
+        # Check binaries first
+        if ! check_binaries; then
+            echo ""
+            echo "❌ Missing required binaries. Please ensure binaries are installed."
+            echo ""
+            exit 1
+        fi
+
         stop_daemon
         stop_ai
         stop_docker
@@ -214,6 +260,11 @@ case "${1:-}" in
         start_daemon
         start_ai
         start_docker
+
+        # Wait for services to be fully ready (AI sidecar takes longer)
+        echo "Waiting for services to be ready..."
+        sleep 4
+
         echo ""
         show_status
         ;;

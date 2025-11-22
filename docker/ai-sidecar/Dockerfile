@@ -1,38 +1,32 @@
 FROM python:3.11-slim
 
-# Install system deps for PDF conversion and headless Chromium
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates \
-    build-essential \
-    cmake \
-    git \
-    pkg-config \
-    python3-dev \
-    libffi-dev \
-    libssl-dev \
-    libgomp1 \
-    fonts-liberation \
-    libnss3 \
-    libx11-6 \
-    libxrender1 \
-    libxext6 \
-    libfontconfig1 \
-    chromium \
-  && rm -rf /var/lib/apt/lists/*
-
 WORKDIR /app
 
-# Copy and install Python deps
-COPY ai-sidecar/requirements.txt ./requirements.txt
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    curl \
+    git \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy requirements
+COPY ai-sidecar/requirements.txt .
+
+# Install Python dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy sidecar source
-COPY ai-sidecar/ /app/
+# Copy AI sidecar code
+COPY ai-sidecar /app
 
+# Create necessary directories
+RUN mkdir -p /var/lib/homesight/rag /root/.homesight/manuals
+
+# Expose port
 EXPOSE 8001
 
-# Start app with uvicorn
-# Uvicorn will use multiple workers to handle concurrent requests
-# Queue remaining requests - the ThreadPoolExecutor will queue analyze jobs
-ENTRYPOINT ["sh", "-c"]
-CMD ["uvicorn main:app --host 0.0.0.0 --port 8001 --workers=2 --timeout-keep-alive 300 --loop asyncio"]
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
+  CMD curl -f http://localhost:8001/health || exit 1
+
+# Run the application
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8001"]
