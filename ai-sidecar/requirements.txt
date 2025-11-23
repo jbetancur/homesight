@@ -1,23 +1,22 @@
-fastapi>=0.115.0
-uvicorn[standard]>=0.32.0
-pydantic>=2.10.0
-pyyaml>=6.0
-openai>=2.0.0  # For document discovery only
-prometheus-client>=0.20.0  # Prometheus metrics
-
-# Local LLM
-llama-cpp-python>=0.2.90  # For local Llama inference
-huggingface-hub>=0.24.0   # For automatic model downloads
+fastapi==0.121.3
+uvicorn[standard]==0.38.0
+pydantic==2.12.4
+pyyaml==6.0.3
+openai==2.8.1
+prometheus-client==0.23.1
 
 # RAG Dependencies
-chromadb>=1.0.0
-fastembed>=0.7.0  # Lightweight local embeddings
-pypdf>=6.0.0
-httpx>=0.28.0
-beautifulsoup4>=4.12.0
+chromadb==1.3.5
+fastembed==0.7.3
+pypdf==6.3.0
+httpx==0.28.1
+beautifulsoup4==4.14.2
 
-## Optional conversion helpers
-# PDF conversion via wkhtmltopdf (python wrapper)
-pdfkit>=1.0.0
-# Headless Chromium fallback for complex pages
-pyppeteer>=0.2.6
+# Optional: Local LLM support (fallback when OpenAI unavailable)
+# Uncomment to enable local Llama inference
+# llama-cpp-python==0.3.16
+# huggingface-hub==1.1.5
+
+# Optional: PDF conversion from HTML
+# Uncomment to enable wkhtmltopdf-based PDF conversion
+# pdfkit==1.0.0
