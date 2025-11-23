@@ -31,8 +31,6 @@ services:
       # survives container recreation and large files need not be baked into
       # the image.
       - ~/.homesight/rag:/var/lib/homesight/rag:rw
-      # NOTE: Don't mount /app/models as it hides the Python package modules
-      # - ~/.homesight/models:/app/models:rw
       - /etc/localtime:/etc/localtime:ro
       - ./.logs:/app/log:rw
     logging:

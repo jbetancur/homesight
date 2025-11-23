@@ -1,0 +1,210 @@
+# Prometheus Recording Rules for HomeSight AI Sidecar
+# These pre-calculate common queries for better dashboard performance
+
+groups:
+  - name: ai_sidecar_recording_rules
+    interval: 30s
+    rules:
+      # ======================================================================
+      # Chat Metrics
+      # ======================================================================
+      - record: ai_sidecar:chat_request_rate:1m
+        expr: sum(rate(ai_sidecar_chat_requests_total[1m]))
+
+      - record: ai_sidecar:chat_request_rate_by_status:1m
+        expr: sum by(status) (rate(ai_sidecar_chat_requests_total[1m]))
+
+      - record: ai_sidecar:chat_response_time_p95:5m
+        expr: histogram_quantile(0.95, rate(ai_sidecar_chat_response_time_seconds_bucket[5m]))
+
+      - record: ai_sidecar:chat_response_time_p99:5m
+        expr: histogram_quantile(0.99, rate(ai_sidecar_chat_response_time_seconds_bucket[5m]))
+
+      # ======================================================================
+      # LLM Metrics
+      # ======================================================================
+      - record: ai_sidecar:llm_inference_rate:1m
+        expr: sum(rate(ai_sidecar_llm_inferences_total[1m]))
+
+      - record: ai_sidecar:llm_inference_rate_by_status:1m
+        expr: sum by(status, model, provider) (rate(ai_sidecar_llm_inferences_total[1m]))
+
+      - record: ai_sidecar:llm_error_rate:1m
+        expr: sum(rate(ai_sidecar_llm_inferences_total{status="error"}[1m])) / sum(rate(ai_sidecar_llm_inferences_total[1m]))
+
+      - record: ai_sidecar:llm_inference_duration_p95:5m
+        expr: histogram_quantile(0.95, rate(ai_sidecar_llm_inference_duration_seconds_bucket[5m]))
+
+      - record: ai_sidecar:llm_inference_duration_p99:5m
+        expr: histogram_quantile(0.99, rate(ai_sidecar_llm_inference_duration_seconds_bucket[5m]))
+
+      - record: ai_sidecar:llm_tokens_per_second:1m
+        expr: sum(rate(ai_sidecar_llm_input_tokens_total[1m])) + sum(rate(ai_sidecar_llm_output_tokens_total[1m]))
+
+      # ======================================================================
+      # RAG Metrics
+      # ======================================================================
+      - record: ai_sidecar:rag_retrieval_rate:1m
+        expr: sum(rate(ai_sidecar_rag_retrievals_total[1m]))
+
+      - record: ai_sidecar:rag_retrieval_rate_by_status:1m
+        expr: sum by(status) (rate(ai_sidecar_rag_retrievals_total[1m]))
+
+      - record: ai_sidecar:rag_retrieval_duration_p95:5m
+        expr: histogram_quantile(0.95, rate(ai_sidecar_rag_retrieval_duration_seconds_bucket[5m]))
+
+      - record: ai_sidecar:rag_retrieval_duration_p99:5m
+        expr: histogram_quantile(0.99, rate(ai_sidecar_rag_retrieval_duration_seconds_bucket[5m]))
+
+      - record: ai_sidecar:rag_retrieval_success_rate:1m
+        expr: sum(rate(ai_sidecar_rag_retrievals_total{status="success"}[1m])) / sum(rate(ai_sidecar_rag_retrievals_total[1m]))
+
+      # ======================================================================
+      # Analysis Metrics
+      # ======================================================================
+      - record: ai_sidecar:analysis_request_rate:1m
+        expr: sum(rate(ai_sidecar_analysis_requests_total[1m]))
+
+      - record: ai_sidecar:analysis_request_rate_by_status:1m
+        expr: sum by(status) (rate(ai_sidecar_analysis_requests_total[1m]))
+
+      - record: ai_sidecar:analysis_duration_p95:5m
+        expr: histogram_quantile(0.95, rate(ai_sidecar_analysis_time_seconds_bucket[5m]))
+
+      - record: ai_sidecar:analysis_error_rate:1m
+        expr: sum(rate(ai_sidecar_analysis_requests_total{status="error"}[1m])) / sum(rate(ai_sidecar_analysis_requests_total[1m]))
+
+      # ======================================================================
+      # Knowledge Base Metrics
+      # ======================================================================
+      - record: ai_sidecar:kb_ingestion_rate:1h
+        expr: sum(rate(ai_sidecar_kb_ingestions_total[1h]))
+
+      - record: ai_sidecar:kb_ingestion_rate_by_status:1h
+        expr: sum by(status) (rate(ai_sidecar_kb_ingestions_total[1h]))
+
+      - record: ai_sidecar:kb_source_rate_by_type:1h
+        expr: sum by(source_type) (rate(ai_sidecar_kb_sources_total[1h]))
+
+      # ======================================================================
+      # Tool/Action Metrics
+      # ======================================================================
+      - record: ai_sidecar:chat_actions_rate:1m
+        expr: sum(rate(ai_sidecar_chat_actions_total[1m]))
+
+      - record: ai_sidecar:chat_actions_rate_by_type:1m
+        expr: sum by(action_type) (rate(ai_sidecar_chat_actions_total[1m]))
+
+      - record: ai_sidecar:chat_actions_success_rate:1m
+        expr: sum(rate(ai_sidecar_chat_actions_total{status="success"}[1m])) / sum(rate(ai_sidecar_chat_actions_total[1m]))
+
+      # ======================================================================
+      # Session Metrics
+      # ======================================================================
+      - record: ai_sidecar:sessions_created_rate:1h
+        expr: sum(rate(ai_sidecar_sessions_created_total[1h]))
+
+      # ======================================================================
+      # Health/Availability Metrics
+      # ======================================================================
+      - record: ai_sidecar:uptime_percent:5m
+        expr: (count(up{job="ai-sidecar"}) / ignoring(instance) group_left() count(count by(job) (up{job="ai-sidecar"}))) * 100
+
+      # ======================================================================
+      # Composite Metrics for Dashboards
+      # ======================================================================
+      - record: ai_sidecar:system_load
+        expr: |
+          (
+            sum(rate(ai_sidecar_chat_requests_total[1m])) +
+            sum(rate(ai_sidecar_analysis_requests_total[1m])) +
+            sum(rate(ai_sidecar_rag_retrievals_total[1m])) +
+            sum(rate(ai_sidecar_llm_inferences_total[1m]))
+          ) / 4
+
+      - record: ai_sidecar:kb_health
+        expr: |
+          (ai_sidecar_kb_average_confidence * 100) +
+          (ai_sidecar:rag_retrieval_success_rate:1m * 100) +
+          (count(ai_sidecar_rag_documents_total) / 1000)
+
+# ============================================================================
+# Alert Rules (Optional)
+# ============================================================================
+
+  - name: ai_sidecar_alerts
+    interval: 30s
+    rules:
+      # High error rate alerts
+      - alert: AIHighLLMErrorRate
+        expr: ai_sidecar:llm_error_rate:1m > 0.1
+        for: 5m
+        labels:
+          severity: warning
+          component: llm
+        annotations:
+          summary: "High LLM error rate ({{ $value | humanizePercentage }})"
+          description: "LLM inference error rate is above 10% for the past 5 minutes"
+
+      - alert: AIHighAnalysisErrorRate
+        expr: ai_sidecar:analysis_error_rate:1m > 0.2
+        for: 5m
+        labels:
+          severity: warning
+          component: analysis
+        annotations:
+          summary: "High analysis error rate ({{ $value | humanizePercentage }})"
+          description: "Analysis request error rate is above 20% for the past 5 minutes"
+
+      # Performance degradation alerts
+      - alert: AISlowChatResponses
+        expr: ai_sidecar:chat_response_time_p99:5m > 10
+        for: 5m
+        labels:
+          severity: warning
+          component: chat
+        annotations:
+          summary: "Slow chat responses (p99: {{ $value | humanizeDuration }})"
+          description: "Chat response time (p99) is above 10 seconds"
+
+      - alert: AISlowRAGRetrieval
+        expr: ai_sidecar:rag_retrieval_duration_p99:5m > 5
+        for: 5m
+        labels:
+          severity: warning
+          component: rag
+        annotations:
+          summary: "Slow RAG retrieval (p99: {{ $value | humanizeDuration }})"
+          description: "RAG retrieval time (p99) is above 5 seconds"
+
+      # Knowledge base health
+      - alert: AILowKBConfidence
+        expr: ai_sidecar_kb_average_confidence < 0.65
+        for: 10m
+        labels:
+          severity: warning
+          component: kb
+        annotations:
+          summary: "Low knowledge base average confidence ({{ $value | humanize }})"
+          description: "Average KB confidence score has dropped below 0.65"
+
+      - alert: AILowRAGDocuments
+        expr: ai_sidecar_rag_documents_total < 10
+        for: 10m
+        labels:
+          severity: info
+          component: rag
+        annotations:
+          summary: "Low document count in RAG ({{ $value }} documents)"
+          description: "RAG database has fewer than 10 documents"
+
+      # Queue health
+      - alert: AIAnalysisQueueBacklog
+        expr: ai_sidecar_analysis_queue_size > 20
+        for: 5m
+        labels:
+          severity: warning
+          component: queue
+        annotations:
+          summary: "Analysis queue backlog building up ({{ $value }} tasks)"
+          description: "Analysis queue has more than 20 pending tasks"

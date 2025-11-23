@@ -69,8 +69,8 @@ start_ai() {
     cd "$PROJECT_DIR"
 
     # Stop any existing container
-    docker-compose stop ai-sidecar 2>/dev/null || true
-    docker-compose rm -f ai-sidecar 2>/dev/null || true
+    docker compose stop ai-sidecar 2>/dev/null || true
+    docker compose rm -f ai-sidecar 2>/dev/null || true
 
     # Kill any host processes on port 8001
     if lsof -ti:8001 >/dev/null 2>&1; then
@@ -79,8 +79,8 @@ start_ai() {
         sleep 2
     fi
 
-    # Start with docker-compose
-    docker-compose up -d ai-sidecar
+    # Start with docker compose
+    docker compose up -d ai-sidecar
 
     if [ $? -eq 0 ]; then
         echo -e "${GREEN}✅ AI Sidecar started in Docker${NC}"
@@ -95,7 +95,7 @@ start_docker() {
     echo -e "${GREEN}Starting Docker services...${NC}"
 
     cd "$PROJECT_DIR"
-    docker-compose up -d prometheus grafana 2>/dev/null
+    docker compose up -d prometheus grafana 2>/dev/null
 
     if [ $? -eq 0 ]; then
         echo -e "${GREEN}✅ Docker services started${NC}"
@@ -127,8 +127,8 @@ stop_ai() {
     echo -e "${YELLOW}Stopping AI Sidecar...${NC}"
 
     cd "$PROJECT_DIR"
-    docker-compose stop ai-sidecar 2>/dev/null || true
-    docker-compose rm -f ai-sidecar 2>/dev/null || true
+    docker compose stop ai-sidecar 2>/dev/null || true
+    docker compose rm -f ai-sidecar 2>/dev/null || true
 
     pkill -9 -f "python.*main.py" 2>/dev/null || true
     pkill -9 -f "uvicorn" 2>/dev/null || true
@@ -141,7 +141,7 @@ stop_docker() {
     echo -e "${YELLOW}Stopping Docker services...${NC}"
 
     cd "$PROJECT_DIR"
-    docker-compose down 2>/dev/null || true
+    docker compose down 2>/dev/null || true
 
     echo -e "${GREEN}✅ Docker services stopped${NC}"
 }
@@ -275,7 +275,7 @@ case "${1:-}" in
     logs)
         case "${2:-}" in
             daemon) tail -f "$LOG_DIR/daemon.log" ;;
-            ai) docker-compose logs -f ai-sidecar ;;
+            ai) docker compose logs -f ai-sidecar ;;
             *) echo "Usage: $0 logs [daemon|ai]" ;;
         esac
         ;;

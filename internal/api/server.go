@@ -468,8 +468,9 @@ func (s *Server) generateDeviceKnowledgeBase(w http.ResponseWriter, r *http.Requ
 		}
 	}
 
-	// Create a timeout context for AI calls
-	aiCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	// Create a timeout context for AI calls (30s to allow for OpenAI latency)
+	// Use Background() not ctx to avoid inheriting HTTP request deadline
+	aiCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
 	// Generate articles concurrently from AI sidecar
@@ -518,10 +519,10 @@ func (s *Server) generateDeviceKnowledgeBase(w http.ResponseWriter, r *http.Requ
 	troubleshootContent := "Common issues and solutions for " + device.Name
 	docContent := "Official manual and technical specifications"
 
-	// Wait for results or timeout
-	overviewContent = getValue(overviewChan, overviewContent)
-	troubleshootContent = getValue(troubleshootChan, troubleshootContent)
-	docContent = getValue(docChan, docContent)
+	// Wait for results with context timeout
+	overviewContent = getValueWithContext(aiCtx, overviewChan, overviewContent)
+	troubleshootContent = getValueWithContext(aiCtx, troubleshootChan, troubleshootContent)
+	docContent = getValueWithContext(aiCtx, docChan, docContent)
 
 	// Delete existing articles for this device
 	if err := s.knowledgeBaseRepo.DeleteByDevice(ctx, deviceID); err != nil {
@@ -779,6 +780,25 @@ func (s *Server) deleteIncident(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// getValueWithContext receives a value from a channel with a reasonable timeout
+func getValueWithContext(ctx context.Context, ch <-chan string, defaultValue string) string {
+	// Use a generous 60-second timeout to account for OpenAI API latency
+	// This is used for background knowledge base generation where we're not blocking HTTP requests
+	timer := time.NewTimer(60 * time.Second)
+	defer timer.Stop()
+
+	select {
+	case value, ok := <-ch:
+		if ok && value != "" {
+			return value
+		}
+		return defaultValue
+	case <-timer.C:
+		// Timeout - return default
+		return defaultValue
+	}
+}
+
 // getValue receives a value from a channel with a timeout fallback
 func getValue(ch <-chan string, defaultValue string) string {
 	select {
@@ -786,6 +806,9 @@ func getValue(ch <-chan string, defaultValue string) string {
 		if ok && value != "" {
 			return value
 		}
+		return defaultValue
+	case <-time.After(12 * time.Second):
+		// Wait up to 12 seconds for AI sidecar response (15s context timeout - 3s buffer)
 		return defaultValue
 	}
 }

@@ -52,8 +52,13 @@ class RAGEngine:
 
             class FastEmbedFunction:
                 def __init__(self):
-                    # Use BAAI/bge-small-en-v1.5 - lightweight and efficient
-                    self.model = TextEmbedding(model_name="BAAI/bge-small-en-v1.5")
+                    import os
+                    # Try to use pre-cached model to avoid runtime downloads
+                    cache_dir = os.environ.get("FASTEMBED_CACHE_PATH", None)
+                    self.model = TextEmbedding(
+                        model_name="BAAI/bge-small-en-v1.5",
+                        cache_dir=cache_dir
+                    )
 
                 def __call__(self, input: List[str]) -> List[List[float]]:
                     embeddings = list(self.model.embed(input))
@@ -247,7 +252,28 @@ class RAGEngine:
             duration = time.time() - start_time
             rag_retrieval_duration.observe(duration)
             rag_retrievals.labels(status=status).inc()
-    
+
+    def delete_device_docs(self, manufacturer: str, model: str) -> bool:
+        """Delete all documents for a specific device from the RAG database"""
+        try:
+            # Use ChromaDB where clause to find and delete documents for this device
+            where = {"$and": [{"manufacturer": manufacturer.title()}, {"model": model}]}
+            # Get IDs to delete
+            results = self.collection.get(where=where)
+            if results and results.get('ids'):
+                self.collection.delete(ids=results['ids'])
+                logger.info(f"Deleted {len(results['ids'])} documents for {manufacturer} {model} from RAG")
+                # Clear cached count
+                if hasattr(self, '_cached_count'):
+                    delattr(self, '_cached_count')
+                return True
+            else:
+                logger.info(f"No documents found for {manufacturer} {model} in RAG")
+                return False
+        except Exception as e:
+            logger.error(f"Error deleting documents for {manufacturer} {model}: {e}")
+            return False
+
     def get_stats(self) -> Dict[str, Any]:
         """Get RAG database statistics (non-blocking)"""
         try:

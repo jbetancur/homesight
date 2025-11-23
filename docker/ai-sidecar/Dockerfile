@@ -16,6 +16,12 @@ COPY ai-sidecar/requirements.txt .
 # Install Python dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Pre-download FastEmbed model to avoid runtime network calls
+# This prevents rate limiting and CPU spikes on container startup
+ENV FASTEMBED_CACHE_PATH=/app/models/fastembed
+RUN mkdir -p $FASTEMBED_CACHE_PATH && \
+    python -c "from fastembed import TextEmbedding; TextEmbedding(model_name='BAAI/bge-small-en-v1.5', cache_dir='$FASTEMBED_CACHE_PATH')" || true
+
 # Copy AI sidecar code
 COPY ai-sidecar /app
 

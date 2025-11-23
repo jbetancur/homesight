@@ -20,13 +20,41 @@ rag:
   batch_size_documents: 3      # For PDF/official documentation ingestion
   batch_size_community: 2      # For community source (forum/reddit/etc) ingestion
 
+# Task queue configuration for background operations
+queues:
+  # Discovery: PDF fetching, document parsing (high throughput, low CPU)
+  discovery:
+    max_concurrent: 2          # Fetch 2 PDFs concurrently
+    max_queue_depth: 10        # Buffer up to 10 pending devices
+    cpu_threshold: 0.80        # Don't fetch if CPU >80%
+    memory_threshold: 0.85     # Don't fetch if memory >85%
+
+  # Ingestion: Embedding generation, ChromaDB writes (medium throughput, high CPU)
+  ingestion:
+    max_concurrent: 2          # Process 2 documents concurrently
+    max_queue_depth: 5         # Keep small to avoid memory bloat
+    cpu_threshold: 0.85        # Allow higher CPU (embedding intensive)
+    memory_threshold: 0.80     # Strict on memory
+
+  # Analysis: OpenAI API calls (low throughput, very high latency)
+  analysis:
+    max_concurrent: 4          # OpenAI API limit
+    max_queue_depth: 20        # Buffer incidents
+    cpu_threshold: 0.90        # Don't limit based on CPU
+    memory_threshold: 0.90     # Don't limit based on memory
+
 ai:
   service_url: http://localhost:8001
   openai_api_key: ""
 
   # LLM Configuration
   llm:
-    provider: "hybrid"  # Hybrid: OpenAI for chat/analysis, local for fallback
+    # Chat mode: explicit config for user-facing chat
+    # "cloud" = OpenAI gpt-4o-mini (high quality, function calling, data to cloud)
+    # "local" = Local Llama 3.2 (private, limited quality, no external calls)
+    chat_mode: "cloud"
+
+    provider: "local"  # Used for LLM initialization
 
     # Local LLM settings (Llama 3.2 3B - no auth required)
     # For 8B: Change repo_id to bartowski/Llama-3.2-8B-Instruct-GGUF and set HF_TOKEN env var
@@ -46,15 +74,14 @@ ai:
       n_gpu_layers: 0      # 0 = CPU only, 35+ = full GPU (if CUDA available)
       temperature: 0.7     # Sampling temperature (0.0-1.0)
 
-    # OpenAI settings (for document discovery only)
+    # OpenAI settings
+    # Used for: chat (if chat_mode="cloud"), knowledge generation, incident analysis
     openai:
       model: "gpt-4o-mini"
-      fallback: false    # Don't fallback to OpenAI for chat
 
-    # Inference concurrency settings
+    # Concurrency settings (for knowledge generation and analysis)
     inference:
-      max_worker_threads: 4      # ThreadPoolExecutor workers for LLM inference
-      max_concurrent_tasks: 4    # Semaphore limit for concurrent analyze requests
+      max_concurrent_tasks: 4    # Semaphore limit for concurrent analyze/generate requests
 
 api:
   addr: :8080

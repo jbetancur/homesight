@@ -14,6 +14,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 import uvicorn
 import logging
+import os
 from pathlib import Path
 from contextlib import asynccontextmanager
 
@@ -35,14 +36,19 @@ from services.analysis_service import AnalysisService
 from services.document_service import DocumentService
 
 # LLM and RAG
-from llm.provider import HybridLLMProvider, _init_executor
+from llm.provider import LLMProvider
 from rag.engine import RAGEngine
 
 # Queue management
 from analysis_queue import AnalysisQueue
+from task_queue import TaskQueue, QueueType, QueueConfig
 
 # Configure logging to both console and file
-log_dir = Path('/app/log')
+# Use /app/log in Docker, .logs locally
+if os.path.exists('/.dockerenv'):
+    log_dir = Path('/app/log')
+else:
+    log_dir = Path('.logs')
 log_dir.mkdir(parents=True, exist_ok=True)
 log_file = log_dir / 'ai.log'
 
@@ -81,6 +87,11 @@ analysis_service = None
 document_service = None
 analysis_queue = None
 
+# Task queues
+discovery_queue = None
+ingestion_queue = None
+analysis_task_queue = None
+
 # Cached health status (updated periodically, never blocks)
 import asyncio
 cached_health_status = {
@@ -98,6 +109,7 @@ async def lifespan(app: FastAPI):
 
     # Initialize services
     global llm_provider, rag_engine, session_service, chat_service, analysis_service, document_service, analysis_queue
+    global discovery_queue, ingestion_queue, analysis_task_queue
 
     try:
         config = get_config()
@@ -117,12 +129,9 @@ async def lifespan(app: FastAPI):
         stats = rag_engine.get_stats()
         logger.info(f"RAG loaded: {stats['total_documents']} documents")
 
-        # Initialize ThreadPoolExecutor with configured worker count
-        _init_executor(max_workers=config.llm.inference.max_worker_threads)
-
-        # Initialize LLM provider
-        logger.info("Initializing hybrid LLM provider...")
-        llm_provider = HybridLLMProvider(config.llm)
+        # Initialize LLM provider with config-driven chat mode
+        logger.info(f"Initializing LLM provider (chat_mode={config.llm.chat_mode})...")
+        llm_provider = LLMProvider(config.llm)
 
         if llm_provider.is_available():
             info = llm_provider.get_info()
@@ -148,11 +157,44 @@ async def lifespan(app: FastAPI):
             openai_api_key=config.llm.openai_api_key
         )
 
-        # Initialize analysis queue with configured concurrency limit
+        # Initialize task queues with resource awareness
+        discovery_queue = TaskQueue(
+            QueueType.DISCOVERY,
+            QueueConfig(
+                max_concurrent=config.queues.discovery.max_concurrent,
+                max_queue_depth=config.queues.discovery.max_queue_depth,
+                cpu_threshold=config.queues.discovery.cpu_threshold,
+                memory_threshold=config.queues.discovery.memory_threshold
+            )
+        )
+
+        ingestion_queue = TaskQueue(
+            QueueType.INGESTION,
+            QueueConfig(
+                max_concurrent=config.queues.ingestion.max_concurrent,
+                max_queue_depth=config.queues.ingestion.max_queue_depth,
+                cpu_threshold=config.queues.ingestion.cpu_threshold,
+                memory_threshold=config.queues.ingestion.memory_threshold
+            )
+        )
+
+        analysis_task_queue = TaskQueue(
+            QueueType.ANALYSIS,
+            QueueConfig(
+                max_concurrent=config.queues.analysis.max_concurrent,
+                max_queue_depth=config.queues.analysis.max_queue_depth,
+                cpu_threshold=config.queues.analysis.cpu_threshold,
+                memory_threshold=config.queues.analysis.memory_threshold
+            )
+        )
+
+        # Keep old analysis_queue for backward compatibility
         analysis_queue = AnalysisQueue(max_concurrent=config.llm.inference.max_concurrent_tasks)
-        logger.info("✅ All services initialized")
-        logger.info(f"Analysis queue: max_concurrent={config.llm.inference.max_concurrent_tasks}, "
-                    f"max_worker_threads={config.llm.inference.max_worker_threads}")
+
+        logger.info("✅ All services and queues initialized")
+        logger.info(f"Queues: discovery={config.queues.discovery.max_concurrent}, "
+                    f"ingestion={config.queues.ingestion.max_concurrent}, "
+                    f"analysis={config.queues.analysis.max_concurrent}")
 
     except Exception as e:
         logger.error(f"Failed to initialize services: {e}")
@@ -322,16 +364,19 @@ async def handle_device_event(event: dict, background_tasks: BackgroundTasks):
         device_data = event.get("data", {})
         manufacturer = device_data.get("manufacturer", "")
         model = device_data.get("model", "")
+        force = event.get("force", False)  # Force refresh/re-ingest flag
 
         if manufacturer and model:
-            logger.info(f"Device created: {manufacturer} {model} - queuing comprehensive doc discovery")
+            action = "force refresh" if force else "comprehensive doc discovery"
+            logger.info(f"Device created: {manufacturer} {model} - queuing {action}")
 
             # Queue document discovery in background
-            background_tasks.add_task(discover_device_docs, device_data)
+            background_tasks.add_task(discover_device_docs, device_data, force=force)
 
             return {
                 "status": "queued",
-                "message": f"Comprehensive doc discovery queued for {manufacturer} {model}"
+                "message": f"{action.title()} queued for {manufacturer} {model}",
+                "force": force
             }
         else:
             return {
@@ -342,14 +387,14 @@ async def handle_device_event(event: dict, background_tasks: BackgroundTasks):
     return {"status": "ignored", "message": f"Unknown event type: {event_type}"}
 
 
-async def discover_device_docs(device: dict):
+async def discover_device_docs(device: dict, force: bool = False):
     """Background task for comprehensive document discovery"""
     try:
         device_id = device.get("id")
-        logger.info(f"Starting document discovery for device: {device_id}")
+        logger.info(f"Starting document discovery for device: {device_id} (force={force})")
 
         if document_service:
-            result = await document_service.discover_and_ingest_device_docs(device)
+            result = await document_service.discover_and_ingest_device_docs(device, force=force)
             logger.info(f"Doc discovery complete: {result}")
 
             # Update device documentation status in Go backend
@@ -412,6 +457,26 @@ async def rag_status():
         }
     except Exception as e:
         return {"enabled": False, "error": str(e)}
+
+
+# Ingestion monitoring endpoints
+@app.get("/ingestion/stats")
+async def ingestion_stats():
+    """Get ingestion statistics and monitoring data"""
+    from services.document_service import get_ingestion_tracker
+    tracker = get_ingestion_tracker()
+    return tracker.get_stats()
+
+
+@app.get("/ingestion/log")
+async def ingestion_log(limit: int = 50):
+    """Get recent ingestion records"""
+    from services.document_service import get_ingestion_tracker
+    tracker = get_ingestion_tracker()
+    return {
+        "records": tracker.get_ingestion_log(limit),
+        "total_returned": min(limit, len(tracker.records))
+    }
 
 
 # Detailed status endpoint (can be slow)

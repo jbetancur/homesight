@@ -1,10 +1,12 @@
 """AI-powered incident and metric analysis (replaces hard-coded rules)"""
 
 import logging
+import time
 from typing import Dict, Any, Optional, List
 from models.analyze import AnalyzeRequest, AnalyzeResponse
-from llm.provider import HybridLLMProvider
+from llm.provider import LLMProvider
 from rag.engine import RAGEngine
+from metrics import analysis_requests, analysis_time, llm_inferences, llm_inference_duration, rag_retrievals, rag_retrieval_duration
 
 logger = logging.getLogger(__name__)
 
@@ -18,7 +20,7 @@ class AnalysisService:
 
     def __init__(
         self,
-        llm_provider: HybridLLMProvider,
+        llm_provider: LLMProvider,
         rag_engine: Optional[RAGEngine] = None
     ):
         self.llm = llm_provider
@@ -47,10 +49,13 @@ class AnalysisService:
         context: Optional[Dict[str, Any]]
     ) -> AnalyzeResponse:
         """Analyze sensor metrics for anomalies"""
+        start_time = time.time()
         sensor_id = data.get("sensor_id", "unknown")
         values = data.get("values", [])
+        status = "error"
 
         if not values:
+            analysis_requests.labels(status="error").inc()
             return AnalyzeResponse(
                 analysis="No metric data provided",
                 insights=["Unable to analyze - no data available"]
@@ -85,11 +90,23 @@ Respond in JSON format:
     "actions": ["action 1", "action 2"] or null
 }}"""
 
-        response = await self.llm.simple_generate_async(
-            prompt=prompt,
-            temperature=0.3,
-            max_tokens=500
-        )
+        llm_start = time.time()
+        try:
+            response = await self.llm.simple_generate_async(
+                prompt=prompt,
+                temperature=0.3,
+                max_tokens=500
+            )
+            llm_duration = time.time() - llm_start
+            llm_inferences.labels(model=self.llm.model_name, provider=self.llm.chat_mode, status="success").inc()
+            llm_inference_duration.labels(model=self.llm.model_name, provider=self.llm.chat_mode).observe(llm_duration)
+        except Exception as e:
+            logger.error(f"LLM inference failed during metrics analysis: {e}")
+            llm_inferences.labels(model=self.llm.model_name, provider=self.llm.chat_mode, status="error").inc()
+            analysis_requests.labels(status="error").inc()
+            duration = time.time() - start_time
+            analysis_time.observe(duration)
+            raise
 
         # Parse JSON response
         try:
@@ -99,6 +116,10 @@ Respond in JSON format:
             json_end = response.rfind("}") + 1
             if json_start != -1 and json_end > json_start:
                 result = json.loads(response[json_start:json_end])
+                status = "success"
+                analysis_requests.labels(status=status).inc()
+                duration = time.time() - start_time
+                analysis_time.observe(duration)
                 return AnalyzeResponse(
                     analysis=result.get("analysis", "Analysis completed"),
                     insights=result.get("insights", []),
@@ -109,6 +130,10 @@ Respond in JSON format:
             logger.warning(f"Failed to parse JSON from LLM: {e}")
 
         # Fallback to simple response
+        status = "success"
+        analysis_requests.labels(status=status).inc()
+        duration = time.time() - start_time
+        analysis_time.observe(duration)
         return AnalyzeResponse(
             analysis=response[:200],
             insights=["Metrics analyzed"],
@@ -125,25 +150,32 @@ Respond in JSON format:
 
         This replaces all the hard-coded if/else rules!
         """
+        start_time = time.time()
         incident_type = data.get("type", "unknown")
         severity = data.get("severity", "unknown")
         incident_id = data.get("id", "unknown")
         device_id = data.get("device_id")
+        status = "error"
 
         # Get relevant documentation from RAG
         rag_context = ""
         rag_sources = []
+        kb_found = False
 
         if self.rag:
             try:
+                rag_start = time.time()
                 # Query RAG for relevant docs
                 query = f"{incident_type} {device_id or ''}"
                 results = self.rag.query(query, n_results=5)  # Get more results for better context
+                rag_duration = time.time() - rag_start
+                rag_retrieval_duration.observe(rag_duration)
 
                 if results:
                     rag_parts = ["Relevant documentation:"]
                     for r in results:
                         if r.get('relevance_score', 0) > 0.25:
+                            kb_found = True
                             source = r['metadata'].get('source', 'Unknown')
                             # Use full text, not truncated - let LLM decide what's relevant
                             excerpt = r['text'][:1500]  # Increased from 300 to 1500 chars
@@ -156,8 +188,13 @@ Respond in JSON format:
                     if len(rag_parts) > 1:
                         rag_context = "\n".join(rag_parts)
 
+                    rag_retrievals.labels(status="success").inc()
+                else:
+                    rag_retrievals.labels(status="empty").inc()
+
             except Exception as e:
                 logger.error(f"RAG query failed: {e}")
+                rag_retrievals.labels(status="error").inc()
 
         # Build analysis prompt with emphasis on specificity and citations
         has_docs = bool(rag_context)
@@ -208,12 +245,42 @@ CRITICAL: Your advice must be SPECIFIC and ACTIONABLE, not generic platitudes.
 If documentation is provided, extract EXACT steps, part numbers, model information, and specifications.
 If NO documentation available, acknowledge this limitation and recommend specific sources to find information."""
 
-        response = await self.llm.simple_generate_async(
-            prompt=prompt,
-            system_prompt=system_prompt,
-            temperature=0.4,
-            max_tokens=700
-        )
+        llm_start = time.time()
+        try:
+            response = await self.llm.simple_generate_async(
+                prompt=prompt,
+                system_prompt=system_prompt,
+                temperature=0.4,
+                max_tokens=700
+            )
+            llm_duration = time.time() - llm_start
+
+            # Use provider info from LLMProvider.get_info() to avoid assuming attributes
+            info = self.llm.get_info() if hasattr(self.llm, 'get_info') else {}
+            if getattr(self.llm, 'chat_mode', 'cloud') == 'cloud':
+                model_label = info.get('openai_model') or getattr(self.llm, 'config', {}).openai_model if hasattr(self.llm, 'config') else info.get('openai_model') or 'openai'
+                provider_label = 'openai'
+            else:
+                model_label = info.get('local_model') or 'local'
+                provider_label = 'local'
+
+            llm_inferences.labels(model=model_label, provider=provider_label, status="success").inc()
+            llm_inference_duration.labels(model=model_label, provider=provider_label).observe(llm_duration)
+        except Exception as e:
+            logger.error(f"LLM inference failed during incident analysis: {e}")
+            info = self.llm.get_info() if hasattr(self.llm, 'get_info') else {}
+            if getattr(self.llm, 'chat_mode', 'cloud') == 'cloud':
+                model_label = info.get('openai_model') or 'openai'
+                provider_label = 'openai'
+            else:
+                model_label = info.get('local_model') or 'local'
+                provider_label = 'local'
+
+            llm_inferences.labels(model=model_label, provider=provider_label, status="error").inc()
+            analysis_requests.labels(status="error").inc()
+            duration = time.time() - start_time
+            analysis_time.observe(duration)
+            raise
 
         # Parse JSON response
         try:
@@ -229,7 +296,8 @@ If NO documentation available, acknowledge this limitation and recommend specifi
                     "severity": severity,
                     "incident_id": incident_id,
                     "priority": result.get("priority", "medium"),
-                    "documentation_available": result.get("documentation_available", has_docs),
+                    "documentation_available": has_docs,
+                    "kb_sources_found": kb_found,
                     "sources_cited": result.get("sources_cited", [])
                 }
 
@@ -238,6 +306,11 @@ If NO documentation available, acknowledge this limitation and recommend specifi
                     # Add note if no docs were available
                     if not has_docs:
                         metadata["warning"] = "No device-specific documentation in knowledge base"
+
+                status = "success"
+                analysis_requests.labels(status=status).inc()
+                duration = time.time() - start_time
+                analysis_time.observe(duration)
 
                 return AnalyzeResponse(
                     analysis=result.get("analysis", f"Incident: {incident_type}"),
@@ -250,6 +323,11 @@ If NO documentation available, acknowledge this limitation and recommend specifi
             logger.warning(f"Failed to parse incident analysis JSON: {e}")
 
         # Fallback: return raw response
+        status = "success"
+        analysis_requests.labels(status=status).inc()
+        duration = time.time() - start_time
+        analysis_time.observe(duration)
+
         return AnalyzeResponse(
             analysis=f"Incident Analysis: {incident_type} (Severity: {severity})",
             insights=[response[:300]],
@@ -258,6 +336,8 @@ If NO documentation available, acknowledge this limitation and recommend specifi
                 "type": incident_type,
                 "severity": severity,
                 "incident_id": incident_id,
+                "documentation_available": has_docs,
+                "kb_sources_found": kb_found,
                 "parse_error": str(e) if 'e' in locals() else None
             }
         )

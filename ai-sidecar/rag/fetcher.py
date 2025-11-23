@@ -23,7 +23,38 @@ import pypdf
 import tempfile
 import urllib.parse
 
+from .url_cache import URLCache
+
 logger = logging.getLogger(__name__)
+
+
+# Known manufacturer documentation URL patterns
+# These are checked before LLM to ensure reliability
+KNOWN_MANUFACTURERS = {
+    "Aqara": {
+        "base_url": "https://cdn.aqara.com/cdn/website/mainland/static/docs",
+        "patterns": {
+            # Maps product names to known PDF URLs
+            "SJCGQ11LM": "Water-Leak-Sensor_Manuals_EU.pdf",
+        }
+    },
+}
+
+
+async def get_known_manufacturer_url(manufacturer: str, model: str) -> Optional[str]:
+    """Check if we have a known URL pattern for this manufacturer."""
+    mfr = KNOWN_MANUFACTURERS.get(manufacturer)
+    if not mfr:
+        return None
+
+    patterns = mfr.get("patterns", {})
+    if model in patterns:
+        url = f"{mfr['base_url']}/{patterns[model]}"
+        if await url_exists(url):
+            logger.info(f"Found known URL pattern for {manufacturer} {model}: {url}")
+            return url
+
+    return None
 
 
 # --------------------------------------------------------------------------------------
@@ -373,14 +404,22 @@ class GenericFetcher(ManufacturerFetcher):
         try:
             soup = BeautifulSoup(html, "html.parser")
             links = soup.find_all("a", href=True)
-            candidate = None
+
+            # First pass: look for PDFs with strong manual indicators
             for a in links:
                 href = a["href"]
                 text = (a.get_text() or "").lower()
-                if ".pdf" in href.lower() and ("manual" in text or "guide" in text or "user" in text):
-                    candidate = urllib.parse.urljoin(base_url, href)
-                    break
-            return candidate
+                if ".pdf" in href.lower() and ("manual" in text or "guide" in text or "user" in text or "documentation" in text or "datasheet" in text):
+                    return urllib.parse.urljoin(base_url, href)
+
+            # Second pass: look for any PDF link (less strict)
+            for a in links:
+                href = a["href"]
+                if ".pdf" in href.lower():
+                    logger.info(f"Found PDF link with less strict matching: {href}")
+                    return urllib.parse.urljoin(base_url, href)
+
+            return None
         except Exception:
             return None
 
@@ -461,114 +500,6 @@ class GenericFetcher(ManufacturerFetcher):
             return None
 
 
-# --------------------------------------------------------------------------------------
-# Manufacturer-specific fetchers (Hybrid strategy)
-# --------------------------------------------------------------------------------------
-
-
-class AqaraFetcher(GenericFetcher):
-    """Aqara-specific heuristics plus generic fallback."""
-
-    def __init__(self, cache_dir: Path, llm_finder: Optional[LLMDocumentFinder] = None):
-        super().__init__(cache_dir, llm_finder)
-        self.manufacturer_name = "Aqara"
-        self.domains = ["https://www.aqara.com", "https://docs.aqara.com"]
-
-    async def fetch(self, model: str, manufacturer: Optional[str] = None, device_type: Optional[str] = None) -> Optional[Path]:
-        cached = self._is_cached(model)
-        if cached:
-            logger.info(f"Aqara {model} manual found in cache")
-            return cached
-
-        # Try some simple pattern-based URLs (safe, validated via HTTP)
-        candidate_urls: List[str] = []
-        for base in self.domains:
-            candidate_urls.extend(
-                [
-                    f"{base}/{model}.pdf",
-                    f"{base}/{model}/manual.pdf",
-                    f"{base}/manual/{model}.pdf",
-                ]
-            )
-
-        for url in candidate_urls:
-            doc_path = await self._download_from_url(model, url)
-            if doc_path:
-                return doc_path
-
-        # Fallback to generic LLM+search
-        return await super().fetch(model, manufacturer=self.manufacturer_name, device_type=device_type)
-
-
-class ZoozFetcher(GenericFetcher):
-    """Zooz (Z-Wave) specific heuristics plus generic fallback."""
-
-    def __init__(self, cache_dir: Path, llm_finder: Optional[LLMDocumentFinder] = None):
-        super().__init__(cache_dir, llm_finder)
-        self.manufacturer_name = "Zooz"
-        # Known domains (may need tweaking based on real-world docs)
-        self.domains = ["https://www.getzooz.com", "https://support.getzooz.com"]
-
-    async def fetch(self, model: str, manufacturer: Optional[str] = None, device_type: Optional[str] = None) -> Optional[Path]:
-        cached = self._is_cached(model)
-        if cached:
-            logger.info(f"Zooz {model} manual found in cache")
-            return cached
-
-        candidate_urls: List[str] = []
-        for base in self.domains:
-            candidate_urls.extend(
-                [
-                    f"{base}/kb/{model}-manual.pdf",
-                    f"{base}/kb/{model}.pdf",
-                    f"{base}/kb/{model}-user-manual",
-                    f"{base}/kb/{model}",
-                ]
-            )
-
-        for url in candidate_urls:
-            doc_path = await self._download_from_url(model, url)
-            if doc_path:
-                return doc_path
-
-        # Fallback: generic fetch with manufacturer hint
-        return await super().fetch(model, manufacturer=self.manufacturer_name, device_type=device_type)
-
-
-class ShellyFetcher(GenericFetcher):
-    """Shelly-specific heuristics plus generic fallback."""
-
-    def __init__(self, cache_dir: Path, llm_finder: Optional[LLMDocumentFinder] = None):
-        super().__init__(cache_dir, llm_finder)
-        self.manufacturer_name = "Shelly"
-        self.domains = ["https://shelly.cloud", "https://kb.shelly.cloud", "https://shelly-api-docs.shelly.cloud"]
-
-    async def fetch(self, model: str, manufacturer: Optional[str] = None, device_type: Optional[str] = None) -> Optional[Path]:
-        cached = self._is_cached(model)
-        if cached:
-            logger.info(f"Shelly {model} manual found in cache")
-            return cached
-
-        candidate_urls: List[str] = []
-        for base in self.domains:
-            candidate_urls.extend(
-                [
-                    f"{base}/documents/user_guide_{model}.pdf",
-                    f"{base}/documents/{model}.pdf",
-                ]
-            )
-
-        for url in candidate_urls:
-            doc_path = await self._download_from_url(model, url)
-            if doc_path:
-                return doc_path
-
-        return await super().fetch(model, manufacturer=self.manufacturer_name, device_type=device_type)
-
-
-# Additional fetchers (YoLink, Moen, Ecobee, etc.) could follow the same pattern
-# without making this file huge. You can add them later if needed.
-
 
 # --------------------------------------------------------------------------------------
 # DocumentAutoFetcher: main orchestration entrypoint
@@ -593,23 +524,53 @@ class DocumentAutoFetcher:
         self.batch_size_documents = (rag_config.batch_size_documents if rag_config else None) or 3
 
         self.llm_finder = LLMDocumentFinder(openai_api_key)
+        self.url_cache = URLCache()
 
-        # Manufacturer-specific fetchers
-        self.fetchers: Dict[str, ManufacturerFetcher] = {
-            "aqara": AqaraFetcher(self.cache_dir / "aqara", self.llm_finder),
-            "zooz": ZoozFetcher(self.cache_dir / "zooz", self.llm_finder),
-            "shelly": ShellyFetcher(self.cache_dir / "shelly", self.llm_finder),
-        }
+        # All devices use generic fetcher (no special per-manufacturer logic anymore)
+        # LLM discovery + URL caching handles variation automatically
+        self.generic_fetcher = GenericFetcher(self.cache_dir, self.llm_finder)
 
-        # Generic fallback fetcher
-        self.generic_fetcher = GenericFetcher(self.cache_dir / "generic", self.llm_finder)
+    async def cleanup_device(self, manufacturer: str, model: str) -> None:
+        """
+        Clean up all cached data for a device (for force refresh).
+        - Remove from URL cache
+        - Delete manual files
+        Note: RAG cleanup is handled separately by document_service
+        """
+        # Clear URL cache entry
+        try:
+            key = self.url_cache.get_device_key(manufacturer, model)
+            self.url_cache._cache.pop(key, None)
+            self.url_cache._save_cache()
+            logger.info(f"Cleared URL cache for {manufacturer} {model}")
+        except Exception as e:
+            logger.warning(f"Error clearing URL cache: {e}")
 
-    async def fetch_for_device(self, device: Dict) -> bool:
+        # Delete manual files
+        try:
+            model_dir = self.cache_dir / model.replace("/", "-").replace(" ", "-")
+            if model_dir.exists():
+                import shutil
+                shutil.rmtree(model_dir)
+                logger.info(f"Deleted manual files for {manufacturer} {model}")
+        except Exception as e:
+            logger.warning(f"Error deleting manual files: {e}")
+
+    async def fetch_for_device(self, device: Dict, force: bool = False) -> bool:
         """
         Auto-fetch and ingest documentation for a device.
 
+        Discovery strategy:
+        1. If force=True: clean up all caches and re-ingest fresh
+        2. Check if docs already indexed in RAG
+        3. Check URL cache (previously discovered)
+        4. Call LLM to find documentation URL (auto-discovery)
+        5. Cache discovered URL for future use
+        6. Download and ingest
+
         Args:
             device: Dict with keys: manufacturer, model, type
+            force: If True, bypass cache and RAG check, re-ingest everything
 
         Returns:
             True if docs were fetched/ingested, False otherwise.
@@ -622,23 +583,66 @@ class DocumentAutoFetcher:
             logger.warning(f"Device missing manufacturer or model: {device}")
             return False
 
-        manufacturer_key = manufacturer.lower()
+        # If force=True, clean up all caches first
+        if force:
+            logger.info(f"Force refresh requested for {manufacturer} {model} - clearing caches")
+            await self.cleanup_device(manufacturer, model)
 
-        # Already indexed?
-        if self._is_indexed(manufacturer, model):
+        # Already indexed in RAG? (skip if force refresh)
+        if not force and self._is_indexed(manufacturer, model):
             logger.info(f"Docs already indexed for {manufacturer} {model}")
             return True
 
-        # Specialized or generic?
-        fetcher = self.fetchers.get(manufacturer_key, self.generic_fetcher)
+        # Check URL cache first
+        cached_url = self.url_cache.get(manufacturer, model)
+        if cached_url:
+            logger.info(f"Found cached URL for {manufacturer} {model}: {cached_url}")
+            doc_path = await self.generic_fetcher._download_from_url(model, cached_url)
+            if doc_path:
+                await self._ingest_document(doc_path, device)
+                return True
+            else:
+                logger.warning(f"Cached URL no longer valid: {cached_url}")
 
-        logger.info(f"Using {fetcher.__class__.__name__} for {manufacturer} {model}")
+        # Check known manufacturer patterns (before LLM for reliability)
+        known_url = await get_known_manufacturer_url(manufacturer, model)
+        if known_url:
+            logger.info(f"Found known URL for {manufacturer} {model}: {known_url}")
+            doc_path = await self.generic_fetcher._download_from_url(model, known_url)
+            if doc_path:
+                self.url_cache.set(manufacturer, model, known_url, confidence="high")
+                await self._ingest_document(doc_path, device)
+                return True
+            else:
+                logger.warning(f"Known URL failed to download: {known_url}")
 
-        doc_path = await fetcher.fetch(model, manufacturer=manufacturer, device_type=device_type)
-        if doc_path:
-            await self._ingest_document(doc_path, device)
-            return True
+        # Discover URL via LLM (fallback for unknown manufacturers)
+        logger.info(f"Discovering documentation for {manufacturer} {model}")
+        doc_url, search_queries = await self.llm_finder.find_documentation_url(
+            manufacturer=manufacturer,
+            model=model,
+            device_type=device_type,
+        )
 
+        if doc_url:
+            logger.info(f"LLM found documentation URL: {doc_url}")
+            doc_path = await self.generic_fetcher._download_from_url(model, doc_url)
+            if doc_path:
+                self.url_cache.set(manufacturer, model, doc_url, confidence="high")
+                await self._ingest_document(doc_path, device)
+                return True
+
+        # Fallback to search-based discovery
+        if search_queries:
+            logger.info(f"Trying search-based discovery with {len(search_queries)} queries")
+            for q in search_queries[:2]:  # limit for performance
+                doc_path = await self.generic_fetcher._search_and_download(model, q)
+                if doc_path:
+                    logger.info(f"Found via search query: {q}")
+                    await self._ingest_document(doc_path, device)
+                    return True
+
+        logger.warning(f"Could not find documentation for {manufacturer} {model}")
         return False
 
     def _is_indexed(self, manufacturer: str, model: str) -> bool:

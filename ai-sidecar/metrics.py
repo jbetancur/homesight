@@ -176,6 +176,29 @@ document_ingestion_time = Histogram(
     buckets=(0.1, 0.5, 1.0, 5.0, 10.0, 30.0)
 )
 
+# ============================================================================
+# KNOWLEDGE BASE INGESTION METRICS
+# ============================================================================
+
+# Knowledge base ingestion counter (by device ingestion status)
+kb_ingestions = Counter(
+    'ai_sidecar_kb_ingestions_total',
+    'Total knowledge base ingestions by status',
+    ['status']  # status: success, failed, partial
+)
+
+# Knowledge base confidence gauge (average confidence score)
+kb_average_confidence = Gauge(
+    'ai_sidecar_kb_average_confidence',
+    'Average confidence score of ingested knowledge bases'
+)
+
+# Knowledge base sources counter (by source type)
+kb_sources = Counter(
+    'ai_sidecar_kb_sources_total',
+    'Total knowledge sources used in ingestions',
+    ['source_type']  # e.g., source_type='official_pdf', 'ai_generated'
+)
 
 # ============================================================================
 # MIDDLEWARE FOR AUTOMATIC METRIC COLLECTION

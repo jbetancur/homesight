@@ -1,4 +1,12 @@
-"""Hybrid LLM provider supporting OpenAI with local fallback"""
+"""
+LLM Provider with explicit config-driven routing
+
+Chat modes:
+- "cloud": OpenAI gpt-4o-mini (high quality, function calling, data to cloud)
+- "local": Local Llama 3.2 (private, limited quality, no external calls)
+
+Knowledge generation and analysis always use OpenAI (background operations).
+"""
 
 import logging
 import asyncio
@@ -6,13 +14,10 @@ import os
 import time
 from typing import Optional, List, Dict, Any, Tuple
 from pathlib import Path
-from concurrent.futures import ThreadPoolExecutor
-from functools import partial
 import json
 
 logger = logging.getLogger(__name__)
 
-# Import metrics
 from metrics import (
     llm_inference_duration,
     llm_inferences,
@@ -20,51 +25,38 @@ from metrics import (
     llm_output_tokens
 )
 
-# Thread pool for blocking LLM operations
-# Initialized at module import time with configurable worker count
-# LLM inference is CPU-bound; excess threads add context switching overhead
-_llm_executor = None
 
-def _init_executor(max_workers: int = 4):
-    """Initialize ThreadPoolExecutor with specified worker count"""
-    global _llm_executor
-    if _llm_executor is None:
-        _llm_executor = ThreadPoolExecutor(
-            max_workers=max_workers,
-            thread_name_prefix="llm-"
-        )
-        logger.debug(f"ThreadPoolExecutor initialized with {max_workers} workers")
-
-
-class HybridLLMProvider:
+class LLMProvider:
     """
-    Hybrid LLM provider that uses OpenAI for chat/analysis with local fallback.
+    LLM provider with explicit routing based on config.
 
-    Strategy:
-    - Primary: OpenAI (GPT-4o-mini) for chat, function calling, complex reasoning
-    - Fallback: Local Llama for simple queries when OpenAI unavailable
-    - Embeddings: Always local (FastEmbed)
+    Chat uses config-specified mode (cloud or local).
+    Knowledge generation/analysis always use OpenAI.
     """
 
     def __init__(self, config):
         """
-        Initialize hybrid LLM provider
+        Initialize LLM provider
 
         Args:
-            config: LLMConfig instance
+            config: LLMConfig with chat_mode ("cloud" or "local")
         """
         self.config = config
         self.openai_client = None
         self.local_llm = None
+        self.chat_mode = getattr(config, 'chat_mode', 'cloud')  # Config-driven
 
-        # Initialize OpenAI (primary)
+        if self.chat_mode not in ('cloud', 'local'):
+            raise ValueError(f"Invalid chat_mode: {self.chat_mode}. Must be 'cloud' or 'local'")
+
+        # Initialize OpenAI (needed for cloud chat and background operations)
         if config.openai_api_key:
             self._init_openai()
         else:
             logger.warning("No OpenAI API key - OpenAI features disabled")
 
-        # Initialize local LLM (fallback)
-        if config.provider in ["local", "hybrid"]:
+        # Initialize local LLM (needed if chat_mode == "local")
+        if self.chat_mode == 'local' or config.provider in ["local", "hybrid"]:
             self._init_local()
 
     def _init_openai(self):
@@ -156,7 +148,7 @@ class HybridLLMProvider:
         max_tokens: int = 1000
     ) -> Tuple[str, Optional[List[Dict[str, Any]]]]:
         """
-        Generate chat response with optional function calling
+        Generate chat response with explicit routing based on config.
 
         Args:
             messages: List of message dicts with 'role' and 'content'
@@ -167,31 +159,32 @@ class HybridLLMProvider:
         Returns:
             Tuple of (response_text, tool_calls)
         """
-        # Try OpenAI first (supports function calling)
-        if self.openai_client and tools:
-            try:
-                return self._chat_openai(messages, tools, temperature, max_tokens)
-            except Exception as e:
-                logger.error(f"OpenAI chat failed: {e}")
-                # Don't fall back to local for function calling - it won't work
-                return f"I'm having trouble connecting to my reasoning engine. Error: {str(e)}", None
+        if self.chat_mode == 'cloud':
+            return self._chat_cloud(messages, tools, temperature, max_tokens)
+        elif self.chat_mode == 'local':
+            return self._chat_local(messages, temperature, max_tokens), None
+        else:
+            return "Invalid chat mode configuration", None
 
-        # Use OpenAI for complex multi-turn conversations
-        if self.openai_client and len(messages) > 2:
-            try:
-                return self._chat_openai(messages, None, temperature, max_tokens)
-            except Exception as e:
-                logger.error(f"OpenAI chat failed, falling back to local: {e}")
+    def _chat_cloud(
+        self,
+        messages: List[Dict[str, str]],
+        tools: Optional[List[Dict[str, Any]]],
+        temperature: float,
+        max_tokens: int
+    ) -> Tuple[str, Optional[List[Dict[str, Any]]]]:
+        """
+        Cloud-based chat using OpenAI.
+        Supports function calling, multi-turn conversation, tools.
+        """
+        if not self.openai_client:
+            return "OpenAI not available (check API key)", None
 
-        # Fallback to local for simple queries
-        if self.local_llm:
-            try:
-                return self._chat_local(messages, temperature, max_tokens), None
-            except Exception as e:
-                logger.error(f"Local chat failed: {e}")
-                return f"I'm having trouble generating a response: {str(e)}", None
-
-        return "AI service unavailable. Please check configuration.", None
+        try:
+            return self._chat_openai(messages, tools, temperature, max_tokens)
+        except Exception as e:
+            logger.error(f"OpenAI chat failed: {e}")
+            return f"Cloud chat error: {str(e)}", None
 
     def _chat_openai(
         self,
@@ -278,7 +271,14 @@ class HybridLLMProvider:
 
             for msg in messages:
                 role = msg["role"]
+                # Sanitize message content to avoid embedding Llama special tokens
+                # If earlier generations or stored messages include markers like
+                # "<|begin_of_text|>" or header tokens, strip them to avoid
+                # duplicate leading tokens that reduce response quality.
                 content = msg["content"]
+                if isinstance(content, str):
+                    for token in ["<|begin_of_text|>", "<|start_header_id|>", "<|end_header_id|>", "<|eot_id|>", "<|end_of_text|>"]:
+                        content = content.replace(token, "")
 
                 if role == "system":
                     formatted_prompt += f"<|start_header_id|>system<|end_header_id|>\n\n{content}<|eot_id|>"
@@ -331,6 +331,77 @@ class HybridLLMProvider:
                 status=status
             ).inc()
 
+    async def chat_async(
+        self,
+        messages: List[Dict[str, str]],
+        tools: Optional[List[Dict[str, Any]]] = None,
+        temperature: float = 0.7,
+        max_tokens: int = 1000
+    ) -> Tuple[str, Optional[List[Dict[str, Any]]]]:
+        """
+        Async chat - for OpenAI (which has async client).
+        Local mode falls back to sync.
+        """
+        if self.chat_mode == 'cloud' and self.openai_client:
+            try:
+                return await self._chat_openai_async(messages, tools, temperature, max_tokens)
+            except Exception as e:
+                logger.error(f"OpenAI async chat failed: {e}")
+                return f"Cloud chat error: {str(e)}", None
+        else:
+            # Local mode: run sync in background
+            loop = asyncio.get_event_loop()
+            return await loop.run_in_executor(
+                None,
+                self.chat,
+                messages,
+                tools,
+                temperature,
+                max_tokens
+            )
+
+    async def _chat_openai_async(
+        self,
+        messages: List[Dict[str, str]],
+        tools: Optional[List[Dict[str, Any]]],
+        temperature: float,
+        max_tokens: int
+    ) -> Tuple[str, Optional[List[Dict[str, Any]]]]:
+        """Async OpenAI chat using AsyncOpenAI client"""
+        from openai import AsyncOpenAI
+
+        client = AsyncOpenAI(api_key=self.config.openai_api_key)
+
+        try:
+            kwargs = {
+                "model": self.config.openai_model,
+                "messages": messages,
+                "temperature": temperature,
+                "max_tokens": max_tokens
+            }
+
+            if tools:
+                kwargs["tools"] = tools
+                kwargs["tool_choice"] = "auto"
+
+            response = await client.chat.completions.create(**kwargs)
+            message = response.choices[0].message
+
+            tool_calls = None
+            if hasattr(message, 'tool_calls') and message.tool_calls:
+                tool_calls = []
+                for tc in message.tool_calls:
+                    tool_calls.append({
+                        "id": tc.id,
+                        "name": tc.function.name,
+                        "arguments": json.loads(tc.function.arguments)
+                    })
+
+            return message.content or "", tool_calls
+
+        finally:
+            await client.close()
+
     def simple_generate(
         self,
         prompt: str,
@@ -338,18 +409,7 @@ class HybridLLMProvider:
         temperature: float = 0.7,
         max_tokens: int = 512
     ) -> str:
-        """
-        Simple text generation (for backward compatibility)
-
-        Args:
-            prompt: User prompt
-            system_prompt: Optional system instruction
-            temperature: Sampling temperature
-            max_tokens: Maximum tokens
-
-        Returns:
-            Generated text
-        """
+        """Simple text generation"""
         messages = []
         if system_prompt:
             messages.append({"role": "system", "content": system_prompt})
@@ -365,34 +425,13 @@ class HybridLLMProvider:
         temperature: float = 0.7,
         max_tokens: int = 512
     ) -> str:
-        """
-        Async text generation - runs blocking operations in thread pool
-
-        Args:
-            prompt: User prompt
-            system_prompt: Optional system instruction
-            temperature: Sampling temperature
-            max_tokens: Maximum tokens
-
-        Returns:
-            Generated text
-        """
+        """Async text generation"""
         messages = []
         if system_prompt:
             messages.append({"role": "system", "content": system_prompt})
         messages.append({"role": "user", "content": prompt})
 
-        # Run blocking chat operation in thread pool
-        loop = asyncio.get_event_loop()
-        # Use partial to pass all arguments cleanly
-        blocking_func = partial(
-            self.chat,
-            messages=messages,
-            tools=None,
-            temperature=temperature,
-            max_tokens=max_tokens
-        )
-        response, _ = await loop.run_in_executor(_llm_executor, blocking_func)
+        response, _ = await self.chat_async(messages, tools=None, temperature=temperature, max_tokens=max_tokens)
         return response
 
     def is_available(self) -> bool:

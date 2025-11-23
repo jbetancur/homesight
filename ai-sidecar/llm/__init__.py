@@ -1,6 +1,6 @@
-"""LLM provider abstraction with hybrid support"""
+"""LLM provider abstraction with explicit config-driven routing"""
 
-from .provider import HybridLLMProvider
+from .provider import LLMProvider
 from .tools import ToolRegistry, tool
 
-__all__ = ["HybridLLMProvider", "ToolRegistry", "tool"]
+__all__ = ["LLMProvider", "ToolRegistry", "tool"]

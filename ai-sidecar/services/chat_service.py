@@ -3,12 +3,14 @@
 import logging
 import json
 import httpx
+import time
 from typing import Dict, Any, Optional, List, Tuple
 from models.chat import ChatRequest, ChatResponse
 from services.session_service import SessionService
-from llm.provider import HybridLLMProvider
+from llm.provider import LLMProvider
 from llm.tools import ToolRegistry, get_default_tools
 from rag.engine import RAGEngine
+from metrics import rag_retrieval_duration, rag_retrievals, chat_actions, llm_inferences, llm_inference_duration
 
 logger = logging.getLogger(__name__)
 
@@ -16,14 +18,14 @@ logger = logging.getLogger(__name__)
 class ChatService:
     """
     Conversational AI service with:
-    - Multi-turn conversation support
-    - Function/tool calling
-    - RAG-enhanced responses
+    - Multi-turn conversation support (cloud or local mode)
+    - Function/tool calling (cloud mode only)
+    - RAG-enhanced responses with source attribution
     """
 
     def __init__(
         self,
-        llm_provider: HybridLLMProvider,
+        llm_provider: LLMProvider,
         session_service: SessionService,
         rag_engine: Optional[RAGEngine] = None,
         tool_registry: Optional[ToolRegistry] = None,
@@ -241,13 +243,34 @@ class ChatService:
         # Get tools in OpenAI format
         tools = self.tools.get_openai_tools() if self.llm.openai_client else None
 
+        # Determine if this chat is about a specific incident -> force local LLM for privacy/safety
+        session_incident_context = session.context.get('incident') if session and session.context else None
+
         # Generate response with potential function calling
-        response_text, tool_calls = self.llm.chat(
-            messages=messages,
-            tools=tools,
-            temperature=0.7,
-            max_tokens=1000
-        )
+        if session_incident_context:
+            logger.info("Forcing local LLM for incident chat (incident context present)")
+            # Temporarily override provider chat_mode if needed
+            original_mode = getattr(self.llm, 'chat_mode', None)
+            try:
+                # Force local mode for incident-specific chats
+                setattr(self.llm, 'chat_mode', 'local')
+                response_text, tool_calls = self.llm.chat(
+                    messages=messages,
+                    tools=tools,
+                    temperature=0.7,
+                    max_tokens=1000
+                )
+            finally:
+                # Restore original mode
+                if original_mode is not None:
+                    setattr(self.llm, 'chat_mode', original_mode)
+        else:
+            response_text, tool_calls = self.llm.chat(
+                messages=messages,
+                tools=tools,
+                temperature=0.7,
+                max_tokens=1000
+            )
 
         # Execute any tool calls
         actions_taken = []
@@ -345,6 +368,7 @@ class ChatService:
         if not self.rag:
             return None
 
+        rag_start = time.time()
         try:
             # Build enhanced query from multiple sources:
             # 1. Current user query
@@ -382,9 +406,14 @@ class ChatService:
                         enhanced_query = f"{enhanced_query} (context: {' '.join(recent_context[:2])})"
 
             results = self.rag.query(enhanced_query, n_results=5)
+            rag_duration = time.time() - rag_start
+            rag_retrieval_duration.observe(rag_duration)
+
             if not results:
+                rag_retrievals.labels(status="empty").inc()
                 return None
 
+            rag_retrievals.labels(status="success").inc()
             context_parts = ["Relevant device documentation:"]
             for r in results:
                 if r.get('relevance_score', 0) > 0.3:
@@ -396,6 +425,7 @@ class ChatService:
 
         except Exception as e:
             logger.error(f"RAG query failed: {e}")
+            rag_retrievals.labels(status="error").inc()
             return None
 
     async def _execute_tools(self, tool_calls: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -403,14 +433,15 @@ class ChatService:
         results = []
 
         for tc in tool_calls:
+            tool_name = tc["name"]
+            arguments = tc["arguments"]
+
+            logger.info(f"Executing tool: {tool_name} with args: {arguments}")
+
             try:
-                tool_name = tc["name"]
-                arguments = tc["arguments"]
-
-                logger.info(f"Executing tool: {tool_name} with args: {arguments}")
-
                 result = await self.tools.execute(tool_name, arguments)
 
+                chat_actions.labels(action_type=tool_name, status="success").inc()
                 results.append({
                     "tool": tool_name,
                     "arguments": arguments,
@@ -420,9 +451,10 @@ class ChatService:
 
             except Exception as e:
                 logger.error(f"Tool execution failed: {e}")
+                chat_actions.labels(action_type=tool_name, status="error").inc()
                 results.append({
-                    "tool": tc["name"],
-                    "arguments": tc.get("arguments", {}),
+                    "tool": tool_name,
+                    "arguments": arguments,
                     "error": str(e),
                     "status": "error"
                 })

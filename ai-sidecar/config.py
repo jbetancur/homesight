@@ -12,13 +12,18 @@ logger = logging.getLogger(__name__)
 
 class InferenceConfig(BaseModel):
     """Inference concurrency configuration"""
-    max_worker_threads: int = Field(default=4, description="ThreadPoolExecutor workers for LLM inference")
     max_concurrent_tasks: int = Field(default=4, description="Semaphore limit for concurrent analyze requests")
 
 
 class LLMConfig(BaseModel):
     """LLM provider configuration"""
-    provider: str = Field(default="hybrid", description="Provider type: 'openai', 'local', or 'hybrid'")
+    # Chat routing (explicit user choice)
+    chat_mode: str = Field(
+        default="cloud",
+        description="Chat mode: 'cloud' (OpenAI, quality/tools) or 'local' (Llama 3.2, private)"
+    )
+
+    provider: str = Field(default="local", description="Provider type for initialization")
     openai_api_key: Optional[str] = None
     openai_model: str = Field(default="gpt-4o-mini", description="OpenAI model to use")
 
@@ -29,7 +34,7 @@ class LLMConfig(BaseModel):
     local_n_threads: int = 4
     local_n_gpu_layers: int = 0
 
-    # Inference concurrency settings
+    # Inference concurrency settings (for background operations)
     inference: InferenceConfig = Field(default_factory=InferenceConfig)
 
 
@@ -45,9 +50,21 @@ class RAGConfig(BaseModel):
 class DocumentFetcherConfig(BaseModel):
     """Document fetcher configuration"""
     cache_directory: str = Field(default="~/.homesight/manuals")
-    enable_forums: bool = True
-    enable_reddit: bool = True
-    enable_youtube: bool = False  # Requires additional API setup
+
+
+class SingleQueueConfig(BaseModel):
+    """Configuration for a single task queue"""
+    max_concurrent: int = Field(default=2, description="Max concurrent tasks")
+    max_queue_depth: int = Field(default=10, description="Max pending tasks")
+    cpu_threshold: float = Field(default=0.80, description="CPU threshold (0-1)")
+    memory_threshold: float = Field(default=0.85, description="Memory threshold (0-1)")
+
+
+class QueuesConfig(BaseModel):
+    """Task queue configurations"""
+    discovery: SingleQueueConfig = Field(default_factory=SingleQueueConfig)
+    ingestion: SingleQueueConfig = Field(default_factory=lambda: SingleQueueConfig(max_concurrent=2, max_queue_depth=5))
+    analysis: SingleQueueConfig = Field(default_factory=lambda: SingleQueueConfig(max_concurrent=4, max_queue_depth=20))
 
 
 class Config(BaseModel):
@@ -55,6 +72,7 @@ class Config(BaseModel):
     llm: LLMConfig = Field(default_factory=LLMConfig)
     rag: RAGConfig = Field(default_factory=RAGConfig)
     document_fetcher: DocumentFetcherConfig = Field(default_factory=DocumentFetcherConfig)
+    queues: QueuesConfig = Field(default_factory=QueuesConfig)
     backend_url: str = Field(default="http://localhost:8080", description="HomeSight Go backend API URL")
 
     @classmethod
@@ -119,8 +137,6 @@ class Config(BaseModel):
             # Inference concurrency settings
             inference_section = llm_section.get('inference', {})
             inference_config_data = {}
-            if 'max_worker_threads' in inference_section:
-                inference_config_data['max_worker_threads'] = inference_section['max_worker_threads']
             if 'max_concurrent_tasks' in inference_section:
                 inference_config_data['max_concurrent_tasks'] = inference_section['max_concurrent_tasks']
 

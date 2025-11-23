@@ -1,0 +1,495 @@
+{
+  "dashboard": {
+    "title": "HomeSight AI Sidecar - Comprehensive Monitoring",
+    "description": "Real-time monitoring of AI Sidecar operations: chat, analysis, RAG, LLM, knowledge base ingestion",
+    "tags": ["homesight", "ai", "sidecar", "monitoring"],
+    "timezone": "browser",
+    "schemaVersion": 38,
+    "version": 1,
+    "refresh": "30s",
+    "time": {
+      "from": "now-6h",
+      "to": "now"
+    },
+    "panels": [
+      {
+        "id": 1,
+        "title": "Chat Requests - Status Distribution",
+        "type": "piechart",
+        "gridPos": {
+          "x": 0,
+          "y": 0,
+          "w": 8,
+          "h": 8
+        },
+        "targets": [
+          {
+            "expr": "sum by(status) (rate(ai_sidecar_chat_requests_total[5m]))",
+            "legendFormat": "{{status}}"
+          }
+        ],
+        "options": {
+          "reduceOptions": {
+            "values": false,
+            "calcs": ["lastNotNull"]
+          }
+        }
+      },
+      {
+        "id": 2,
+        "title": "Chat Response Time (p50, p95, p99)",
+        "type": "graph",
+        "gridPos": {
+          "x": 8,
+          "y": 0,
+          "w": 8,
+          "h": 8
+        },
+        "targets": [
+          {
+            "expr": "histogram_quantile(0.5, rate(ai_sidecar_chat_response_time_seconds_bucket[5m]))",
+            "legendFormat": "p50"
+          },
+          {
+            "expr": "histogram_quantile(0.95, rate(ai_sidecar_chat_response_time_seconds_bucket[5m]))",
+            "legendFormat": "p95"
+          },
+          {
+            "expr": "histogram_quantile(0.99, rate(ai_sidecar_chat_response_time_seconds_bucket[5m]))",
+            "legendFormat": "p99"
+          }
+        ],
+        "yaxes": [
+          {
+            "format": "s",
+            "label": "Duration"
+          }
+        ]
+      },
+      {
+        "id": 3,
+        "title": "Active Sessions",
+        "type": "gauge",
+        "gridPos": {
+          "x": 16,
+          "y": 0,
+          "w": 8,
+          "h": 8
+        },
+        "targets": [
+          {
+            "expr": "ai_sidecar_active_sessions"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "max": 100,
+            "min": 0
+          }
+        }
+      },
+      {
+        "id": 4,
+        "title": "LLM Inference Performance",
+        "type": "graph",
+        "gridPos": {
+          "x": 0,
+          "y": 8,
+          "w": 12,
+          "h": 8
+        },
+        "targets": [
+          {
+            "expr": "histogram_quantile(0.95, rate(ai_sidecar_llm_inference_duration_seconds_bucket[5m]))",
+            "legendFormat": "{{model}} ({{provider}})"
+          }
+        ],
+        "yaxes": [
+          {
+            "format": "s",
+            "label": "Inference Time"
+          }
+        ]
+      },
+      {
+        "id": 5,
+        "title": "LLM Inference Count by Status",
+        "type": "graph",
+        "gridPos": {
+          "x": 12,
+          "y": 8,
+          "w": 12,
+          "h": 8
+        },
+        "targets": [
+          {
+            "expr": "sum by(status, model, provider) (rate(ai_sidecar_llm_inferences_total[5m]))",
+            "legendFormat": "{{model}} ({{provider}}) - {{status}}"
+          }
+        ]
+      },
+      {
+        "id": 6,
+        "title": "RAG Retrieval Performance",
+        "type": "graph",
+        "gridPos": {
+          "x": 0,
+          "y": 16,
+          "w": 12,
+          "h": 8
+        },
+        "targets": [
+          {
+            "expr": "histogram_quantile(0.95, rate(ai_sidecar_rag_retrieval_duration_seconds_bucket[5m]))",
+            "legendFormat": "p95 Duration"
+          },
+          {
+            "expr": "histogram_quantile(0.5, rate(ai_sidecar_rag_retrieval_duration_seconds_bucket[5m]))",
+            "legendFormat": "p50 Duration"
+          }
+        ],
+        "yaxes": [
+          {
+            "format": "s",
+            "label": "Duration"
+          }
+        ]
+      },
+      {
+        "id": 7,
+        "title": "RAG Retrieval Status",
+        "type": "graph",
+        "gridPos": {
+          "x": 12,
+          "y": 16,
+          "w": 12,
+          "h": 8
+        },
+        "targets": [
+          {
+            "expr": "sum by(status) (rate(ai_sidecar_rag_retrievals_total[5m]))",
+            "legendFormat": "{{status}}"
+          }
+        ]
+      },
+      {
+        "id": 8,
+        "title": "Analysis Requests - Count",
+        "type": "graph",
+        "gridPos": {
+          "x": 0,
+          "y": 24,
+          "w": 12,
+          "h": 8
+        },
+        "targets": [
+          {
+            "expr": "sum by(status) (rate(ai_sidecar_analysis_requests_total[5m]))",
+            "legendFormat": "{{status}}"
+          }
+        ]
+      },
+      {
+        "id": 9,
+        "title": "Analysis Response Time",
+        "type": "graph",
+        "gridPos": {
+          "x": 12,
+          "y": 24,
+          "w": 12,
+          "h": 8
+        },
+        "targets": [
+          {
+            "expr": "histogram_quantile(0.95, rate(ai_sidecar_analysis_time_seconds_bucket[5m]))",
+            "legendFormat": "p95"
+          },
+          {
+            "expr": "histogram_quantile(0.5, rate(ai_sidecar_analysis_time_seconds_bucket[5m]))",
+            "legendFormat": "p50"
+          }
+        ],
+        "yaxes": [
+          {
+            "format": "s",
+            "label": "Duration"
+          }
+        ]
+      },
+      {
+        "id": 10,
+        "title": "Chat Actions Executed",
+        "type": "graph",
+        "gridPos": {
+          "x": 0,
+          "y": 32,
+          "w": 12,
+          "h": 8
+        },
+        "targets": [
+          {
+            "expr": "sum by(action_type, status) (rate(ai_sidecar_chat_actions_total[5m]))",
+            "legendFormat": "{{action_type}} - {{status}}"
+          }
+        ]
+      },
+      {
+        "id": 11,
+        "title": "Knowledge Base - Average Confidence",
+        "type": "gauge",
+        "gridPos": {
+          "x": 12,
+          "y": 32,
+          "w": 6,
+          "h": 8
+        },
+        "targets": [
+          {
+            "expr": "ai_sidecar_kb_average_confidence"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "max": 1.0,
+            "min": 0
+          }
+        }
+      },
+      {
+        "id": 12,
+        "title": "KB Ingestion Status",
+        "type": "piechart",
+        "gridPos": {
+          "x": 18,
+          "y": 32,
+          "w": 6,
+          "h": 8
+        },
+        "targets": [
+          {
+            "expr": "sum by(status) (rate(ai_sidecar_kb_ingestions_total[1h]))",
+            "legendFormat": "{{status}}"
+          }
+        ]
+      },
+      {
+        "id": 13,
+        "title": "KB Sources Used",
+        "type": "graph",
+        "gridPos": {
+          "x": 0,
+          "y": 40,
+          "w": 12,
+          "h": 8
+        },
+        "targets": [
+          {
+            "expr": "sum by(source_type) (rate(ai_sidecar_kb_sources_total[1h]))",
+            "legendFormat": "{{source_type}}"
+          }
+        ]
+      },
+      {
+        "id": 14,
+        "title": "Documents Ingested by Source",
+        "type": "graph",
+        "gridPos": {
+          "x": 12,
+          "y": 40,
+          "w": 12,
+          "h": 8
+        },
+        "targets": [
+          {
+            "expr": "sum by(source_type, status) (rate(ai_sidecar_documents_ingested_total[1h]))",
+            "legendFormat": "{{source_type}} - {{status}}"
+          }
+        ]
+      },
+      {
+        "id": 15,
+        "title": "RAG Database - Total Documents",
+        "type": "stat",
+        "gridPos": {
+          "x": 0,
+          "y": 48,
+          "w": 6,
+          "h": 6
+        },
+        "targets": [
+          {
+            "expr": "ai_sidecar_rag_documents_total"
+          }
+        ],
+        "options": {
+          "graphMode": "none",
+          "textMode": "auto"
+        }
+      },
+      {
+        "id": 16,
+        "title": "Total Sessions Created",
+        "type": "stat",
+        "gridPos": {
+          "x": 6,
+          "y": 48,
+          "w": 6,
+          "h": 6
+        },
+        "targets": [
+          {
+            "expr": "ai_sidecar_sessions_created_total"
+          }
+        ],
+        "options": {
+          "graphMode": "none",
+          "textMode": "auto"
+        }
+      },
+      {
+        "id": 17,
+        "title": "LLM Input Tokens (Rate)",
+        "type": "stat",
+        "gridPos": {
+          "x": 12,
+          "y": 48,
+          "w": 6,
+          "h": 6
+        },
+        "targets": [
+          {
+            "expr": "sum(rate(ai_sidecar_llm_input_tokens_total[5m]))"
+          }
+        ],
+        "options": {
+          "graphMode": "none",
+          "textMode": "auto"
+        }
+      },
+      {
+        "id": 18,
+        "title": "LLM Output Tokens (Rate)",
+        "type": "stat",
+        "gridPos": {
+          "x": 18,
+          "y": 48,
+          "w": 6,
+          "h": 6
+        },
+        "targets": [
+          {
+            "expr": "sum(rate(ai_sidecar_llm_output_tokens_total[5m]))"
+          }
+        ],
+        "options": {
+          "graphMode": "none",
+          "textMode": "auto"
+        }
+      },
+      {
+        "id": 19,
+        "title": "Analysis Queue Size",
+        "type": "gauge",
+        "gridPos": {
+          "x": 0,
+          "y": 54,
+          "w": 8,
+          "h": 6
+        },
+        "targets": [
+          {
+            "expr": "ai_sidecar_analysis_queue_size"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "max": 50,
+            "min": 0
+          }
+        }
+      },
+      {
+        "id": 20,
+        "title": "Chat Requests per Second (1m)",
+        "type": "graph",
+        "gridPos": {
+          "x": 8,
+          "y": 54,
+          "w": 8,
+          "h": 6
+        },
+        "targets": [
+          {
+            "expr": "sum(rate(ai_sidecar_chat_requests_total[1m]))",
+            "legendFormat": "chat/sec"
+          }
+        ],
+        "yaxes": [
+          {
+            "format": "reqps",
+            "label": "Requests/sec"
+          }
+        ]
+      },
+      {
+        "id": 21,
+        "title": "System Health Summary",
+        "type": "stat",
+        "gridPos": {
+          "x": 16,
+          "y": 54,
+          "w": 8,
+          "h": 6
+        },
+        "targets": [
+          {
+            "expr": "count(count by(job) (up{job=\"ai-sidecar\"}))"
+          }
+        ],
+        "options": {
+          "graphMode": "none",
+          "textMode": "auto"
+        }
+      }
+    ],
+    "templating": {
+      "list": [
+        {
+          "name": "datasource",
+          "type": "datasource",
+          "datasourceRegex": "Prometheus",
+          "current": {
+            "value": "Prometheus",
+            "text": "Prometheus"
+          }
+        },
+        {
+          "name": "interval",
+          "type": "interval",
+          "current": {
+            "text": "30s",
+            "value": "30s"
+          },
+          "options": [
+            {
+              "text": "30s",
+              "value": "30s"
+            },
+            {
+              "text": "1m",
+              "value": "1m"
+            },
+            {
+              "text": "5m",
+              "value": "5m"
+            },
+            {
+              "text": "10m",
+              "value": "10m"
+            }
+          ]
+        }
+      ]
+    }
+  }
+}

@@ -395,10 +395,17 @@ func (s *Server) handleOnboardDevice(w http.ResponseWriter, r *http.Request) {
 }
 
 // notifyAIDeviceCreated sends device creation event to AI sidecar for document discovery
-func (s *Server) notifyAIDeviceCreated(device model.Device) {
+// force=true will clear caches and re-ingest everything (used for re-ingestion)
+func (s *Server) notifyAIDeviceCreated(device model.Device, force ...bool) {
 	// Extract manufacturer and model from metadata
 	manufacturer := device.Metadata["manufacturer"]
 	model := device.Metadata["model"]
+
+	// Default force to false, but can be overridden by caller
+	forceRefresh := false
+	if len(force) > 0 {
+		forceRefresh = force[0]
+	}
 
 	// Build event payload for AI sidecar
 	eventPayload := map[string]interface{}{
@@ -410,6 +417,11 @@ func (s *Server) notifyAIDeviceCreated(device model.Device) {
 			"model":        model,
 			"type":         device.Type,
 		},
+	}
+
+	// Add force flag if re-ingesting
+	if forceRefresh {
+		eventPayload["force"] = true
 	}
 
 	// Send event to AI sidecar asynchronously
@@ -465,8 +477,8 @@ func (s *Server) handleReingestDeviceDocs(w http.ResponseWriter, r *http.Request
 		s.eventBus.Publish(Event{Type: DeviceUpdated, Data: device})
 	}
 
-	// Trigger document discovery asynchronously
-	go s.notifyAIDeviceCreated(*device)
+	// Trigger document discovery asynchronously (force=true for re-ingestion)
+	go s.notifyAIDeviceCreated(*device, true)
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
@@ -558,8 +570,8 @@ func (s *Server) generateAndStoreKnowledgeBase(device *model.Device) {
 		}
 	}
 
-	// Create a timeout context for AI calls
-	aiCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	// Create a timeout context for AI calls (30s to allow for OpenAI latency)
+	aiCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
 	// Generate articles concurrently from AI sidecar
@@ -607,10 +619,10 @@ func (s *Server) generateAndStoreKnowledgeBase(device *model.Device) {
 	troubleshootContent := "Common issues and solutions for " + device.Name
 	docContent := "Official manual and technical specifications"
 
-	// Wait for results or timeout
-	overviewContent = getValue(overviewChan, overviewContent)
-	troubleshootContent = getValue(troubleshootChan, troubleshootContent)
-	docContent = getValue(docChan, docContent)
+	// Wait for results with context timeout
+	overviewContent = getValueWithContext(aiCtx, overviewChan, overviewContent)
+	troubleshootContent = getValueWithContext(aiCtx, troubleshootChan, troubleshootContent)
+	docContent = getValueWithContext(aiCtx, docChan, docContent)
 
 	ctx := context.Background()
 

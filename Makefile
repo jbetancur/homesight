@@ -48,27 +48,27 @@ docker-fix-permissions:
 # Docker commands
 docker-build:
 	@echo "Building AI sidecar Docker image..."
-	@docker-compose build ai-sidecar || (echo "" && echo "❌ Error: Permission denied." && echo "Run 'make docker-fix-permissions' to fix Docker permissions." && exit 1)
+	@docker compose build ai-sidecar || (echo "" && echo "❌ Error: Permission denied." && echo "Run 'make docker-fix-permissions' to fix Docker permissions." && exit 1)
 
 docker-rebuild:
 	@echo "Rebuilding AI sidecar with no cache..."
-	@docker-compose build --no-cache ai-sidecar
+	@docker compose build --no-cache ai-sidecar
 
 docker-restart:
 	@echo "Restarting AI sidecar container..."
-	@docker-compose restart ai-sidecar
+	@docker compose restart ai-sidecar
 
 docker-logs:
 	@echo "Showing AI sidecar logs..."
-	@docker-compose logs -f ai-sidecar
+	@docker compose logs -f ai-sidecar
 
 docker-stop:
 	@echo "Stopping all containers..."
-	@docker-compose down
+	@docker compose down
 
 docker-up:
 	@echo "Starting all containers..."
-	@docker-compose up -d
+	@docker compose up -d
 
 # Full rebuild commands
 rebuild-all: clean build docker-rebuild
