@@ -32,6 +32,7 @@ class DocumentService:
 
         # Get configuration
         config = get_config()
+        self.config = config
 
         # Initialize document fetcher with RAG config
         self.fetcher = DocumentAutoFetcher(
@@ -49,13 +50,18 @@ class DocumentService:
 
     async def discover_and_ingest_device_docs(self, device: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Comprehensive document discovery for a device
+        Smart document discovery and ingestion for a device
 
-        Discovers:
-        1. Official manufacturer documentation
-        2. Support forums and articles (on initial discovery only)
-        3. Community troubleshooting guides (on initial discovery only)
-        4. Synthetic knowledge (on initial discovery only)
+        Strategy:
+        1. Use OpenAI to generate comprehensive, curated device documentation
+        2. Optionally fetch official PDFs if URLs are known (for accuracy)
+        3. Skip web scraping - OpenAI knowledge is cleaner and faster
+
+        This approach:
+        - Leverages OpenAI's existing knowledge (you're paying for API anyway)
+        - Gets curated info, not noisy forum posts
+        - Is much faster and more reliable
+        - Produces high-quality knowledge base entries
 
         Args:
             device: Dict with manufacturer, model, type
@@ -79,226 +85,97 @@ class DocumentService:
             "sources_found": []
         }
 
-        # 1. Try official documentation first (always do this - fastest path)
+        # 1. PRIMARY: Fetch official documentation PDFs if available
+        # This provides the authoritative source we want OpenAI to ground against.
+        doc_path = None
         try:
             official_success = await self.fetcher.fetch_for_device(device)
             if official_success:
-                results["sources_found"].append("official_manual")
-                logger.info(f"✅ Official docs found for {manufacturer} {model}")
+                results["sources_found"].append("official_pdf_manual")
+                logger.info(f"✅ Official PDF docs found for {manufacturer} {model}")
+                # Try to locate the cached manual across fetchers
+                try:
+                    # Check specialized fetchers first
+                    cached = None
+                    for f in getattr(self.fetcher, 'fetchers', {}).values():
+                        cached = f._is_cached(model)
+                        if cached:
+                            doc_path = cached
+                            break
+
+                    # Fallback to generic cache
+                    if not doc_path:
+                        doc_path = self.fetcher.generic_fetcher._is_cached(model)
+                except Exception:
+                    doc_path = None
         except Exception as e:
-            logger.error(f"Official doc fetch failed: {e}")
+            logger.debug(f"Official PDF fetch failed (optional): {e}")
 
-        # 2. Discover community sources using LLM (skip on reingest to reduce CPU)
-        # Community source discovery is only done on initial device creation
-        # Reingest operations focus on finding official documentation
-        # This reduces CPU/LLM overhead during reingest operations
-        if self.llm_finder.enabled and device.get("_initial_discovery", True):
-            try:
-                community_docs = await self._discover_community_sources(
-                    manufacturer=manufacturer,
-                    model=model,
-                    device_type=device_type
-                )
+        # 2. SECONDARY: Generate comprehensive knowledge using OpenAI, grounded
+        # on the official doc text if available. If no official docs found, the
+        # generator will produce limited/unverified content and label it clearly.
+        try:
+            documentation_text = None
+            if doc_path:
+                try:
+                    if doc_path.suffix.lower() == ".pdf":
+                        # Reuse the fetcher's PDF extractor if possible
+                        documentation_text = self.fetcher._extract_pdf_text(doc_path)
+                    else:
+                        documentation_text = doc_path.read_text(encoding='utf-8')
+                except Exception:
+                    documentation_text = None
 
-                if community_docs:
-                    results["sources_found"].extend(community_docs)
-                    logger.info(f"✅ Found {len(community_docs)} community sources")
-
-            except Exception as e:
-                logger.error(f"Community source discovery failed: {e}")
-
-        # 3. Generate synthetic knowledge base entry (skip on reingest)
-        if device.get("_initial_discovery", True):
-            try:
-                await self._generate_synthetic_knowledge(device)
-                results["sources_found"].append("synthetic_knowledge")
-                logger.info("✅ Generated synthetic knowledge base entry")
-            except Exception as e:
-                logger.error(f"Synthetic knowledge generation failed: {e}")
+            if self.llm_finder.enabled:
+                await self._generate_comprehensive_knowledge(device, documentation_text=documentation_text)
+                results["sources_found"].append("ai_generated_knowledge")
+                logger.info(f"✅ Generated comprehensive knowledge for {manufacturer} {model}")
+        except Exception as e:
+            logger.error(f"Knowledge generation failed: {e}")
 
         results["status"] = "success" if results["sources_found"] else "partial"
         results["total_sources"] = len(results["sources_found"])
 
         return results
 
-    async def _discover_community_sources(
-        self,
-        manufacturer: str,
-        model: str,
-        device_type: Optional[str]
-    ) -> List[str]:
-        """
-        Use LLM to discover community sources (forums, Reddit, etc.)
 
-        Returns:
-            List of source types discovered
-        """
-        if not self.llm_finder.enabled:
-            return []
-
+    async def _rag_add_documents(self, documents: List[Dict[str, Any]], batch_size: int = 1):
+        """Helper to add documents to RAG with async/sync compatibility."""
         try:
-            from openai import AsyncOpenAI
-            client = AsyncOpenAI(api_key=self.llm_finder.api_key)
-
-            device_info = f"{manufacturer} {model}"
-            if device_type:
-                device_info += f" ({device_type})"
-
-            prompt = f"""Find online community resources and discussions about this device:
-
-Device: {device_info}
-
-Find:
-1. Support forum URLs (manufacturer forums, tech support sites)
-2. Reddit threads discussing common issues
-3. Popular YouTube troubleshooting videos
-4. Community guides and wikis
-
-For each source, provide:
-- URL
-- Type (forum/reddit/youtube/guide)
-- Brief description of content
-- Relevance (high/medium/low)
-
-Respond in JSON format:
-{{
-    "sources": [
-        {{
-            "url": "https://...",
-            "type": "reddit",
-            "description": "Common battery issues thread",
-            "relevance": "high"
-        }}
-    ]
-}}
-
-Only include sources you're confident exist and are relevant."""
-
-            response = await client.chat.completions.create(
-                model="gpt-4o-mini",
-                messages=[
-                    {
-                        "role": "system",
-                        "content": "You are an expert at finding community tech support resources online."
-                    },
-                    {"role": "user", "content": prompt}
-                ],
-                temperature=0.3,
-                max_tokens=800
-            )
-
-            content = response.choices[0].message.content
-
-            # Parse and fetch sources
-            import json
-            json_start = content.find("{")
-            json_end = content.rfind("}") + 1
-
-            if json_start != -1 and json_end > json_start:
-                result = json.loads(content[json_start:json_end])
-                sources_found = []
-
-                for source in result.get("sources", []):
-                    if source.get("relevance") == "high":
-                        # Attempt to fetch and ingest
-                        try:
-                            success = await self._fetch_web_content(
-                                url=source["url"],
-                                device={"manufacturer": manufacturer, "model": model},
-                                source_type=source["type"]
-                            )
-                            if success:
-                                sources_found.append(source["type"])
-                        except Exception as e:
-                            logger.warning(f"Failed to fetch {source['url']}: {e}")
-
-                return sources_found
-
+            if hasattr(self.rag, "add_documents_async"):
+                await self.rag.add_documents_async(documents, batch_size=batch_size)
+            elif hasattr(self.rag, "add_documents_batch"):
+                loop = asyncio.get_event_loop()
+                await loop.run_in_executor(None, self.rag.add_documents_batch, documents, batch_size)
+            elif hasattr(self.rag, "add_document"):
+                for doc in documents:
+                    try:
+                        self.rag.add_document(doc.get("text", ""), doc.get("metadata", {}))
+                    except Exception:
+                        logger.debug("Failed to add single document via fallback add_document")
+            else:
+                logger.error("RAG engine does not expose a known ingestion API")
         except Exception as e:
-            logger.error(f"Community source discovery failed: {e}")
+            logger.error(f"Error adding documents to RAG: {e}")
 
-        return []
 
-    async def _fetch_web_content(
-        self,
-        url: str,
-        device: Dict[str, Any],
-        source_type: str
-    ) -> bool:
+    async def _generate_comprehensive_knowledge(self, device: Dict[str, Any], documentation_text: Optional[str] = None):
         """
-        Fetch and ingest web content (forum post, Reddit thread, etc.)
+        Generate comprehensive, curated knowledge base entry using OpenAI
 
-        Args:
-            url: URL to fetch
-            device: Device info for metadata
-            source_type: Type of source (reddit, forum, youtube, etc.)
+        This leverages OpenAI's training data to create high-quality device documentation
+        that includes:
+        - Exact specifications and model details
+        - Battery/power requirements with part numbers
+        - Troubleshooting procedures with specific steps
+        - Integration guidance
+        - Common issues and solutions
 
-        Returns:
-            True if successful
-        """
-        try:
-            import httpx
-            from bs4 import BeautifulSoup
-
-            async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
-                response = await client.get(url)
-
-                if response.status_code != 200:
-                    logger.warning(f"Failed to fetch {url}: HTTP {response.status_code}")
-                    return False
-
-                # Extract text content
-                soup = BeautifulSoup(response.text, 'html.parser')
-
-                # Remove script and style elements
-                for script in soup(["script", "style", "nav", "header", "footer"]):
-                    script.decompose()
-
-                text = soup.get_text(separator='\n', strip=True)
-
-                # Only ingest if we got meaningful content
-                if len(text) < 200:
-                    logger.warning(f"Content too short from {url}")
-                    return False
-
-                # Ingest into RAG
-                metadata = {
-                    "source": f"{device['manufacturer']} {device['model']} - {source_type}",
-                    "manufacturer": device['manufacturer'],
-                    "model": device['model'],
-                    "category": f"community_{source_type}",
-                    "url": url,
-                    "auto_fetched": True
-                }
-
-                # Chunk large content and batch ingest
-                chunk_size = 2000
-                documents = []
-
-                if len(text) > chunk_size:
-                    chunks = [text[i:i+chunk_size] for i in range(0, len(text), chunk_size)]
-                    for i, chunk in enumerate(chunks[:5]):  # Limit to 5 chunks per source
-                        chunk_meta = metadata.copy()
-                        chunk_meta['chunk'] = i + 1
-                        documents.append({'text': chunk, 'metadata': chunk_meta})
-                else:
-                    documents.append({'text': text, 'metadata': metadata})
-
-                # Use async batch ingestion with smaller batches to reduce CPU spike
-                await self.rag.add_documents_async(documents, batch_size=self.batch_size_community)
-
-                logger.info(f"✅ Ingested content from {url}")
-                return True
-
-        except Exception as e:
-            logger.error(f"Error fetching web content: {e}")
-            return False
-
-    async def _generate_synthetic_knowledge(self, device: Dict[str, Any]):
-        """
-        Generate synthetic knowledge base entry using LLM
-
-        This creates a baseline knowledge entry even if no docs are found.
+        This is preferable to web scraping because:
+        - Curated and verified information
+        - Faster than searching web + scraping
+        - You're already paying for the API
+        - Consistent formatting and quality
         """
         if not self.llm_finder.enabled:
             return
@@ -311,50 +188,162 @@ Only include sources you're confident exist and are relevant."""
             model = device.get("model", "")
             device_type = device.get("type", "")
 
-            prompt = f"""Generate a comprehensive knowledge base entry for this device:
+            # Attach documentation text if available; truncate to reasonable size for prompts
+            doc_text_snippet = None
+            if documentation_text:
+                # Limit to first ~30k chars to keep prompt reasonable
+                doc_text_snippet = documentation_text[:30000]
 
+            prompt = f"""You are a technical documentation expert. You will generate a COMPREHENSIVE, DETAILED knowledge base entry for a device using ONLY verifiable information from the provided input text and publicly known manufacturer data.
+
+⚠️ STRICT RULES (NEVER BREAK THESE):
+- NEVER invent or guess specifications, dimensions, button sequences, pairing steps, or any technical detail.
+- If data is not explicitly known or publicly documented, write:
+  "Information not publicly documented by manufacturer."
+- DO NOT infer facts from similar models.
+- DO NOT hallucinate part numbers, frequencies, or metrics.
+- ONLY use information that is explicitly in the provided documentation or widely confirmed by the manufacturer.
+
+You may only use:
+✔ The manufacturer-provided document
+✔ The device name/model
+✔ Widely confirmed public information
+✔ Industry-standard general behaviors (ONLY if noted as “typical, but not confirmed”)
+
+---
+
+INPUT
 Manufacturer: {manufacturer}
 Model: {model}
 Type: {device_type}
+Source Documentation:
+{{documentation_text}}
 
-Include:
-1. Common issues and troubleshooting steps
-2. Typical battery life and replacement procedures (if applicable)
-3. Sensor type and what it monitors
-4. Common false alarm causes (if applicable)
-5. Maintenance recommendations
-6. Integration/compatibility notes
+---
 
-Write in a clear, technical documentation style."""
+OUTPUT STRUCTURE
+Generate a Markdown document with the following sections.
+
+1. DEVICE SPECIFICATIONS
+- Exact model number & variants
+- Physical dimensions & weight
+- Communication protocol(s)
+- Battery type (EXACT model only if confirmed)
+- Expected battery life
+- Operating temperature range
+- Wireless range
+
+For any unavailable spec, write:
+"Manufacturer specification not publicly available."
+
+---
+
+2. SETUP & PAIRING
+- Step-by-step pairing instructions
+- Factory reset instructions
+- LED indicator chart
+- Troubleshooting for failed pairing
+
+If missing, write:
+"Exact procedure not provided by manufacturer."
+
+---
+
+3. COMMON ISSUES & SOLUTIONS
+- Known issues
+- Confirmed troubleshooting procedures
+- Signal problems
+- Battery-related behaviors
+
+Do NOT fabricate issues or fixes.
+
+---
+
+4. MAINTENANCE
+- Cleaning
+- Battery replacement
+- Firmware update availability
+- Long-term reliability notes
+
+If not documented, note:
+"Information not publicly documented by manufacturer."
+
+---
+
+5. INTEGRATION & COMPATIBILITY
+- Confirmed compatible hubs/platforms
+- Protocol details
+- Automation examples based ONLY on known behavior
+
+If compatibility is unknown, state so.
+
+---
+
+6. WARRANTY & SUPPORT
+- Warranty length (if known)
+- Manufacturer support links
+- Documentation links
+
+---
+
+STYLE REQUIREMENTS
+- Use precise, technical language.
+- NEVER assume or guess missing information.
+- If unsure, explicitly mark the data as unavailable.
+- Use tables where appropriate.
+- Keep formatting structured and consistent for ingestion into a knowledge base."""
+
+            # Build messages; include documentation_text if present and instruct model to use it
+            messages = [
+                {
+                    "role": "system",
+                    "content": """
+            You are an expert technical writer generating device documentation.
+            Follow these rules STRICTLY:
+
+            1. USE ONLY information explicitly provided in the user prompt or the provided documentation text.
+            2. NEVER guess, infer, or create any technical details. If a detail is not present in the documentation text, state: "Manufacturer specification not publicly available."
+            3. NEVER invent or hallucinate part numbers, pairing steps, reset sequences, LED patterns, or exact measurements.
+            4. If documentation text is not provided, return a short 'unverified' summary and explicitly label it as unverified.
+            5. Output must be structured Markdown suitable for ingestion.
+            6. Accuracy is more important than completeness.
+            """
+                }
+            ]
+
+            user_payload = f"Manufacturer: {manufacturer}\nModel: {model}\nType: {device_type}\n\n"
+            if doc_text_snippet:
+                user_payload += f"Source Documentation:\n\n{doc_text_snippet}\n\n"
+            else:
+                user_payload += "Source Documentation: (none provided)\n\n"
+
+            user_payload += "Please generate the structured knowledge base entry as described. If no documentation is provided, produce a short UNVERIFIED summary and clearly label it."
+
+            messages.append({"role": "user", "content": user_payload})
 
             response = await client.chat.completions.create(
-                model="gpt-4o-mini",
-                messages=[
-                    {
-                        "role": "system",
-                        "content": "You are a technical writer creating device documentation. Be accurate and comprehensive."
-                    },
-                    {"role": "user", "content": prompt}
-                ],
-                temperature=0.5,
-                max_tokens=1200
+                model=self.config.llm.openai_model,
+                messages=messages,
+                temperature=0.0,
+                max_tokens=2000,
             )
 
             content = response.choices[0].message.content
 
-            # Ingest into RAG (async batch)
+            # Ingest generated content into RAG (use helper for compatibility)
             metadata = {
-                "source": f"{manufacturer} {model} - AI Generated Knowledge",
+                "source": f"{manufacturer} {model} - Comprehensive Knowledge Base (AI)",
                 "manufacturer": manufacturer,
                 "model": model,
                 "device_type": device_type,
-                "category": "synthetic_knowledge",
-                "auto_generated": True
+                "category": "comprehensive_knowledge",
+                "auto_generated": True,
+                "generation_method": "openai_curated",
             }
 
-            documents = [{'text': content, 'metadata': metadata}]
-            await self.rag.add_documents_async(documents, batch_size=1)
-            logger.info(f"✅ Generated synthetic knowledge for {manufacturer} {model}")
+            documents = [{"text": content, "metadata": metadata}]
+            await self._rag_add_documents(documents, batch_size=1)
+            logger.info(f"✅ Generated comprehensive knowledge for {manufacturer} {model} ({len(content)} chars)")
 
         except Exception as e:
-            logger.error(f"Synthetic knowledge generation failed: {e}")
+            logger.error(f"Comprehensive knowledge generation failed: {e}")

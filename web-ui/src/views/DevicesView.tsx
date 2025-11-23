@@ -228,14 +228,14 @@ export function DevicesView() {
                       </Tooltip>
                     </Table.Td>
                     <Table.Td style={{ textAlign: 'center' }}>
-                      <Group gap={4} justify="center">
-                        <Tooltip label="Re-ingest Documentation">
+                      <Group gap={4} justify="center" onClick={(e) => e.stopPropagation()}>
+                        <Tooltip label={device.docs_status === 'pending' ? 'Ingestion in progress' : 'Re-ingest Documentation'}>
                           <ActionIcon
                             color="blue"
                             variant="subtle"
                             onClick={() => handleReingestDocs(device.id)}
-                            loading={reingestingId === device.id}
-                            disabled={reingestingId === device.id}
+                            loading={reingestingId === device.id || device.docs_status === 'pending'}
+                            disabled={reingestingId === device.id || device.docs_status === 'pending'}
                           >
                             <RefreshCw size={16} />
                           </ActionIcon>

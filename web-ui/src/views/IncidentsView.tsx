@@ -233,7 +233,14 @@ export function IncidentsView() {
               id: incident.id,
               title: incident.title,
               description: incident.description,
-              severity: incident.severity
+              severity: incident.severity,
+              status: incident.status,
+              device_id: incident.device_id,
+              device_name: incident.device_name,
+              sensor_id: incident.sensor_id,
+              rule_name: incident.rule_name,
+              zone_id: incident.zone_id,
+              created_at: incident.created_at
             }
           }
         })
@@ -456,6 +463,8 @@ export function IncidentsView() {
                         leftSection={<MessageSquare size={16} />}
                         variant="light"
                         size="xs"
+                        disabled={recommendation?.loading}
+                        title={recommendation?.loading ? 'Chat will be available once analysis is complete' : ''}
                         onClick={() => {
                           setChatModal({open: true, incidentId: incident.id});
                           setChatMessages([{
@@ -464,7 +473,14 @@ export function IncidentsView() {
                           }]);
                         }}
                       >
-                        Chat with AI
+                        {recommendation?.loading ? (
+                          <>
+                            <Loader size={14} style={{ marginRight: 8 }} />
+                            Analyzing...
+                          </>
+                        ) : (
+                          'Chat with AI'
+                        )}
                       </Button>
                       <Button
                         leftSection={<Phone size={16} />}
@@ -534,9 +550,9 @@ export function IncidentsView() {
                         rehypePlugins={[rehypeSanitize]}
                         children={msg.content}
                         components={{
-                          p: ({node, ...props}) => <Text size="sm" {...props} />,
-                          li: ({node, ...props}) => <li style={{ marginLeft: 8 }} {...props} />,
-                          strong: ({node, ...props}) => <Text component="span" fw={700} {...props} />
+                          p: ({node, ...props}: any) => <Text size="sm" {...props} />,
+                          li: ({node, ...props}: any) => <li style={{ marginLeft: 8 }} {...props} />,
+                          strong: ({node, ...props}: any) => <Text component="span" fw={700} {...props} />
                         }}
                       />
                     </div>

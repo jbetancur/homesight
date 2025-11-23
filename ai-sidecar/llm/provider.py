@@ -3,6 +3,7 @@
 import logging
 import asyncio
 import os
+import time
 from typing import Optional, List, Dict, Any, Tuple
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
@@ -10,6 +11,14 @@ from functools import partial
 import json
 
 logger = logging.getLogger(__name__)
+
+# Import metrics
+from metrics import (
+    llm_inference_duration,
+    llm_inferences,
+    llm_input_tokens,
+    llm_output_tokens
+)
 
 # Thread pool for blocking LLM operations
 # Initialized at module import time with configurable worker count
@@ -192,34 +201,65 @@ class HybridLLMProvider:
         max_tokens: int
     ) -> Tuple[str, Optional[List[Dict[str, Any]]]]:
         """Chat using OpenAI"""
-        kwargs = {
-            "model": self.config.openai_model,
-            "messages": messages,
-            "temperature": temperature,
-            "max_tokens": max_tokens
-        }
+        start_time = time.time()
+        status = "error"
 
-        if tools:
-            kwargs["tools"] = tools
-            kwargs["tool_choice"] = "auto"
+        try:
+            kwargs = {
+                "model": self.config.openai_model,
+                "messages": messages,
+                "temperature": temperature,
+                "max_tokens": max_tokens
+            }
 
-        response = self.openai_client.chat.completions.create(**kwargs)
-        message = response.choices[0].message
+            if tools:
+                kwargs["tools"] = tools
+                kwargs["tool_choice"] = "auto"
 
-        # Extract tool calls if present
-        tool_calls = None
-        if hasattr(message, 'tool_calls') and message.tool_calls:
-            tool_calls = []
-            for tc in message.tool_calls:
-                tool_calls.append({
-                    "id": tc.id,
-                    "name": tc.function.name,
-                    "arguments": json.loads(tc.function.arguments)
-                })
+            response = self.openai_client.chat.completions.create(**kwargs)
+            message = response.choices[0].message
 
-        response_text = message.content or ""
+            # Track token usage
+            if hasattr(response, 'usage'):
+                llm_input_tokens.labels(
+                    model=self.config.openai_model,
+                    provider="openai"
+                ).inc(response.usage.prompt_tokens)
 
-        return response_text, tool_calls
+                llm_output_tokens.labels(
+                    model=self.config.openai_model,
+                    provider="openai"
+                ).inc(response.usage.completion_tokens)
+
+            # Extract tool calls if present
+            tool_calls = None
+            if hasattr(message, 'tool_calls') and message.tool_calls:
+                tool_calls = []
+                for tc in message.tool_calls:
+                    tool_calls.append({
+                        "id": tc.id,
+                        "name": tc.function.name,
+                        "arguments": json.loads(tc.function.arguments)
+                    })
+
+            response_text = message.content or ""
+            status = "success"
+
+            return response_text, tool_calls
+
+        finally:
+            # Track inference metrics
+            duration = time.time() - start_time
+            llm_inference_duration.labels(
+                model=self.config.openai_model,
+                provider="openai"
+            ).observe(duration)
+
+            llm_inferences.labels(
+                model=self.config.openai_model,
+                provider="openai",
+                status=status
+            ).inc()
 
     def _chat_local(
         self,
@@ -228,32 +268,68 @@ class HybridLLMProvider:
         max_tokens: int
     ) -> str:
         """Chat using local Llama model"""
-        # Format messages for Llama 3.2 Instruct
-        formatted_prompt = "<|begin_of_text|>"
+        start_time = time.time()
+        status = "error"
+        model_name = "llama-3.2-3b"  # Default model name
 
-        for msg in messages:
-            role = msg["role"]
-            content = msg["content"]
+        try:
+            # Format messages for Llama 3.2 Instruct
+            formatted_prompt = "<|begin_of_text|>"
 
-            if role == "system":
-                formatted_prompt += f"<|start_header_id|>system<|end_header_id|>\n\n{content}<|eot_id|>"
-            elif role == "user":
-                formatted_prompt += f"<|start_header_id|>user<|end_header_id|>\n\n{content}<|eot_id|>"
-            elif role == "assistant":
-                formatted_prompt += f"<|start_header_id|>assistant<|end_header_id|>\n\n{content}<|eot_id|>"
+            for msg in messages:
+                role = msg["role"]
+                content = msg["content"]
 
-        # Add assistant header for response
-        formatted_prompt += "<|start_header_id|>assistant<|end_header_id|>\n\n"
+                if role == "system":
+                    formatted_prompt += f"<|start_header_id|>system<|end_header_id|>\n\n{content}<|eot_id|>"
+                elif role == "user":
+                    formatted_prompt += f"<|start_header_id|>user<|end_header_id|>\n\n{content}<|eot_id|>"
+                elif role == "assistant":
+                    formatted_prompt += f"<|start_header_id|>assistant<|end_header_id|>\n\n{content}<|eot_id|>"
 
-        response = self.local_llm(
-            formatted_prompt,
-            max_tokens=max_tokens,
-            temperature=temperature,
-            stop=["<|eot_id|>", "<|end_of_text|>"],
-            echo=False
-        )
+            # Add assistant header for response
+            formatted_prompt += "<|start_header_id|>assistant<|end_header_id|>\n\n"
 
-        return response['choices'][0]['text'].strip()
+            # Track input tokens (approximate based on prompt length)
+            input_token_count = len(formatted_prompt) // 4  # Rough estimate: 4 chars per token
+            llm_input_tokens.labels(
+                model=model_name,
+                provider="local"
+            ).inc(input_token_count)
+
+            response = self.local_llm(
+                formatted_prompt,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                stop=["<|eot_id|>", "<|end_of_text|>"],
+                echo=False
+            )
+
+            response_text = response['choices'][0]['text'].strip()
+
+            # Track output tokens (approximate based on response length)
+            output_token_count = len(response_text) // 4
+            llm_output_tokens.labels(
+                model=model_name,
+                provider="local"
+            ).inc(output_token_count)
+
+            status = "success"
+            return response_text
+
+        finally:
+            # Track inference metrics
+            duration = time.time() - start_time
+            llm_inference_duration.labels(
+                model=model_name,
+                provider="local"
+            ).observe(duration)
+
+            llm_inferences.labels(
+                model=model_name,
+                provider="local",
+                status=status
+            ).inc()
 
     def simple_generate(
         self,

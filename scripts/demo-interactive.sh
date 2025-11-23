@@ -52,6 +52,32 @@ curl -s -X POST $API_URL/devices \
 
 echo -e "${CYAN}✅ Device discovered and registered!${NC}"
 
+# Step 4: Simulate an incident
+echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+echo -e "${GREEN}Step 4: 🚨 Simulating water detection incident...${NC}"
+echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+echo "Basement leak sensor detected water!"
+pause
+
+curl -s -X POST $API_URL/incidents \
+  -H "Content-Type: application/json" \
+  -d '{
+    "id": "incident-water-001",
+    "title": "Water Detected in Basement",
+    "description": "Leak sensor triggered - water detected near water heater",
+    "severity": "critical",
+    "deviceID": "basement-leak-sensor-001",
+    "ruleName": "leak_detection",
+    "data": {
+      "sensor_reading": "wet",
+      "location": "basement",
+      "confidence": "high"
+    }
+  }' | python3 -m json.tool 2>/dev/null || cat
+
+echo -e "${CYAN}🔴 CRITICAL incident created!${NC}"
+pause
+
 # Add sensors for leak detection device
 echo ""
 echo -e "${YELLOW}📊 Creating sensor definitions...${NC}"

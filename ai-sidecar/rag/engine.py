@@ -12,10 +12,14 @@ from typing import List, Dict, Any, Optional
 from pathlib import Path
 import logging
 import asyncio
+import time
 from concurrent.futures import ThreadPoolExecutor
 import threading
 
 logger = logging.getLogger(__name__)
+
+# Import metrics
+from metrics import rag_retrieval_duration, rag_retrievals
 
 
 class RAGEngine:
@@ -193,35 +197,56 @@ class RAGEngine:
     ) -> List[Dict[str, Any]]:
         """
         Query for relevant documents
-        
+
         Returns documents with relevance scores (1 - distance).
         Higher relevance scores are better (closer to 1 = more relevant).
         """
-        # Query collection (ChromaDB handles query embedding automatically)
-        results = self.collection.query(
-            query_texts=[query_text],
-            n_results=n_results,
-            where=where
-        )
-        
-        # Format results with relevance scores
-        formatted_results = []
-        for i in range(len(results['ids'][0])):
-            distance = results['distances'][0][i] if 'distances' in results else 1.0
-            # Convert distance to relevance (similarity)
-            # Distance is typically 0-2, with 0 being identical
-            # Convert to 0-1 scale where 1 is most relevant
-            relevance = max(0.0, 1.0 - (distance / 2.0))
-            
-            formatted_results.append({
-                'id': results['ids'][0][i],
-                'text': results['documents'][0][i],
-                'metadata': results['metadatas'][0][i],
-                'distance': distance,
-                'relevance_score': relevance,
-            })
-        
-        return formatted_results
+        start_time = time.time()
+        status = "error"
+
+        try:
+            # Query collection (ChromaDB handles query embedding automatically)
+            results = self.collection.query(
+                query_texts=[query_text],
+                n_results=n_results,
+                where=where
+            )
+
+            # Format results with relevance scores
+            formatted_results = []
+            for i in range(len(results['ids'][0])):
+                distance = results['distances'][0][i] if 'distances' in results else 1.0
+                # Convert distance to relevance (similarity)
+                # Distance is typically 0-2, with 0 being identical
+                # Convert to 0-1 scale where 1 is most relevant
+                relevance = max(0.0, 1.0 - (distance / 2.0))
+
+                formatted_results.append({
+                    'id': results['ids'][0][i],
+                    'text': results['documents'][0][i],
+                    'metadata': results['metadatas'][0][i],
+                    'distance': distance,
+                    'relevance_score': relevance,
+                })
+
+            # Track status based on results
+            if len(formatted_results) == 0:
+                status = "empty"
+            else:
+                status = "success"
+
+            return formatted_results
+
+        except Exception as e:
+            status = "error"
+            logger.error(f"RAG query failed: {e}")
+            raise
+
+        finally:
+            # Track retrieval metrics
+            duration = time.time() - start_time
+            rag_retrieval_duration.observe(duration)
+            rag_retrievals.labels(status=status).inc()
     
     def get_stats(self) -> Dict[str, Any]:
         """Get RAG database statistics (non-blocking)"""

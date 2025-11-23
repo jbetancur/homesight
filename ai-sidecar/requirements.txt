@@ -12,10 +12,9 @@ pypdf==6.3.0
 httpx==0.28.1
 beautifulsoup4==4.14.2
 
-# Optional: Local LLM support (fallback when OpenAI unavailable)
-# Uncomment to enable local Llama inference
-# llama-cpp-python==0.3.16
-# huggingface-hub==1.1.5
+# Local LLM support (required for inference)
+llama-cpp-python==0.3.16
+huggingface-hub==0.27.1  # Latest compatible with fastembed<1.0 requirement
 
 # Optional: PDF conversion from HTML
 # Uncomment to enable wkhtmltopdf-based PDF conversion

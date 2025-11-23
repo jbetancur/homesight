@@ -21,7 +21,7 @@ from contextlib import asynccontextmanager
 from config import get_config
 
 # Metrics
-from metrics import get_metrics, active_sessions
+from metrics import get_metrics, active_sessions, chat_response_time, chat_requests
 
 # Models
 from models.chat import ChatRequest, ChatResponse
@@ -255,16 +255,26 @@ async def chat(request: ChatRequest):
     - Function calling (device actions)
     - RAG-enhanced responses
     """
+    import time
+    start_time = time.time()
+    status = "error"
+
     if not chat_service:
         raise HTTPException(status_code=503, detail="Chat service not initialized")
 
     try:
         response = await chat_service.chat(request)
         logger.info(f"Chat response - session_id: {response.session_id}, actions: {response.actions_taken}")
+        status = "success"
         return response
     except Exception as e:
         logger.error(f"Chat error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        # Track chat metrics
+        duration = time.time() - start_time
+        chat_response_time.observe(duration)
+        chat_requests.labels(status=status).inc()
 
 
 # Analysis endpoint (AI-powered, no hard-coded rules!)

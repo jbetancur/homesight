@@ -138,15 +138,16 @@ Respond in JSON format:
             try:
                 # Query RAG for relevant docs
                 query = f"{incident_type} {device_id or ''}"
-                results = self.rag.query(query, n_results=3)
+                results = self.rag.query(query, n_results=5)  # Get more results for better context
 
                 if results:
                     rag_parts = ["Relevant documentation:"]
                     for r in results:
                         if r.get('relevance_score', 0) > 0.25:
                             source = r['metadata'].get('source', 'Unknown')
-                            excerpt = r['text'][:300]
-                            rag_parts.append(f"\n- {source}: {excerpt}")
+                            # Use full text, not truncated - let LLM decide what's relevant
+                            excerpt = r['text'][:1500]  # Increased from 300 to 1500 chars
+                            rag_parts.append(f"\n- {source} (relevance: {r['relevance_score']:.2f}):\n{excerpt}")
                             rag_sources.append({
                                 "source": source,
                                 "relevance": r['relevance_score']

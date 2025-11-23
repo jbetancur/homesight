@@ -226,8 +226,8 @@ class ChatService:
         # Build conversation history for LLM
         messages = self._build_messages(session)
 
-        # Enhance with RAG if available
-        rag_context = await self._get_rag_context(request.message)
+        # Enhance with RAG if available (pass session for device context)
+        rag_context = await self._get_rag_context(request.message, session)
         if rag_context:
             # Add RAG context to system message
             if messages and messages[0]["role"] == "system":
@@ -340,22 +340,57 @@ class ChatService:
 
         return messages
 
-    async def _get_rag_context(self, query: str) -> Optional[str]:
-        """Get relevant context from RAG"""
+    async def _get_rag_context(self, query: str, session=None) -> Optional[str]:
+        """Get relevant context from RAG, enhanced with device and conversation context"""
         if not self.rag:
             return None
 
         try:
-            results = self.rag.query(query, n_results=2)
+            # Build enhanced query from multiple sources:
+            # 1. Current user query
+            # 2. Device/incident context
+            # 3. Recent conversation history (for continuity)
+
+            enhanced_query = query
+
+            if session:
+                # Add device/incident context
+                if session.context:
+                    incident = session.context.get("incident", {})
+                    device_id = incident.get("device_id", "")
+                    device_name = incident.get("device_name", "")
+
+                    if device_name:
+                        enhanced_query = f"{query} {device_name}".strip()
+                    elif device_id:
+                        enhanced_query = f"{query} device {device_id}".strip()
+
+                # Add context from recent conversation (last 2-3 messages)
+                # This helps maintain context across multi-turn conversations
+                if session.messages:
+                    recent_context = []
+                    for msg in session.messages[-4:]:  # Last 4 messages = 2 turns
+                        if msg.role == "assistant":
+                            # Extract key info from assistant responses
+                            content = msg.content
+                            # Pull out specific terms like battery types, model numbers, etc.
+                            if any(word in content.lower() for word in ["battery", "cr2032", "aa", "aaa", "model", "sensor", "device"]):
+                                recent_context.append(content[:200])  # First 200 chars
+
+                    if recent_context:
+                        # Add conversation context to query for continuity
+                        enhanced_query = f"{enhanced_query} (context: {' '.join(recent_context[:2])})"
+
+            results = self.rag.query(enhanced_query, n_results=5)
             if not results:
                 return None
 
-            context_parts = ["Relevant documentation:"]
+            context_parts = ["Relevant device documentation:"]
             for r in results:
                 if r.get('relevance_score', 0) > 0.3:
                     source = r['metadata'].get('source', 'Unknown')
-                    text = r['text'][:300]
-                    context_parts.append(f"\n- {source}: {text}")
+                    text = r['text'][:1500]  # Full context for better answers
+                    context_parts.append(f"\n[{source}]\n{text}")
 
             return "\n".join(context_parts) if len(context_parts) > 1 else None
 
