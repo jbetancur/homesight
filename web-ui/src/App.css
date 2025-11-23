@@ -1,1 +1,68 @@
+.navbar {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  padding: 0 var(--mantine-spacing-md);
+  border-right: 1px solid var(--mantine-color-gray-3);
+  background: white;
+  overflow-y: auto;
+}
 
+.navbar-main {
+  flex: 1;
+}
+
+.navbar-header {
+  display: flex;
+  align-items: center;
+  height: 56px;
+  padding: 0;
+  margin-bottom: 16px;
+  border-bottom: 1px solid var(--mantine-color-gray-3);
+}
+
+.navbar-links {
+  margin-bottom: var(--mantine-spacing-md);
+}
+
+.nav-link {
+  display: flex;
+  align-items: center;
+  text-decoration: none;
+  font-size: var(--mantine-font-size-sm);
+  color: var(--mantine-color-gray-7);
+  padding: var(--mantine-spacing-xs) var(--mantine-spacing-sm);
+  border-radius: var(--mantine-radius-sm);
+  font-weight: 500;
+  cursor: pointer;
+  margin-bottom: 4px;
+  transition: all 0.2s ease;
+}
+
+.nav-link:hover {
+  background-color: var(--mantine-color-gray-0);
+  color: var(--mantine-color-gray-9);
+}
+
+.nav-link.active {
+  background-color: var(--mantine-color-blue-0);
+  color: var(--mantine-color-blue-7);
+}
+
+.nav-link.active svg {
+  color: var(--mantine-color-blue-7);
+}
+
+.navbar-footer {
+  padding-top: var(--mantine-spacing-sm);
+  margin-top: auto;
+  border-top: 1px solid var(--mantine-color-gray-3);
+}
+
+.navbar-footer .nav-link {
+  margin-bottom: 4px;
+}
+
+.navbar-footer .nav-link:last-child {
+  margin-bottom: 0;
+}

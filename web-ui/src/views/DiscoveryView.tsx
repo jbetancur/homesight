@@ -1,6 +1,6 @@
 
 import { useEffect, useState, useCallback, useRef } from 'react';
-import { Table, Button, Badge, Text, Loader, Stack, Group, Title, Card, Paper, Alert } from '@mantine/core';
+import { Table, Button, Badge, Text, Loader, Stack, Group, Title, Card, Paper, Alert, ScrollArea } from '@mantine/core';
 import { Check, AlertCircle, Plus, RefreshCw, Wifi } from 'lucide-react';
 import { useEventSubscription } from '../useEventSubscription';
 
@@ -213,51 +213,53 @@ export function DiscoveryView() {
         </Card>
       ) : (
         <Card withBorder p={0}>
-          <Table highlightOnHover striped>
-            <Table.Thead>
-              <Table.Tr>
-                <Table.Th>Name</Table.Th>
-                <Table.Th>Type</Table.Th>
-                <Table.Th>Integration</Table.Th>
-                <Table.Th>Host</Table.Th>
-                <Table.Th>Manufacturer</Table.Th>
-                <Table.Th>Model</Table.Th>
-                <Table.Th style={{ textAlign: 'center' }}>Action</Table.Th>
-              </Table.Tr>
-            </Table.Thead>
-            <Table.Tbody>
-              {filteredDiscovery.map((device: any, idx: number) => (
-                <Table.Tr key={device.id ? `${device.id}-${idx}` : idx}>
-                  <Table.Td>
-                    <Text fw={500}>{device.name || device.id}</Text>
-                  </Table.Td>
-                  <Table.Td>
-                    <Badge variant="light" color="blue">{device.type}</Badge>
-                  </Table.Td>
-                  <Table.Td>
-                    <Badge variant="outline">{device.integration}</Badge>
-                  </Table.Td>
-                  <Table.Td>
-                    <Text size="sm" c="dimmed">{device.host || '-'}</Text>
-                  </Table.Td>
-                  <Table.Td>{device.manufacturer || '-'}</Table.Td>
-                  <Table.Td>{device.model || '-'}</Table.Td>
-                  <Table.Td style={{ textAlign: 'center' }}>
-                    <Button
-                      onClick={() => handleAddDevice(device.id)}
-                      color="blue"
-                      size="xs"
-                      leftSection={<Plus size={14} />}
-                      loading={onboardingId === device.id}
-                      disabled={onboardingId === device.id}
-                    >
-                      {onboardingId === device.id ? 'Adding...' : 'Add Device'}
-                    </Button>
-                  </Table.Td>
+          <ScrollArea>
+            <Table highlightOnHover striped>
+              <Table.Thead>
+                <Table.Tr>
+                  <Table.Th>Name</Table.Th>
+                  <Table.Th>Type</Table.Th>
+                  <Table.Th>Integration</Table.Th>
+                  <Table.Th>Host</Table.Th>
+                  <Table.Th>Manufacturer</Table.Th>
+                  <Table.Th>Model</Table.Th>
+                  <Table.Th style={{ textAlign: 'center' }}>Action</Table.Th>
                 </Table.Tr>
-              ))}
-            </Table.Tbody>
-          </Table>
+              </Table.Thead>
+              <Table.Tbody>
+                {filteredDiscovery.map((device: any, idx: number) => (
+                  <Table.Tr key={device.id ? `${device.id}-${idx}` : idx}>
+                    <Table.Td>
+                      <Text fw={500}>{device.name || device.id}</Text>
+                    </Table.Td>
+                    <Table.Td>
+                      <Badge variant="light" color="blue">{device.type}</Badge>
+                    </Table.Td>
+                    <Table.Td>
+                      <Badge variant="outline">{device.integration}</Badge>
+                    </Table.Td>
+                    <Table.Td>
+                      <Text size="sm" c="dimmed">{device.host || '-'}</Text>
+                    </Table.Td>
+                    <Table.Td>{device.manufacturer || '-'}</Table.Td>
+                    <Table.Td>{device.model || '-'}</Table.Td>
+                    <Table.Td style={{ textAlign: 'center' }}>
+                      <Button
+                        onClick={() => handleAddDevice(device.id)}
+                        color="blue"
+                        size="xs"
+                        leftSection={<Plus size={14} />}
+                        loading={onboardingId === device.id}
+                        disabled={onboardingId === device.id}
+                      >
+                        {onboardingId === device.id ? 'Adding...' : 'Add Device'}
+                      </Button>
+                    </Table.Td>
+                  </Table.Tr>
+                ))}
+              </Table.Tbody>
+            </Table>
+          </ScrollArea>
         </Card>
       )}
     </Stack>

@@ -1,7 +1,7 @@
 
 import { useEffect, useState, useRef, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Table, Badge, Loader, Stack, Title, Text, Card, Group, Paper, Button, Modal, ActionIcon, Tooltip } from '@mantine/core';
+import { Table, Badge, Loader, Stack, Title, Text, Card, Group, Paper, Button, Modal, ActionIcon, Tooltip, ScrollArea } from '@mantine/core';
 import { Wifi, CheckCircle, Activity, Trash2, RefreshCw, FileText } from 'lucide-react';
 import { useEventSubscription } from '../useEventSubscription';
 
@@ -55,9 +55,15 @@ export function DevicesView() {
         setDevices(updated);
       }
     } else if (event.type === "device_updated") {
+      const oldDevice = updated.find(d => d.id === event.data.id);
       updated = updated.map(d => d.id === event.data.id ? event.data : d);
       devicesRef.current = updated;
       setDevices(updated);
+
+      // Clear loading state if docs_status changed from "pending" to final state
+      if (oldDevice && oldDevice.docs_status === 'pending' && event.data.docs_status !== 'pending') {
+        setReingestingId(null);
+      }
     } else if (event.type === "device_removed") {
       // Filter out the removed device
       updated = updated.filter(d => d.id !== event.data.id);
@@ -99,15 +105,17 @@ export function DevicesView() {
 
       if (response.ok) {
         const data = await response.json();
-        alert(`Re-ingestion queued for device. ${data.message}`);
+        // Don't clear loading state yet - wait for device SSE update with final status
+        // The docs_status will change from "pending" to "success"/"partial"/"error"
+        // when the AI sidecar completes, and we'll clear the loading state then
       } else {
         alert('Failed to queue re-ingestion');
         console.error('Re-ingest failed:', response.statusText);
+        setReingestingId(null);
       }
     } catch (error) {
       alert('Error queuing re-ingestion');
       console.error('Re-ingest error:', error);
-    } finally {
       setReingestingId(null);
     }
   };
@@ -167,101 +175,103 @@ export function DevicesView() {
         </Card>
       ) : (
         <Card withBorder p={0}>
-          <Table highlightOnHover striped>
-            <Table.Thead>
-              <Table.Tr>
-                <Table.Th>Name</Table.Th>
-                <Table.Th>Type</Table.Th>
-                <Table.Th>Integration</Table.Th>
-                <Table.Th>Manufacturer</Table.Th>
-                <Table.Th>Model</Table.Th>
-                <Table.Th>Status</Table.Th>
-                <Table.Th>Last Seen</Table.Th>
-                <Table.Th>Documentation</Table.Th>
-                <Table.Th style={{ textAlign: 'center' }}>Actions</Table.Th>
-              </Table.Tr>
-            </Table.Thead>
-            <Table.Tbody>
-              {devices.map((device: any) => {
-                const status = getDeviceStatus(device.last_seen);
-                return (
-                  <Table.Tr key={device.id} style={{ cursor: 'pointer' }} onClick={() => navigate(`/devices/${device.id}/overview`)}>
-                    <Table.Td>
-                      <Group gap="xs">
-                        <Activity size={16} />
-                        <Text fw={500} style={{ color: '#228be6', textDecoration: 'underline' }}>{device.name}</Text>
-                      </Group>
-                    </Table.Td>
-                    <Table.Td>
-                      <Badge variant="light" color="blue">{device.type}</Badge>
-                    </Table.Td>
-                    <Table.Td>
-                      <Badge variant="outline">{device.integration}</Badge>
-                    </Table.Td>
-                    <Table.Td>{device.metadata?.manufacturer || '-'}</Table.Td>
-                    <Table.Td>{device.metadata?.model || '-'}</Table.Td>
-                    <Table.Td>
-                      <Badge color={status.color}>{status.label}</Badge>
-                    </Table.Td>
-                    <Table.Td>
-                      <Text size="sm" c="dimmed">
-                        {new Date(device.last_seen).toLocaleString()}
-                      </Text>
-                    </Table.Td>
-                    <Table.Td>
-                      <Tooltip label={device.docs_ingested ? `Ingested at ${new Date(device.docs_ingested_at).toLocaleString()}` : 'Awaiting documentation ingestion'}>
+          <ScrollArea>
+            <Table highlightOnHover striped>
+              <Table.Thead>
+                <Table.Tr>
+                  <Table.Th>Name</Table.Th>
+                  <Table.Th>Type</Table.Th>
+                  <Table.Th>Integration</Table.Th>
+                  <Table.Th>Manufacturer</Table.Th>
+                  <Table.Th>Model</Table.Th>
+                  <Table.Th>Status</Table.Th>
+                  <Table.Th>Last Seen</Table.Th>
+                  <Table.Th>Documentation</Table.Th>
+                  <Table.Th style={{ textAlign: 'center' }}>Actions</Table.Th>
+                </Table.Tr>
+              </Table.Thead>
+              <Table.Tbody>
+                {devices.map((device: any) => {
+                  const status = getDeviceStatus(device.last_seen);
+                  return (
+                    <Table.Tr key={device.id} style={{ cursor: 'pointer' }} onClick={() => navigate(`/devices/${device.id}/overview`)}>
+                      <Table.Td>
                         <Group gap="xs">
-                          <FileText size={16} color={device.docs_ingested ? '#40c057' : '#868e96'} />
-                          <Badge
-                            variant="light"
-                            color={
-                              device.docs_status === 'success' ? 'green' :
-                              device.docs_status === 'partial' ? 'blue' :
-                              device.docs_status === 'error' ? 'red' :
-                              'gray'
-                            }
-                            size="sm"
-                          >
-                            {device.docs_status || 'pending'}
-                          </Badge>
+                          <Activity size={16} />
+                          <Text fw={500} style={{ color: '#228be6', textDecoration: 'underline' }}>{device.name}</Text>
                         </Group>
-                      </Tooltip>
-                    </Table.Td>
-                    <Table.Td style={{ textAlign: 'center' }}>
-                      <Group gap={4} justify="center" onClick={(e) => e.stopPropagation()}>
-                        <Tooltip label={device.docs_status === 'pending' ? 'Ingestion in progress' : 'Re-ingest Documentation'}>
-                          <ActionIcon
-                            color="blue"
-                            variant="subtle"
-                            onClick={() => handleReingestDocs(device.id)}
-                            loading={reingestingId === device.id || device.docs_status === 'pending'}
-                            disabled={reingestingId === device.id || device.docs_status === 'pending'}
-                          >
-                            <RefreshCw size={16} />
-                          </ActionIcon>
+                      </Table.Td>
+                      <Table.Td>
+                        <Badge variant="light" color="blue">{device.type}</Badge>
+                      </Table.Td>
+                      <Table.Td>
+                        <Badge variant="outline">{device.integration}</Badge>
+                      </Table.Td>
+                      <Table.Td>{device.metadata?.manufacturer || '-'}</Table.Td>
+                      <Table.Td>{device.metadata?.model || '-'}</Table.Td>
+                      <Table.Td>
+                        <Badge color={status.color}>{status.label}</Badge>
+                      </Table.Td>
+                      <Table.Td>
+                        <Text size="sm" c="dimmed">
+                          {new Date(device.last_seen).toLocaleString()}
+                        </Text>
+                      </Table.Td>
+                      <Table.Td>
+                        <Tooltip label={device.docs_ingested ? `Ingested at ${new Date(device.docs_ingested_at).toLocaleString()}` : 'Awaiting documentation ingestion'}>
+                          <Group gap="xs">
+                            <FileText size={16} color={device.docs_ingested ? '#40c057' : '#868e96'} />
+                            <Badge
+                              variant="light"
+                              color={
+                                device.docs_status === 'success' ? 'green' :
+                                device.docs_status === 'partial' ? 'blue' :
+                                device.docs_status === 'error' ? 'red' :
+                                'gray'
+                              }
+                              size="sm"
+                            >
+                              {device.docs_status || 'pending'}
+                            </Badge>
+                          </Group>
                         </Tooltip>
-                        <Tooltip label="Offboard Device">
-                          <ActionIcon
-                            color="red"
-                            variant="subtle"
-                            onClick={() => setConfirmModal({
-                              open: true,
-                              deviceId: device.id,
-                              deviceName: device.name
-                            })}
-                            loading={offboardingId === device.id}
-                            disabled={offboardingId === device.id}
-                          >
-                            <Trash2 size={16} />
-                          </ActionIcon>
-                        </Tooltip>
-                      </Group>
-                    </Table.Td>
-                  </Table.Tr>
-                );
-              })}
-            </Table.Tbody>
-          </Table>
+                      </Table.Td>
+                      <Table.Td style={{ textAlign: 'center' }}>
+                        <Group gap={4} justify="center" onClick={(e) => e.stopPropagation()}>
+                          <Tooltip label={device.docs_status === 'pending' ? 'Ingestion in progress' : 'Re-ingest Documentation'}>
+                            <ActionIcon
+                              color="blue"
+                              variant="subtle"
+                              onClick={() => handleReingestDocs(device.id)}
+                              loading={reingestingId === device.id || device.docs_status === 'pending'}
+                              disabled={reingestingId === device.id || device.docs_status === 'pending'}
+                            >
+                              <RefreshCw size={16} />
+                            </ActionIcon>
+                          </Tooltip>
+                          <Tooltip label="Offboard Device">
+                            <ActionIcon
+                              color="red"
+                              variant="subtle"
+                              onClick={() => setConfirmModal({
+                                open: true,
+                                deviceId: device.id,
+                                deviceName: device.name
+                              })}
+                              loading={offboardingId === device.id}
+                              disabled={offboardingId === device.id}
+                            >
+                              <Trash2 size={16} />
+                            </ActionIcon>
+                          </Tooltip>
+                        </Group>
+                      </Table.Td>
+                    </Table.Tr>
+                  );
+                })}
+              </Table.Tbody>
+            </Table>
+          </ScrollArea>
         </Card>
       )}
 
