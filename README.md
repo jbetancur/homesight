@@ -184,6 +184,24 @@ Auto-creates incidents for:
 
 Auto-resolves when conditions clear.
 
+## Installation
+
+### Production (Recommended)
+
+```bash
+sudo bash scripts/install.sh
+```
+
+This downloads pre-built binaries from GitHub releases and sets up systemd services for production deployment.
+
+To install a specific version:
+
+```bash
+HOMESIGHT_VERSION=v1.0.0 sudo bash scripts/install.sh
+```
+
+See [Installation Guide](INSTALL.md) for detailed instructions.
+
 ## Development
 
 ```bash
@@ -193,6 +211,18 @@ make clean        # Clean artifacts
 ./scripts/homesight.sh dashboard   # Open TUI dashboard
 ./scripts/homesight.sh logs daemon # View daemon logs
 ```
+
+## CI/CD Pipeline
+
+Automated build, test, and release process using GitHub Actions:
+
+- **Binaries** built for Linux (amd64, arm64)
+- **Tests** run with race condition detection
+- **Code quality** verified with golangci-lint
+- **Docker images** pushed to GitHub Container Registry
+- **Releases** automatically created with binaries attached
+
+See [CI/CD Documentation](CI-CD.md) for complete details.
 
 ## Configuration
 
@@ -204,5 +234,5 @@ See `config.yaml.example` for defaults.
 
 - Go 1.25+
 - Python 3.10+ (for AI sidecar, optional)
-- Docker (for MQTT broker)
+- Docker (for containers)
 - SQLite3
