@@ -539,14 +539,15 @@ func (s *Server) handleUpdateDeviceDocsStatus(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	// Emit device_updated event for real-time UI updates
+	// Emit device_updated event for real-time UI updates with the final status
 	if s.eventBus != nil {
 		s.eventBus.Publish(Event{Type: DeviceUpdated, Data: device})
 	}
 
 	// Auto-generate knowledge base articles if docs were successfully ingested
+	// Do this in the background to avoid blocking the response
+	// The KB articles will be available for future queries
 	if updateReq.Ingested && updateReq.Status == "success" {
-		// Launch knowledge base generation in the background to avoid blocking
 		go s.generateAndStoreKnowledgeBase(device)
 	}
 

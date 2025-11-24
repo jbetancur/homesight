@@ -474,7 +474,6 @@ func (s *Server) generateDeviceKnowledgeBase(w http.ResponseWriter, r *http.Requ
 	defer cancel()
 
 	// Generate articles concurrently from AI sidecar
-	articles := []map[string]interface{}{}
 	overviewChan := make(chan string, 1)
 	troubleshootChan := make(chan string, 1)
 	docChan := make(chan string, 1)
@@ -514,15 +513,10 @@ func (s *Server) generateDeviceKnowledgeBase(w http.ResponseWriter, r *http.Requ
 		close(docChan)
 	}()
 
-	// Collect results with defaults
-	overviewContent := "Comprehensive overview of " + device.Name + " including typical use cases, configuration, and maintenance"
-	troubleshootContent := "Common issues and solutions for " + device.Name
-	docContent := "Official manual and technical specifications"
-
-	// Wait for results with context timeout
-	overviewContent = getValueWithContext(aiCtx, overviewChan, overviewContent)
-	troubleshootContent = getValueWithContext(aiCtx, troubleshootChan, troubleshootContent)
-	docContent = getValueWithContext(aiCtx, docChan, docContent)
+	// Collect results - only store if AI sidecar returns actual content
+	overviewContent := getValueWithContext(aiCtx, overviewChan, "")
+	troubleshootContent := getValueWithContext(aiCtx, troubleshootChan, "")
+	docContent := getValueWithContext(aiCtx, docChan, "")
 
 	// Delete existing articles for this device
 	if err := s.knowledgeBaseRepo.DeleteByDevice(ctx, deviceID); err != nil {
@@ -531,43 +525,50 @@ func (s *Server) generateDeviceKnowledgeBase(w http.ResponseWriter, r *http.Requ
 	}
 
 	now := time.Now()
+	articlesStored := 0
 
-	// Store Device Overview
-	overviewArticle := &db.KnowledgeBaseArticle{
-		ID:          fmt.Sprintf("%s-overview", deviceID),
-		DeviceID:    deviceID,
-		Title:       "Device Overview",
-		Type:        "generated",
-		Source:      "AI-Generated Knowledge Base",
-		Description: overviewContent,
-		Available:   true,
-		CreatedAt:   now,
-		UpdatedAt:   now,
-	}
-	if err := s.knowledgeBaseRepo.Upsert(ctx, overviewArticle); err != nil {
-		http.Error(w, fmt.Sprintf("failed to store overview article: %v", err), http.StatusInternalServerError)
-		return
-	}
-
-	// Store Troubleshooting Guide
-	troubleshootArticle := &db.KnowledgeBaseArticle{
-		ID:          fmt.Sprintf("%s-troubleshoot", deviceID),
-		DeviceID:    deviceID,
-		Title:       "Troubleshooting Guide",
-		Type:        "generated",
-		Source:      "AI-Generated Knowledge Base",
-		Description: troubleshootContent,
-		Available:   true,
-		CreatedAt:   now,
-		UpdatedAt:   now,
-	}
-	if err := s.knowledgeBaseRepo.Upsert(ctx, troubleshootArticle); err != nil {
-		http.Error(w, fmt.Sprintf("failed to store troubleshoot article: %v", err), http.StatusInternalServerError)
-		return
+	// Store Device Overview - only if content exists
+	if overviewContent != "" {
+		overviewArticle := &db.KnowledgeBaseArticle{
+			ID:          fmt.Sprintf("%s-overview", deviceID),
+			DeviceID:    deviceID,
+			Title:       "Device Overview",
+			Type:        "generated",
+			Source:      "AI-Generated Knowledge Base",
+			Description: overviewContent,
+			Available:   true,
+			CreatedAt:   now,
+			UpdatedAt:   now,
+		}
+		if err := s.knowledgeBaseRepo.Upsert(ctx, overviewArticle); err != nil {
+			http.Error(w, fmt.Sprintf("failed to store overview article: %v", err), http.StatusInternalServerError)
+			return
+		}
+		articlesStored++
 	}
 
-	// Store Official Documentation if available
-	if device.Metadata != nil && device.Metadata["manufacturer"] != "" {
+	// Store Troubleshooting Guide - only if content exists
+	if troubleshootContent != "" {
+		troubleshootArticle := &db.KnowledgeBaseArticle{
+			ID:          fmt.Sprintf("%s-troubleshoot", deviceID),
+			DeviceID:    deviceID,
+			Title:       "Troubleshooting Guide",
+			Type:        "generated",
+			Source:      "AI-Generated Knowledge Base",
+			Description: troubleshootContent,
+			Available:   true,
+			CreatedAt:   now,
+			UpdatedAt:   now,
+		}
+		if err := s.knowledgeBaseRepo.Upsert(ctx, troubleshootArticle); err != nil {
+			http.Error(w, fmt.Sprintf("failed to store troubleshoot article: %v", err), http.StatusInternalServerError)
+			return
+		}
+		articlesStored++
+	}
+
+	// Store Official Documentation - only if content exists
+	if docContent != "" && device.Metadata != nil && device.Metadata["manufacturer"] != "" {
 		docArticle := &db.KnowledgeBaseArticle{
 			ID:          fmt.Sprintf("%s-official-docs", deviceID),
 			DeviceID:    deviceID,
@@ -583,6 +584,7 @@ func (s *Server) generateDeviceKnowledgeBase(w http.ResponseWriter, r *http.Requ
 			http.Error(w, fmt.Sprintf("failed to store official docs article: %v", err), http.StatusInternalServerError)
 			return
 		}
+		articlesStored++
 	}
 
 	// Return success with generated articles
@@ -590,7 +592,7 @@ func (s *Server) generateDeviceKnowledgeBase(w http.ResponseWriter, r *http.Requ
 		"device_id": deviceID,
 		"status":    "success",
 		"message":   "Knowledge base articles generated and stored successfully",
-		"articles":  len(articles) + 2, // overview + troubleshoot + optional docs
+		"articles":  articlesStored,
 	}
 
 	w.Header().Set("Content-Type", "application/json")

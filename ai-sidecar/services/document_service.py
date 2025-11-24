@@ -368,12 +368,23 @@ STYLE REQUIREMENTS
 
             messages.append({"role": "user", "content": user_payload})
 
-            response = await client.chat.completions.create(
-                model=self.config.llm.openai_model,
-                messages=messages,
-                temperature=0.0,
-                max_tokens=2000,
-            )
+            # Build kwargs with conditional parameters for GPT-5 compatibility
+            kwargs = {
+                "model": self.config.llm.openai_model,
+                "messages": messages,
+            }
+
+            # GPT-5-mini doesn't support temperature parameter
+            if "gpt-5" not in self.config.llm.openai_model.lower():
+                kwargs["temperature"] = 0.0
+
+            if "gpt-5" in self.config.llm.openai_model.lower():
+                # GPT-5-mini uses reasoning_tokens extensively, need much higher limits
+                kwargs["max_completion_tokens"] = 16000
+            else:
+                kwargs["max_tokens"] = 2000
+
+            response = await client.chat.completions.create(**kwargs)
 
             content = response.choices[0].message.content
 

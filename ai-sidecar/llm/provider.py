@@ -201,9 +201,17 @@ class LLMProvider:
             kwargs = {
                 "model": self.config.openai_model,
                 "messages": messages,
-                "temperature": temperature,
-                "max_tokens": max_tokens
             }
+
+            # GPT-5-mini doesn't support temperature parameter (only supports default value of 1)
+            if "gpt-5" not in self.config.openai_model.lower():
+                kwargs["temperature"] = temperature
+
+            # GPT-5 models use max_completion_tokens instead of max_tokens
+            if "gpt-5" in self.config.openai_model.lower():
+                kwargs["max_completion_tokens"] = max_tokens
+            else:
+                kwargs["max_tokens"] = max_tokens
 
             if tools:
                 kwargs["tools"] = tools
@@ -376,9 +384,17 @@ class LLMProvider:
             kwargs = {
                 "model": self.config.openai_model,
                 "messages": messages,
-                "temperature": temperature,
-                "max_tokens": max_tokens
             }
+
+            # GPT-5-mini doesn't support temperature parameter (only supports default value of 1)
+            if "gpt-5" not in self.config.openai_model.lower():
+                kwargs["temperature"] = temperature
+
+            # GPT-5 models use max_completion_tokens instead of max_tokens
+            if "gpt-5" in self.config.openai_model.lower():
+                kwargs["max_completion_tokens"] = max_tokens
+            else:
+                kwargs["max_tokens"] = max_tokens
 
             if tools:
                 kwargs["tools"] = tools
@@ -415,7 +431,14 @@ class LLMProvider:
             messages.append({"role": "system", "content": system_prompt})
         messages.append({"role": "user", "content": prompt})
 
-        response, _ = self.chat(messages, tools=None, temperature=temperature, max_tokens=max_tokens)
+        # GPT-5-mini needs significantly higher token limits due to internal reasoning
+        effective_max_tokens = max_tokens
+        if "gpt-5" in self.config.openai_model.lower():
+            # Scale up tokens to account for reasoning overhead
+            # Minimum 4x to avoid reasoning consuming all tokens
+            effective_max_tokens = max(max_tokens * 8, 4000)
+
+        response, _ = self.chat(messages, tools=None, temperature=temperature, max_tokens=effective_max_tokens)
         return response
 
     async def simple_generate_async(
@@ -431,7 +454,14 @@ class LLMProvider:
             messages.append({"role": "system", "content": system_prompt})
         messages.append({"role": "user", "content": prompt})
 
-        response, _ = await self.chat_async(messages, tools=None, temperature=temperature, max_tokens=max_tokens)
+        # GPT-5-mini needs significantly higher token limits due to internal reasoning
+        effective_max_tokens = max_tokens
+        if "gpt-5" in self.config.openai_model.lower():
+            # Scale up tokens to account for reasoning overhead
+            # Minimum 4x to avoid reasoning consuming all tokens
+            effective_max_tokens = max(max_tokens * 8, 4000)
+
+        response, _ = await self.chat_async(messages, tools=None, temperature=temperature, max_tokens=effective_max_tokens)
         return response
 
     def is_available(self) -> bool:

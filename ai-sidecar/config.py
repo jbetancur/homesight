@@ -45,6 +45,7 @@ class RAGConfig(BaseModel):
     embedding_model: str = Field(default="BAAI/bge-small-en-v1.5")
     batch_size_documents: int = Field(default=3, description="Batch size for PDF/official documentation ingestion")
     batch_size_community: int = Field(default=2, description="Batch size for community source ingestion")
+    manufacturers: Dict[str, Dict[str, Any]] = Field(default_factory=dict, description="Known manufacturer documentation URL patterns")
 
 
 class DocumentFetcherConfig(BaseModel):
@@ -153,6 +154,8 @@ class Config(BaseModel):
                 rag_config_data['batch_size_documents'] = rag_section['batch_size_documents']
             if 'batch_size_community' in rag_section:
                 rag_config_data['batch_size_community'] = rag_section['batch_size_community']
+            if 'manufacturers' in rag_section:
+                rag_config_data['manufacturers'] = rag_section['manufacturers']
 
             return cls(
                 llm=LLMConfig(**llm_config_data),

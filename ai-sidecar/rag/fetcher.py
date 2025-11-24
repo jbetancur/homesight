@@ -28,22 +28,21 @@ from .url_cache import URLCache
 logger = logging.getLogger(__name__)
 
 
-# Known manufacturer documentation URL patterns
-# These are checked before LLM to ensure reliability
-KNOWN_MANUFACTURERS = {
-    "Aqara": {
-        "base_url": "https://cdn.aqara.com/cdn/website/mainland/static/docs",
-        "patterns": {
-            # Maps product names to known PDF URLs
-            "SJCGQ11LM": "Water-Leak-Sensor_Manuals_EU.pdf",
-        }
-    },
-}
+def get_known_manufacturers_from_config() -> Dict[str, Dict]:
+    """Load known manufacturer patterns from config."""
+    try:
+        from config import get_config
+        config = get_config()
+        return config.rag.manufacturers or {}
+    except Exception as e:
+        logger.warning(f"Failed to load manufacturers from config: {e}")
+        return {}
 
 
 async def get_known_manufacturer_url(manufacturer: str, model: str) -> Optional[str]:
     """Check if we have a known URL pattern for this manufacturer."""
-    mfr = KNOWN_MANUFACTURERS.get(manufacturer)
+    manufacturers = get_known_manufacturers_from_config()
+    mfr = manufacturers.get(manufacturer)
     if not mfr:
         return None
 
