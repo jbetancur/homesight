@@ -20,6 +20,7 @@ import (
 	"github.com/homesight/homesight/internal/db"
 	"github.com/homesight/homesight/internal/discovery"
 	"github.com/homesight/homesight/internal/incidents"
+	"github.com/homesight/homesight/internal/integrations/zwave"
 	"github.com/homesight/homesight/internal/metrics"
 	"github.com/homesight/homesight/internal/model"
 )
@@ -38,6 +39,11 @@ type Server struct {
 	discoveryMutex      sync.RWMutex
 	eventBus            *EventBus
 	cfg                 *config.Config
+
+	// Z-Wave integration
+	zwaveClient        *zwave.Client
+	zwaveHomeID        int
+	zwaveMutex         sync.RWMutex
 }
 
 // NewServer creates a new API server
@@ -62,6 +68,11 @@ func NewServer(
 		addr:              addr,
 		eventBus:          NewEventBus(),
 		cfg:               cfg,
+	}
+
+	// Initialize Z-Wave if enabled
+	if cfg.Integrations.ZWave {
+		s.initZWave()
 	}
 
 	s.setupRoutes()
@@ -132,6 +143,20 @@ func (s *Server) setupRoutes() {
 		r.Get("/discovery", s.handleDiscovery)
 		r.Post("/onboard/device", s.handleOnboardDevice)
 		r.Post("/onboard/broker", s.handleOnboardBroker)
+
+		// Z-Wave
+		r.Route("/zwave", func(r chi.Router) {
+			r.Get("/controller", s.handleZWaveGetController)
+			r.Get("/nodes", s.handleZWaveGetNodes)
+			r.Get("/statistics", s.handleZWaveGetStatistics)
+			r.Post("/inclusion/start", s.handleZWaveStartInclusion)
+			r.Post("/inclusion/stop", s.handleZWaveStopInclusion)
+			r.Post("/exclusion/start", s.handleZWaveStartExclusion)
+			r.Post("/exclusion/stop", s.handleZWaveStopExclusion)
+			r.Post("/heal", s.handleZWaveHealNode)
+			r.Post("/remove-failed", s.handleZWaveRemoveFailedNode)
+			r.Post("/backup", s.handleZWaveBackupNVM)
+		})
 
 		// AI proxy
 		r.Route("/ai", func(r chi.Router) {

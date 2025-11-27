@@ -91,6 +91,34 @@ start_ai() {
     fi
 }
 
+start_zwave() {
+    echo -e "${GREEN}Starting ZWave (Docker)...${NC}"
+
+    cd "$PROJECT_DIR"
+
+    # Stop any existing container
+    docker compose stop zwavejs 2>/dev/null || true
+    docker compose rm -f zwavejs 2>/dev/null || true
+
+    # Kill any host processes on port 8001
+    if lsof -ti:8001 >/dev/null 2>&1; then
+        echo -e "${YELLOW}Killing process on port 8001...${NC}"
+        lsof -ti:8001 | xargs kill -9 2>/dev/null || true
+        sleep 2
+    fi
+
+    # Start with docker compose
+    docker compose up -d zwavejs
+
+    if [ $? -eq 0 ]; then
+        echo -e "${GREEN}✅ ZWave started in Docker${NC}"
+        echo "   API: http://localhost:8001"
+    else
+        echo -e "${RED}❌ Failed to start ZWave${NC}"
+        return 1
+    fi
+}
+
 start_docker() {
     echo -e "${GREEN}Starting Docker services...${NC}"
 
@@ -223,11 +251,8 @@ case "${1:-}" in
 
         start_daemon
         start_ai
+        start_zwave
         start_docker
-
-        # Wait for services to be fully ready (AI sidecar loads LLM model)
-        echo "Waiting for services to be ready..."
-        sleep 15
 
         echo ""
         show_status
@@ -260,6 +285,7 @@ case "${1:-}" in
         sleep 3
         start_daemon
         start_ai
+        start_zwave
         start_docker
 
         # Wait for services to be fully ready (AI sidecar loads LLM model)

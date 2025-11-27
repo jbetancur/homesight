@@ -39,6 +39,15 @@ type DiscoveredBroker struct {
 	DiscoveredAt time.Time `json:"discovered_at"`
 }
 
+// DiscoveredReceiver represents a Z-Wave USB receiver found on the system
+type DiscoveredReceiver struct {
+	Name         string `json:"name"`
+	DevicePath   string `json:"device_path"`
+	Type         string `json:"type"`
+	Online       bool   `json:"online"`
+	SerialNumber string `json:"serial_number,omitempty"`
+}
+
 // handleDiscovery runs network discovery and returns found devices/brokers
 func (s *Server) handleDiscovery(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
@@ -52,21 +61,23 @@ func (s *Server) handleDiscovery(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Run broker and device discovery in parallel
+	// Run broker, device, and receiver discovery in parallel
 	type discoveryResult struct {
-		brokers []DiscoveredBroker
-		devices []DiscoveredDevice
+		brokers   []DiscoveredBroker
+		devices   []DiscoveredDevice
+		receivers []DiscoveredReceiver
 	}
 
 	resultChan := make(chan discoveryResult, 1)
 
 	go func() {
 		var wg sync.WaitGroup
-		var brokersMu, devicesMu sync.Mutex
+		var brokersMu, devicesMu, receiversMu sync.Mutex
 
 		result := discoveryResult{
-			brokers: []DiscoveredBroker{},
-			devices: []DiscoveredDevice{},
+			brokers:   []DiscoveredBroker{},
+			devices:   []DiscoveredDevice{},
+			receivers: []DiscoveredReceiver{},
 		}
 
 		// Discover MQTT brokers in parallel
@@ -88,6 +99,28 @@ func (s *Server) handleDiscovery(w http.ResponseWriter, r *http.Request) {
 				brokersMu.Lock()
 				result.brokers = discoveredBrokers
 				brokersMu.Unlock()
+			}
+		}()
+
+		// Discover Z-Wave USB receivers in parallel
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			receivers, err := discovery.DiscoverZWaveUSBReceivers()
+			if err == nil && len(receivers) > 0 {
+				discoveredReceivers := make([]DiscoveredReceiver, 0, len(receivers))
+				for _, r := range receivers {
+					discoveredReceivers = append(discoveredReceivers, DiscoveredReceiver{
+						Name:         r.Name,
+						DevicePath:   r.DevicePath,
+						Type:         "zwave_usb",
+						Online:       r.Online,
+						SerialNumber: r.SerialNumber,
+					})
+				}
+				receiversMu.Lock()
+				result.receivers = discoveredReceivers
+				receiversMu.Unlock()
 			}
 		}()
 
@@ -168,8 +201,9 @@ func (s *Server) handleDiscovery(w http.ResponseWriter, r *http.Request) {
 	result := <-resultChan
 
 	response := map[string]interface{}{
-		"brokers": result.brokers,
-		"devices": result.devices,
+		"brokers":   result.brokers,
+		"devices":   result.devices,
+		"receivers": result.receivers,
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -322,9 +356,21 @@ func (s *Server) handleTestDiscovery(w http.ResponseWriter, r *http.Request) {
 		},
 	}
 
+	// Simulate Z-Wave USB receiver
+	receivers := []DiscoveredReceiver{
+		{
+			Name:         "Zooz 800 Z-Wave Stick",
+			DevicePath:   "/dev/ttyACM0",
+			Type:         "zwave_usb",
+			Online:       true,
+			SerialNumber: "533D004242",
+		},
+	}
+
 	response := map[string]interface{}{
 		"brokers":   brokers,
 		"devices":   devices,
+		"receivers": receivers,
 		"test_mode": true,
 	}
 

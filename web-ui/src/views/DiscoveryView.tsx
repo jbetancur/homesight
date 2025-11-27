@@ -3,12 +3,14 @@ import { useEffect, useState, useCallback, useRef } from 'react';
 import { Table, Button, Badge, Text, Loader, Stack, Group, Title, Card, Paper, Alert, ScrollArea } from '@mantine/core';
 import { Check, AlertCircle, Plus, RefreshCw, Wifi } from 'lucide-react';
 import { useEventSubscription } from '../useEventSubscription';
+import { API_BASE_WITH_PATHS } from '../apiConfig';
 
-const API_BASE = 'http://localhost:8080/api';
+const API_BASE = API_BASE_WITH_PATHS;
 
 export function DiscoveryView() {
   const [discovery, setDiscovery] = useState<any[]>([]);
   const [devices, setDevices] = useState<any[]>([]);
+  const [receivers, setReceivers] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [onboardingId, setOnboardingId] = useState<string | null>(null);
@@ -16,12 +18,14 @@ export function DiscoveryView() {
   const devicesRef = useRef<any[]>([]);
   const discoveryRef = useRef<any[]>([]);
 
-  const fetchDiscovery = async (useTestMode = true) => {
+  const fetchDiscovery = async (useTestMode = false) => {
     const url = useTestMode ? `${API_BASE}/discovery?test=true` : `${API_BASE}/discovery`;
     const res = await fetch(url);
     const data = await res.json();
     const devices = data?.devices || [];
+    const receivers = data?.receivers || [];
     setDiscovery(devices);
+    setReceivers(receivers);
     discoveryRef.current = devices;
     return devices;
   };
@@ -199,6 +203,38 @@ export function DiscoveryView() {
         <Alert color="red" title="Error" icon={<AlertCircle size={16} />} onClose={() => setError(null)} withCloseButton>
           {error}
         </Alert>
+      )}
+
+      {receivers.length > 0 && (
+        <Card withBorder p="md">
+          <Stack gap="sm">
+            <Group justify="space-between">
+              <Text size="lg" fw={600}>Z-Wave USB Receivers</Text>
+              <Badge color={receivers.some(r => r.online) ? "green" : "red"} variant="light">
+                {receivers.filter(r => r.online).length} Online
+              </Badge>
+            </Group>
+            {receivers.map((receiver: any, idx: number) => (
+              <Paper key={idx} p="sm" withBorder style={{ backgroundColor: receiver.online ? '#f0fdf4' : '#fef2f2' }}>
+                <Group justify="space-between">
+                  <div>
+                    <Group gap="xs">
+                      <Text fw={500}>{receiver.name}</Text>
+                      <Badge size="xs" color={receiver.online ? "green" : "red"}>
+                        {receiver.online ? "Online" : "Offline"}
+                      </Badge>
+                    </Group>
+                    <Text size="xs" c="dimmed">{receiver.device_path}</Text>
+                    {receiver.serial_number && (
+                      <Text size="xs" c="dimmed">Serial: {receiver.serial_number}</Text>
+                    )}
+                  </div>
+                  <Badge variant="outline">{receiver.type}</Badge>
+                </Group>
+              </Paper>
+            ))}
+          </Stack>
+        </Card>
       )}
 
       {filteredDiscovery.length === 0 ? (

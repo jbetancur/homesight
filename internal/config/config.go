@@ -36,7 +36,14 @@ type Config struct {
 		Zigbee bool `yaml:"zigbee"`
 		MQTT   bool `yaml:"mqtt"`
 		LAN    bool `yaml:"lan"`
+		ZWave  bool `yaml:"zwave"`
 	} `yaml:"integrations"`
+
+	ZWave struct {
+		WebSocketURL string `yaml:"websocket_url"`
+		AutoHeal     bool   `yaml:"auto_heal"`
+		HealHour     int    `yaml:"heal_hour"`
+	} `yaml:"zwave"`
 }
 
 // Load reads configuration from a YAML file
@@ -66,6 +73,12 @@ func Load(path string) (*Config, error) {
 	}
 	if cfg.API.Addr == "" {
 		cfg.API.Addr = ":8000"
+	}
+	if cfg.ZWave.WebSocketURL == "" {
+		cfg.ZWave.WebSocketURL = "ws://localhost:3001"
+	}
+	if cfg.ZWave.HealHour == 0 {
+		cfg.ZWave.HealHour = 3 // Default: 3 AM
 	}
 
 	return &cfg, nil

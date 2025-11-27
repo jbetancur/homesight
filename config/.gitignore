@@ -1,0 +1,7 @@
+# Security keys - never commit!
+zwave-keys.json
+
+# Any other sensitive configuration
+*.key
+*.pem
+*.secret

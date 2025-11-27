@@ -52,6 +52,76 @@ services:
       - "host.docker.internal:host-gateway"
     # To give access to host devices (USB / serial), add 'devices' entries here or mount them at runtime.
 
+  zwavejs:
+    image: zwavejs/zwave-js-ui:latest
+    container_name: homesight-zwavejs
+    restart: unless-stopped
+
+    # Map Z-Wave USB stick (use by-id for stability across reboots)
+    devices:
+      - /dev/serial/by-id/usb-Zooz_800_Z-Wave_Stick_533D004242-if00:/dev/zwave
+
+    volumes:
+      # Persistent storage for Z-Wave network state and NVM backups
+      - /var/lib/homesight/zwavejs:/usr/src/app/store
+
+      # Security keys (S2) - mounted read-only
+      - ./config/zwave-keys.json:/usr/src/app/store/keys.json:ro
+
+    environment:
+      - RATE_LIMIT_ENABLED=false
+      # Disable MQTT - we use WebSocket API directly
+      - MQTT_ENABLED=false
+
+      # Session secret for web UI (only needed if UI is enabled)
+      - SESSION_SECRET=${ZWAVE_SESSION_SECRET:-changeme-random-secret}
+
+      # Logging
+      - LOGTOFILE=true
+      - LOG_LEVEL=info
+
+      # Trust proxy headers (behind reverse proxy)
+      # (removed for local/dev; do not set to a string 'false' because
+      # that can be interpreted as truthy by the app)
+
+      # Timezone
+      - TZ=America/New_York
+
+    ports:
+      # WebSocket API - internal only (accessible from other containers)
+      - "127.0.0.1:3001:3000"
+
+      # Web UI - ONLY enable in development
+      # Uncomment for debugging/setup, comment out in production
+      - "127.0.0.1:8091:8091"
+
+    networks:
+      - homesight
+
+    # Health check
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8091/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+    # Resource limits for appliance
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '1.0'
+        reservations:
+          memory: 256M
+          cpus: '0.5'
+
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
   grafana:
     image: grafana/grafana:latest
     container_name: homesight-grafana
@@ -72,6 +142,7 @@ services:
 volumes:
   prometheus_data:
   grafana_data:
+  zwavejs_data:
 
 networks:
   homesight:

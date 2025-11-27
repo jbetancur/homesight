@@ -2,19 +2,21 @@
 import { useState } from 'react';
 import { BrowserRouter as Router, Routes, Route, Link, useLocation } from 'react-router-dom';
 import { AppShell, Group, Stack, Text, Container, Burger } from '@mantine/core';
-import { Home, AlertCircle, Search, Activity, Settings, Server, LogOut } from 'lucide-react';
+import { Home, AlertCircle, Search, Activity, Settings, Server, LogOut, Radio } from 'lucide-react';
 import { DevicesView } from './views/DevicesView';
 import { DeviceOverviewView } from './views/DeviceOverviewView';
 import { SensorDetailView } from './views/SensorDetailView';
 import { IncidentsView } from './views/IncidentsView';
 import { DiscoveryView } from './views/DiscoveryView';
 import { StatusView } from './views/StatusView';
+import { ZWaveView } from './views/ZWaveView';
 import './App.css';
 
 const navItems = [
   { label: 'Devices', icon: Activity, path: '/' },
   { label: 'Incidents', icon: AlertCircle, path: '/incidents' },
   { label: 'Discovery', icon: Search, path: '/discovery' },
+  { label: 'Z-Wave', icon: Radio, path: '/zwave' },
   { label: 'Status', icon: Server, path: '/status' },
 ];
 
@@ -113,6 +115,7 @@ function AppContent() {
             <Route path="/devices/:deviceId/sensors/:sensorId" element={<SensorDetailView />} />
             <Route path="/incidents" element={<IncidentsView />} />
             <Route path="/discovery" element={<DiscoveryView />} />
+            <Route path="/zwave" element={<ZWaveView />} />
             <Route path="/status" element={<StatusView />} />
           </Routes>
         </Container>

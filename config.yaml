@@ -102,7 +102,13 @@ api:
 backend_url: "http://10.0.20.175:8080"
 
 integrations:
+  zwave: true    # Z-Wave devices via Z-Wave JS
   matter: true   # Auto-discovers Matter devices via mDNS (requires native network)
   zigbee: true   # Requires MQTT broker with Zigbee2MQTT
   mqtt: true     # General MQTT device support + MQTT discovery
   lan: true      # Auto-discovers Shelly, Tasmota, ESPHome via mDNS (requires native network)
+
+zwave:
+  websocket_url: "ws://localhost:3001"  # Z-Wave JS WebSocket API
+  auto_heal: true                        # Automatically heal network nightly
+  heal_hour: 3                          # Hour to perform heal (3 = 3 AM)
