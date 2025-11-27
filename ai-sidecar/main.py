@@ -46,11 +46,11 @@ from analysis_queue import AnalysisQueue
 from task_queue import TaskQueue, QueueType, QueueConfig
 
 # Configure logging to both console and file
-# Use /app/log in Docker, .logs locally
+# Use /app/log in Docker, logs locally
 if os.path.exists('/.dockerenv'):
     log_dir = Path('/app/log')
 else:
-    log_dir = Path('.logs')
+    log_dir = Path('logs')
 log_dir.mkdir(parents=True, exist_ok=True)
 log_file = log_dir / 'ai.log'
 

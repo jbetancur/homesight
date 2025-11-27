@@ -4,9 +4,12 @@ set -e
 
 # HomeSight Unified Installation Script for Ubuntu
 # Installs HomeSight as a production system service
+# - Uses official Docker repository (not snap)
 # - Downloads pre-built binaries from GitHub releases
 # - Sets up systemd services for daemon and Docker containers
 # - Configures everything for production deployment
+#
+# Based on: https://docs.docker.com/engine/install/ubuntu/
 
 echo "🏠 HomeSight Installation for Ubuntu"
 echo "====================================="
@@ -24,6 +27,7 @@ GITHUB_REPO="homesight/homesight"
 RELEASE_VERSION="${HOMESIGHT_VERSION:-latest}"
 INSTALL_DIR="/opt/homesight"
 DATA_DIR="/var/lib/homesight"
+HOMESIGHT_HOME="/home/homesight"
 SYSTEMD_DIR="/etc/systemd/system"
 
 # Check if running on Ubuntu
@@ -49,12 +53,22 @@ if [ "$(id -u)" != "0" ]; then
   exit 1
 fi
 
+# Clean up any conflicting Docker repository entries BEFORE first apt-get update
+# This prevents "Conflicting values set for option Signed-By" errors and duplicate sources
+echo "Cleaning up any conflicting Docker repository entries..."
+rm -f /etc/apt/sources.list.d/docker.list
+rm -f /etc/apt/sources.list.d/docker.sources
+rm -f /etc/apt/keyrings/docker.gpg /etc/apt/keyrings/docker.gpg.asc
+echo ""
+
 # Detect architecture
 ARCH=$(uname -m)
 if [ "$ARCH" = "x86_64" ]; then
   BINARY_ARCH="amd64"
+  DOCKER_ARCH="amd64"
 elif [ "$ARCH" = "aarch64" ]; then
   BINARY_ARCH="arm64"
+  DOCKER_ARCH="arm64"
 else
   echo -e "${RED}Error: Unsupported architecture: $ARCH${NC}"
   exit 1
@@ -77,18 +91,66 @@ apt-get install -y -qq \
   wget \
   sqlite3 \
   git \
-  docker.io \
-  docker-compose
+  build-essential
 
 echo -e "${GREEN}✓ Dependencies installed${NC}"
 echo ""
 
-# Create homesight system user and group
-echo -e "${YELLOW}Step 3: Creating System User${NC}"
+# Install Docker using official repository
+echo -e "${YELLOW}Step 3: Installing Docker from Official Repository${NC}"
+echo "Setting up Docker GPG key and repository..."
 
+# Create directory for keyrings
+mkdir -p /etc/apt/keyrings
+
+# Add Docker GPG key (using .asc format - latest approach)
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+chmod a+r /etc/apt/keyrings/docker.asc
+
+# Set up Docker repository (using .asc key)
+echo \
+  "deb [arch=$DOCKER_ARCH signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu \
+  $(lsb_release -cs) stable" | \
+  tee /etc/apt/sources.list.d/docker.list > /dev/null
+
+# Update package index
+apt-get update -qq
+
+# Install Docker
+echo "Installing Docker Engine, CLI, and Compose..."
+apt-get install -y -qq \
+  docker-ce \
+  docker-ce-cli \
+  containerd.io \
+  docker-buildx-plugin \
+  docker-compose-plugin
+
+echo -e "${GREEN}✓ Docker installed from official repository${NC}"
+echo ""
+
+# Start Docker service
+echo -e "${YELLOW}Starting Docker Service${NC}"
+systemctl start docker
+systemctl enable docker
+echo -e "${GREEN}✓ Docker service started and enabled${NC}"
+echo ""
+
+# Create homesight system user and group
+echo -e "${YELLOW}Step 4: Creating System User and Group${NC}"
+
+# Create homesight group if it doesn't exist
+if ! getent group homesight > /dev/null 2>&1; then
+  echo "Creating homesight group..."
+  groupadd --system homesight
+  echo -e "${GREEN}✓ Group created${NC}"
+else
+  echo -e "${GREEN}✓ Group already exists${NC}"
+fi
+
+# Create homesight system user if it doesn't exist
 if ! id -u homesight > /dev/null 2>&1; then
   echo "Creating homesight system user..."
-  useradd --system --home /var/lib/homesight --shell /bin/false --create-home homesight
+  useradd --system --home "$HOMESIGHT_HOME" --shell /bin/false --gid homesight --create-home homesight
   echo -e "${GREEN}✓ System user created${NC}"
 else
   echo -e "${GREEN}✓ System user already exists${NC}"
@@ -103,19 +165,22 @@ fi
 echo ""
 
 # Create installation directories
-echo -e "${YELLOW}Step 4: Creating Installation Directories${NC}"
+echo -e "${YELLOW}Step 5: Creating Installation Directories${NC}"
 
-mkdir -p "$INSTALL_DIR"/{bin,config}
-mkdir -p "$DATA_DIR"/{db,logs,manuals,rag}
+mkdir -p "$INSTALL_DIR"/bin
+mkdir -p "$HOMESIGHT_HOME"/{logs,db,manuals,rag}
 
-chown -R homesight:homesight "$INSTALL_DIR" "$DATA_DIR"
-chmod 750 "$INSTALL_DIR" "$DATA_DIR"
+chown -R homesight:homesight "$INSTALL_DIR" "$HOMESIGHT_HOME"
+chmod 750 "$INSTALL_DIR" "$HOMESIGHT_HOME"
+
+# Make directories group-accessible so homesight group members can access logs/data
+chmod -R g+rx "$INSTALL_DIR" "$HOMESIGHT_HOME"
 
 echo -e "${GREEN}✓ Directories created${NC}"
 echo ""
 
 # Download binary from GitHub releases
-echo -e "${YELLOW}Step 5: Downloading HomeSight Binary${NC}"
+echo -e "${YELLOW}Step 6: Downloading HomeSight Binary${NC}"
 
 if [ "$RELEASE_VERSION" = "latest" ]; then
   DOWNLOAD_URL="https://github.com/$GITHUB_REPO/releases/latest/download/homesightd-linux-$BINARY_ARCH"
@@ -125,14 +190,21 @@ else
   echo "Downloading $RELEASE_VERSION..."
 fi
 
-if ! curl -fsSL "$DOWNLOAD_URL" -o "$INSTALL_DIR/bin/homesightd"; then
-  echo -e "${RED}✗ Failed to download binary from GitHub releases${NC}"
+if curl -fsSL "$DOWNLOAD_URL" -o "$INSTALL_DIR/bin/homesightd"; then
+  echo -e "${GREEN}✓ Binary downloaded from GitHub releases${NC}"
+elif [ -f "./bin/homesightd" ]; then
+  echo -e "${YELLOW}⚠ GitHub release not found, using local binary${NC}"
+  cp ./bin/homesightd "$INSTALL_DIR/bin/homesightd"
+  echo -e "${GREEN}✓ Local binary installed${NC}"
+else
+  echo -e "${RED}✗ Failed to find homesightd binary${NC}"
   echo ""
-  echo "Possible causes:"
-  echo "  • Release doesn't exist yet (CI/CD not completed)"
-  echo "  • Wrong version specified"
+  echo "Possible solutions:"
+  echo "  1. Build the binary from source:"
+  echo "     make build"
+  echo "  2. Or download from GitHub releases:"
+  echo "     https://github.com/$GITHUB_REPO/releases"
   echo ""
-  echo "Available releases: https://github.com/$GITHUB_REPO/releases"
   exit 1
 fi
 
@@ -143,25 +215,28 @@ echo -e "${GREEN}✓ Binary downloaded and installed${NC}"
 echo ""
 
 # Install systemd service files
-echo -e "${YELLOW}Step 6: Installing Systemd Services${NC}"
+echo -e "${YELLOW}Step 7: Installing Systemd Services${NC}"
 
 cat > "$SYSTEMD_DIR/homesight.service" << EOF
 [Unit]
-Description=HomeSight Daemon
+Description=HomeSight Application
 Documentation=https://github.com/$GITHUB_REPO
 After=network-online.target docker.service
 Wants=network-online.target
+PartOf=homesight.target
 
 [Service]
 Type=simple
 User=homesight
 Group=homesight
-WorkingDirectory=$INSTALL_DIR
+WorkingDirectory=$HOMESIGHT_HOME
 
 Environment="PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 EnvironmentFile=-/etc/default/homesight
 
 ExecStart=$INSTALL_DIR/bin/homesightd
+StandardOutput=append:$HOMESIGHT_HOME/logs/daemon.log
+StandardError=append:$HOMESIGHT_HOME/logs/daemon.log
 
 Restart=always
 RestartSec=10s
@@ -173,10 +248,10 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=yes
-ReadWritePaths=$DATA_DIR $INSTALL_DIR
+ReadWritePaths=$INSTALL_DIR $HOMESIGHT_HOME
 
 [Install]
-WantedBy=multi-user.target
+WantedBy=homesight.target
 EOF
 
 cat > "$SYSTEMD_DIR/homesight-docker.service" << EOF
@@ -186,64 +261,136 @@ Documentation=https://github.com/$GITHUB_REPO
 After=network-online.target docker.service
 Wants=network-online.target
 Requires=docker.service
+PartOf=homesight.target
 
 [Service]
 Type=oneshot
 User=homesight
 Group=docker
-WorkingDirectory=$INSTALL_DIR
+WorkingDirectory=$HOMESIGHT_HOME
 
-ExecStart=/usr/bin/docker-compose -f docker-compose.yml up -d
-ExecStop=/usr/bin/docker-compose -f docker-compose.yml down
+ExecStart=/usr/bin/docker compose -f $HOMESIGHT_HOME/docker-compose.yml up -d
+ExecStop=/usr/bin/docker compose -f $HOMESIGHT_HOME/docker-compose.yml down
 RemainAfterExit=yes
 
 Restart=always
 RestartSec=10s
 
 [Install]
-WantedBy=multi-user.target
+WantedBy=homesight.target
 EOF
 
 chmod 644 "$SYSTEMD_DIR/homesight.service"
 chmod 644 "$SYSTEMD_DIR/homesight-docker.service"
 
+# Create homesight.target to group services
+cat > "$SYSTEMD_DIR/homesight.target" << EOF
+[Unit]
+Description=HomeSight Application Target
+Documentation=https://github.com/$GITHUB_REPO
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+chmod 644 "$SYSTEMD_DIR/homesight.target"
+
 systemctl daemon-reload
-systemctl enable homesight homesight-docker
+systemctl enable homesight.target homesight.service homesight-docker.service
 
 echo -e "${GREEN}✓ Systemd services installed and enabled${NC}"
 echo ""
 
 # Create default configuration
-echo -e "${YELLOW}Step 7: Creating Configuration${NC}"
+echo -e "${YELLOW}Step 8: Creating Configuration${NC}"
 
-if [ ! -f "$INSTALL_DIR/config.yaml" ]; then
-  cat > "$INSTALL_DIR/config.yaml" << 'EOF'
+if [ ! -f "$HOMESIGHT_HOME/config.yaml" ]; then
+  cat > "$HOMESIGHT_HOME/config.yaml" << 'EOF'
 # HomeSight Configuration
-api:
-  addr: "0.0.0.0:8080"
 
 database:
-  path: "/var/lib/homesight/db/homesight.db"
+  path: $HOMESIGHT_HOME/db/homesight.db
 
 mqtt:
-  broker_url: ""
+  # Optional: Specify a single broker URL for manual configuration
+  # If empty, HomeSight auto-discovers ALL MQTT brokers on the network via mDNS (_mqtt._tcp)
+  broker_url: ""  # Leave empty for auto-discovery (recommended)
+
+  # Credentials (applied to all discovered brokers)
   username: ""
   password: ""
 
-ai:
-  service_url: "http://localhost:8001"
-
 prometheus:
-  url: "http://localhost:9090"
+  url: http://localhost:9090
+
+rag:
+  batch_size_documents: 3      # For PDF/official documentation ingestion
+  batch_size_community: 2      # For community source (forum/reddit/etc) ingestion
+
+  # Known manufacturer documentation URL patterns
+  manufacturers:
+    Aqara:
+      base_url: "https://cdn.aqara.com/cdn/website/mainland/static/docs"
+      patterns:
+        "SJCGQ11LM": "Water-Leak-Sensor_Manuals_EU.pdf"
+
+queues:
+  discovery:
+    max_concurrent: 2
+    max_queue_depth: 10
+    cpu_threshold: 0.80
+    memory_threshold: 0.85
+
+  ingestion:
+    max_concurrent: 2
+    max_queue_depth: 5
+    cpu_threshold: 0.85
+    memory_threshold: 0.80
+
+  analysis:
+    max_concurrent: 4
+    max_queue_depth: 20
+    cpu_threshold: 0.90
+    memory_threshold: 0.90
+
+ai:
+  openai_api_key: ""  # Set this from environment or .env file
+
+  llm:
+    chat_mode: "cloud"  # "cloud" = OpenAI gpt-4o-mini, "local" = Local Llama 3.2
+
+    local:
+      model_path: "./models/llama-3.2-3b-instruct.gguf"
+      auto_download: true
+      download_source:
+        repo_id: "bartowski/Llama-3.2-3B-Instruct-GGUF"
+        filename: "Llama-3.2-3B-Instruct-Q4_K_M.gguf"
+      n_ctx: 4096
+      n_threads: 8
+      n_gpu_layers: 0
+      temperature: 0.7
+
+    openai:
+      model: "gpt-4o-mini"
+
+    inference:
+      max_concurrent_tasks: 4
+
+api:
+  addr: :8080
+
+backend_url: "http://localhost:8080"
 
 integrations:
+  matter: true
+  zigbee: true
   mqtt: true
-  zigbee: false
-  matter: false
-  lan: false
+  lan: true
 EOF
-  chown homesight:homesight "$INSTALL_DIR/config.yaml"
-  chmod 640 "$INSTALL_DIR/config.yaml"
+  chown homesight:homesight "$HOMESIGHT_HOME/config.yaml"
+  chmod 640 "$HOMESIGHT_HOME/config.yaml"
   echo -e "${GREEN}✓ Configuration created${NC}"
 else
   echo -e "${GREEN}✓ Configuration already exists${NC}"
@@ -252,20 +399,21 @@ fi
 # Create environment file for systemd
 cat > /etc/default/homesight << EOF
 # HomeSight Environment Variables
-HOMESIGHT_CONFIG=$INSTALL_DIR/config.yaml
+HOMESIGHT_CONFIG=$HOMESIGHT_HOME/config.yaml
+HOMESIGHT_LOGS=$HOMESIGHT_HOME/logs
 EOF
 
 chmod 644 /etc/default/homesight
 
 # Download docker-compose if needed
-if [ ! -f "$INSTALL_DIR/docker-compose.yml" ]; then
+if [ ! -f "$HOMESIGHT_HOME/docker-compose.yml" ]; then
   echo -e "${YELLOW}Downloading docker-compose configuration...${NC}"
 
-  if ! curl -fsSL "https://raw.githubusercontent.com/$GITHUB_REPO/main/docker-compose.yml" -o "$INSTALL_DIR/docker-compose.yml"; then
+  if ! curl -fsSL "https://raw.githubusercontent.com/$GITHUB_REPO/main/docker-compose.yml" -o "$HOMESIGHT_HOME/docker-compose.yml"; then
     echo -e "${YELLOW}⚠ Could not download docker-compose.yml from repo${NC}"
-    echo "You may need to manually copy docker-compose.yml to $INSTALL_DIR/"
+    echo "You may need to manually copy docker-compose.yml to $HOMESIGHT_HOME/"
   else
-    chown homesight:homesight "$INSTALL_DIR/docker-compose.yml"
+    chown homesight:homesight "$HOMESIGHT_HOME/docker-compose.yml"
     echo -e "${GREEN}✓ docker-compose.yml downloaded${NC}"
   fi
 fi
@@ -279,34 +427,37 @@ echo -e "${GREEN}✓ HomeSight Installation Complete!${NC}"
 echo -e "${GREEN}========================================${NC}"
 echo ""
 
-echo -e "${YELLOW}Configuration:${NC}"
-echo "  Location: $INSTALL_DIR/config.yaml"
-echo "  Data dir: $DATA_DIR"
+echo -e "${YELLOW}Installation:${NC}"
+echo "  Application:  $HOMESIGHT_HOME"
+echo "  Binary:       $INSTALL_DIR/bin/homesightd"
 echo ""
 
 echo -e "${YELLOW}Next Steps:${NC}"
 echo ""
 echo "1. (Optional) Review and edit configuration:"
-echo "   sudo nano $INSTALL_DIR/config.yaml"
+echo "   nano $HOMESIGHT_HOME/config.yaml"
 echo ""
-echo "2. Start services now:"
-echo "   sudo systemctl start homesight-docker"
-echo "   sudo systemctl start homesight"
+echo "2. Start HomeSight:"
+echo "   systemctl start homesight"
 echo ""
 echo "3. Check status:"
-echo "   sudo systemctl status homesight"
-echo "   sudo systemctl status homesight-docker"
+echo "   systemctl status homesight"
 echo ""
-echo "4. View logs:"
-echo "   sudo journalctl -u homesight -f"
+echo "4. View logs (all consolidated in one directory):"
+echo "   Daemon logs:   tail -f $HOMESIGHT_HOME/logs/daemon.log"
+echo "   Docker logs:   docker compose -f $HOMESIGHT_HOME/docker-compose.yml logs -f"
+echo "   Journalctl:    journalctl -u homesight -f"
 echo ""
 echo "5. Access web UI:"
 echo "   http://localhost:8080"
 echo ""
 echo -e "${YELLOW}Service Management:${NC}"
-echo "  sudo systemctl {start|stop|restart|status} homesight"
-echo "  sudo systemctl {start|stop|restart|status} homesight-docker"
+echo "  systemctl {start|stop|restart|status} homesight"
 echo ""
 echo "  Services are configured to auto-start on system reboot."
+echo ""
+echo "To manage HomeSight without sudo, add your user to the homesight group:"
+echo "  sudo usermod -aG homesight \$USER"
+echo "  (then log out and back in)"
 echo ""
 echo "Happy hacking! 🎉"

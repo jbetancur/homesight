@@ -4,7 +4,7 @@
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 PID_DIR="$PROJECT_DIR/.pids"
-LOG_DIR="$PROJECT_DIR/.logs"
+LOG_DIR="$PROJECT_DIR/logs"
 
 # Colors
 GREEN='\033[0;32m'

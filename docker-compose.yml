@@ -28,13 +28,13 @@ services:
       - BACKEND_URL=http://host.docker.internal:8080
     volumes:
       - ./config.yaml:/app/config.yaml:ro
-      - ~/.homesight/manuals:/root/.homesight/manuals:rw
+      - /var/lib/homesight/manuals:/root/.homesight/manuals:rw
       # Persist RAG database and downloaded models on the host so data
       # survives container recreation and large files need not be baked into
       # the image.
-      - ~/.homesight/rag:/var/lib/homesight/rag:rw
+      - /var/lib/homesight/rag:/var/lib/homesight/rag:rw
       - /etc/localtime:/etc/localtime:ro
-      - ./.logs:/app/log:rw
+      - /home/homesight/logs:/app/log:rw
     logging:
       driver: "json-file"
       options:

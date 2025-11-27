@@ -15,6 +15,6 @@ ai-sidecar/venv
 .idea
 .vscode
 .pids
-.logs
+logs
 bin
 docker/ai-sidecar/.local-chromium

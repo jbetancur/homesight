@@ -53,7 +53,16 @@ class IngestionTracker:
     """Track ingestion operations and maintain statistics"""
 
     def __init__(self, log_file: Optional[Path] = None):
-        self.log_file = log_file or Path(".logs/ingestion.jsonl")
+        if log_file:
+            self.log_file = log_file
+        else:
+            # Use centralized log directory
+            import os
+            if os.path.exists('/.dockerenv'):
+                log_dir = Path('/app/log')
+            else:
+                log_dir = Path('logs')
+            self.log_file = log_dir / 'ingestion.jsonl'
         self.log_file.parent.mkdir(parents=True, exist_ok=True)
         self.records: Dict[str, IngestionRecord] = {}
 
