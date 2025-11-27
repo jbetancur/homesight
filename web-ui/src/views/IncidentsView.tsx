@@ -35,7 +35,7 @@ import remarkGfm from 'remark-gfm';
 import rehypeSanitize from 'rehype-sanitize';
 
 const API_BASE = 'http://localhost:8080/api';
-// AI routes are now proxied through Go API at /api/ai/*
+// All AI routes are proxied through Go API at /api/ai/*
 
 function getSeverityColor(severity?: string) {
   if (!severity || typeof severity !== 'string') return 'gray';
@@ -118,26 +118,17 @@ export function IncidentsView() {
   const fetchAIRecommendation = async (incident: any) => {
     const incidentId = incident.id;
 
-    // Cancel previous analysis if any
-    if (analysisAbortControllerRef.current) {
-      analysisAbortControllerRef.current.abort();
-    }
-
-    // Create new abort controller for this analysis
-    const controller = new AbortController();
-    analysisAbortControllerRef.current = controller;
-
     // Mark as loading
     setRecommendations(prev => ({
       ...prev,
-      [incidentId]: { analysis: '', insights: [], loading: true }
+      [incidentId]: { analysis: '', insights: ['Analysis in progress...'], loading: true }
     }));
 
     try {
+      // Trigger re-analysis by calling analyze endpoint directly
       const response = await fetch(`${API_BASE}/ai/analyze`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        signal: controller.signal,
         body: JSON.stringify({
           type: 'incident',
           data: {
@@ -164,12 +155,6 @@ export function IncidentsView() {
         throw new Error('AI service returned error');
       }
     } catch (error: any) {
-      // Don't show error if request was aborted (user expanded different incident or component unmounted)
-      if (error.name === 'AbortError') {
-        console.log('AI recommendation request cancelled');
-        return;
-      }
-
       console.error('Failed to fetch AI recommendation:', error);
       setRecommendations(prev => ({
         ...prev,
@@ -193,7 +178,6 @@ export function IncidentsView() {
         updated = [...updated, event.data];
         incidentsRef.current = updated;
         setIncidents(updated);
-        // Don't auto-fetch AI - wait for user to expand
       }
     } else if (event.type === "incident_updated") {
       updated = updated.map(i => i.id === event.data.id ? event.data : i);
@@ -203,12 +187,55 @@ export function IncidentsView() {
       updated = updated.filter(i => i.id !== event.data.id);
       incidentsRef.current = updated;
       setIncidents(updated);
-      // Cancel analysis if removed incident was being analyzed
-      if (analysisAbortControllerRef.current && expandedId === event.data.id) {
-        analysisAbortControllerRef.current.abort();
-      }
+      // Remove from recommendations cache
+      setRecommendations(prev => {
+        const newRecs = { ...prev };
+        delete newRecs[event.data.id];
+        return newRecs;
+      });
+    } else if (event.type === "incident_analysis_completed") {
+      // Update recommendations cache with completed analysis
+      const incidentId = event.data.incident_id;
+      setRecommendations(prev => ({
+        ...prev,
+        [incidentId]: {
+          analysis: event.data.analysis || '',
+          insights: event.data.insights || [],
+          actions: event.data.actions || [],
+          metadata: event.data.metadata || {},
+          loading: false
+        }
+      }));
+      // Refresh incident in list to update analysis_status
+      fetch(`${API_BASE}/incidents/${incidentId}`)
+        .then(res => res.json())
+        .then(incident => {
+          updated = updated.map(i => i.id === incidentId ? incident : i);
+          incidentsRef.current = updated;
+          setIncidents(updated);
+        });
+    } else if (event.type === "incident_analysis_failed") {
+      // Handle analysis failure
+      const incidentId = event.data.incident_id;
+      setRecommendations(prev => ({
+        ...prev,
+        [incidentId]: {
+          analysis: 'Analysis failed',
+          insights: [event.data.error || 'Unknown error during analysis'],
+          loading: false,
+          error: event.data.error || 'Analysis error'
+        }
+      }));
+      // Refresh incident in list
+      fetch(`${API_BASE}/incidents/${incidentId}`)
+        .then(res => res.json())
+        .then(incident => {
+          updated = updated.map(i => i.id === incidentId ? incident : i);
+          incidentsRef.current = updated;
+          setIncidents(updated);
+        });
     }
-  }, [expandedId]);
+  }, []);
   useEventSubscription(handleEvent);
 
   const handleChatSubmit = async () => {
@@ -331,16 +358,42 @@ export function IncidentsView() {
                       variant="subtle"
                       onClick={() => {
                         if (isExpanded) {
-                          // Closing - cancel analysis
+                          // Closing
                           setExpandedId(null);
-                          if (analysisAbortControllerRef.current) {
-                            analysisAbortControllerRef.current.abort();
-                          }
                         } else {
-                          // Opening - only fetch analysis if not already cached
+                          // Opening - fetch analysis data from incident
                           setExpandedId(incident.id);
-                          if (!recommendations[incident.id]) {
-                            fetchAIRecommendation(incident);
+                          // Update recommendations from incident data
+                          if (incident.analysis_status === 'completed') {
+                            setRecommendations(prev => ({
+                              ...prev,
+                              [incident.id]: {
+                                analysis: incident.analysis || '',
+                                insights: incident.insights || [],
+                                actions: incident.actions || [],
+                                metadata: incident.analysis_data || {},
+                                loading: false
+                              }
+                            }));
+                          } else if (incident.analysis_status === 'pending') {
+                            setRecommendations(prev => ({
+                              ...prev,
+                              [incident.id]: {
+                                analysis: '',
+                                insights: ['Analysis in progress...'],
+                                loading: true
+                              }
+                            }));
+                          } else if (incident.analysis_status === 'failed') {
+                            setRecommendations(prev => ({
+                              ...prev,
+                              [incident.id]: {
+                                analysis: 'Analysis failed',
+                                insights: ['AI service encountered an error'],
+                                loading: false,
+                                error: 'Analysis error'
+                              }
+                            }));
                           }
                         }
                       }}
@@ -374,9 +427,20 @@ export function IncidentsView() {
 
                     {/* AI Recommendations Section */}
                     <Paper p="md" withBorder style={{ backgroundColor: 'var(--mantine-color-blue-0)' }}>
-                      <Group gap="xs" mb="sm">
-                        <Brain size={20} color="#228be6" />
-                        <Text fw={600} size="sm">AI Analysis & Recommendations</Text>
+                      <Group gap="xs" mb="sm" justify="space-between">
+                        <Group gap="xs">
+                          <Brain size={20} color="#228be6" />
+                          <Text fw={600} size="sm">AI Analysis & Recommendations</Text>
+                        </Group>
+                        {recommendation && !recommendation.loading && (
+                          <Button
+                            size="xs"
+                            variant="subtle"
+                            onClick={() => fetchAIRecommendation(incident)}
+                          >
+                            Re-analyze
+                          </Button>
+                        )}
                       </Group>
 
                       {recommendation?.loading ? (

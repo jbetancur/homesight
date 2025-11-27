@@ -108,35 +108,26 @@ Respond in JSON format:
             analysis_time.observe(duration)
             raise
 
-        # Parse JSON response
-        try:
-            import json
-            # Extract JSON from response
-            json_start = response.find("{")
-            json_end = response.rfind("}") + 1
-            if json_start != -1 and json_end > json_start:
-                result = json.loads(response[json_start:json_end])
-                status = "success"
-                analysis_requests.labels(status=status).inc()
-                duration = time.time() - start_time
-                analysis_time.observe(duration)
-                return AnalyzeResponse(
-                    analysis=result.get("analysis", "Analysis completed"),
-                    insights=result.get("insights", []),
-                    actions=result.get("actions"),
-                    metadata={"sensor_id": sensor_id, "stats": stats}
-                )
-        except Exception as e:
-            logger.warning(f"Failed to parse JSON from LLM: {e}")
+        # Parse JSON response using utility
+        from utils import extract_json_from_llm_response
 
-        # Fallback to simple response
+        result = extract_json_from_llm_response(
+            response,
+            fallback={
+                "analysis": response[:200],
+                "insights": ["Metrics analyzed"]
+            }
+        )
+
         status = "success"
         analysis_requests.labels(status=status).inc()
         duration = time.time() - start_time
         analysis_time.observe(duration)
+
         return AnalyzeResponse(
-            analysis=response[:200],
-            insights=["Metrics analyzed"],
+            analysis=result.get("analysis", "Analysis completed"),
+            insights=result.get("insights", []),
+            actions=result.get("actions"),
             metadata={"sensor_id": sensor_id, "stats": stats}
         )
 
@@ -282,62 +273,41 @@ If NO documentation available, acknowledge this limitation and recommend specifi
             analysis_time.observe(duration)
             raise
 
-        # Parse JSON response
-        try:
-            import json
-            json_start = response.find("{")
-            json_end = response.rfind("}") + 1
+        # Parse JSON response using utility
+        from utils import extract_json_from_llm_response
 
-            if json_start != -1 and json_end > json_start:
-                result = json.loads(response[json_start:json_end])
+        result = extract_json_from_llm_response(
+            response,
+            fallback={
+                "analysis": f"Incident Analysis: {incident_type} (Severity: {severity})",
+                "insights": [response[:300]],
+                "actions": ["Review incident details and take appropriate action"]
+            }
+        )
 
-                metadata = {
-                    "type": incident_type,
-                    "severity": severity,
-                    "incident_id": incident_id,
-                    "priority": result.get("priority", "medium"),
-                    "documentation_available": has_docs,
-                    "kb_sources_found": kb_found,
-                    "sources_cited": result.get("sources_cited", [])
-                }
+        metadata = {
+            "type": incident_type,
+            "severity": severity,
+            "incident_id": incident_id,
+            "priority": result.get("priority", "medium"),
+            "documentation_available": has_docs,
+            "kb_sources_found": kb_found,
+            "sources_cited": result.get("sources_cited", [])
+        }
 
-                if rag_sources:
-                    metadata["rag_sources"] = rag_sources
-                    # Add note if no docs were available
-                    if not has_docs:
-                        metadata["warning"] = "No device-specific documentation in knowledge base"
+        if rag_sources:
+            metadata["rag_sources"] = rag_sources
+            if not has_docs:
+                metadata["warning"] = "No device-specific documentation in knowledge base"
 
-                status = "success"
-                analysis_requests.labels(status=status).inc()
-                duration = time.time() - start_time
-                analysis_time.observe(duration)
-
-                return AnalyzeResponse(
-                    analysis=result.get("analysis", f"Incident: {incident_type}"),
-                    insights=result.get("insights", []),
-                    actions=result.get("actions"),
-                    metadata=metadata
-                )
-
-        except Exception as e:
-            logger.warning(f"Failed to parse incident analysis JSON: {e}")
-
-        # Fallback: return raw response
         status = "success"
         analysis_requests.labels(status=status).inc()
         duration = time.time() - start_time
         analysis_time.observe(duration)
 
         return AnalyzeResponse(
-            analysis=f"Incident Analysis: {incident_type} (Severity: {severity})",
-            insights=[response[:300]],
-            actions=["Review incident details and take appropriate action"],
-            metadata={
-                "type": incident_type,
-                "severity": severity,
-                "incident_id": incident_id,
-                "documentation_available": has_docs,
-                "kb_sources_found": kb_found,
-                "parse_error": str(e) if 'e' in locals() else None
-            }
+            analysis=result.get("analysis", f"Incident: {incident_type}"),
+            insights=result.get("insights", []),
+            actions=result.get("actions"),
+            metadata=metadata
         )

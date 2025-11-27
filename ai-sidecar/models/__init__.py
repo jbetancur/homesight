@@ -2,7 +2,16 @@
 
 from .chat import ChatRequest, ChatResponse, ChatSession
 from .analyze import AnalyzeRequest, AnalyzeResponse
-from .device import DeviceEvent, DeviceInfo
+from .device import DeviceEvent, DeviceInfo  # Legacy - deprecated
+from .device_profile import (
+    DeviceProfile,
+    DeviceType,
+    PowerSource,
+    Protocol,
+    BatteryType,
+    DeviceCapability,
+    DocumentStatus
+)
 
 __all__ = [
     "ChatRequest",
@@ -11,5 +20,13 @@ __all__ = [
     "AnalyzeRequest",
     "AnalyzeResponse",
     "DeviceEvent",
-    "DeviceInfo",
+    "DeviceInfo",  # Deprecated
+    # New device ontology
+    "DeviceProfile",
+    "DeviceType",
+    "PowerSource",
+    "Protocol",
+    "BatteryType",
+    "DeviceCapability",
+    "DocumentStatus",
 ]

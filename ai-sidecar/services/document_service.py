@@ -63,7 +63,7 @@ class DocumentService:
             rag_config=config.rag
         )
 
-    async def discover_and_ingest_device_docs(self, device: Dict[str, Any], force: bool = False) -> Dict[str, Any]:
+    async def discover_and_ingest_device_docs(self, device, force: bool = False) -> Dict[str, Any]:
         """
         Smart document discovery and ingestion for a device
 
@@ -79,20 +79,25 @@ class DocumentService:
         - Produces high-quality knowledge base entries
 
         Args:
-            device: Dict with manufacturer, model, type
+            device: DeviceProfile or Dict[str, Any] (backward compatible)
             force: If True, clear all caches and re-ingest everything fresh
 
         Returns:
             Summary of discovered and ingested documents
         """
-        manufacturer = device.get("manufacturer", "")
-        model = device.get("model", "")
-        device_type = device.get("type", "")
-        device_id = device.get("id")
+        from models import DeviceProfile
 
-        if not manufacturer or not model:
-            logger.warning(f"Device missing manufacturer or model: {device}")
-            return {"status": "error", "message": "Missing device info"}
+        # Handle both DeviceProfile and legacy Dict
+        if isinstance(device, dict):
+            device = DeviceProfile.from_dict(device)
+        elif not isinstance(device, DeviceProfile):
+            logger.error(f"Invalid device type: {type(device)}")
+            return {"status": "error", "message": "Invalid device type"}
+
+        manufacturer = device.manufacturer
+        model = device.model
+        device_type = device.device_type if isinstance(device.device_type, str) else device.device_type.value
+        device_id = device.id
 
         start_time = time.time()
         tracker = get_ingestion_tracker()
@@ -231,9 +236,9 @@ class DocumentService:
             from openai import AsyncOpenAI
             client = AsyncOpenAI(api_key=self.openai_api_key)
 
-            manufacturer = device.get("manufacturer", "")
-            model = device.get("model", "")
-            device_type = device.get("type", "")
+            manufacturer = device.manufacturer
+            model = device.model
+            device_type = device.device_type if isinstance(device.device_type, str) else device.device_type.value
 
             # Attach documentation text if available; truncate to reasonable size for prompts
             doc_text_snippet = None
@@ -246,16 +251,18 @@ class DocumentService:
 ⚠️ STRICT RULES (NEVER BREAK THESE):
 - NEVER invent or guess specifications, dimensions, button sequences, pairing steps, or any technical detail.
 - If data is not explicitly known or publicly documented, write:
-  "Information not publicly documented by manufacturer."
+  "Specification not available from manufacturer documentation."
 - DO NOT infer facts from similar models.
 - DO NOT hallucinate part numbers, frequencies, or metrics.
 - ONLY use information that is explicitly in the provided documentation or widely confirmed by the manufacturer.
+- NEVER use first-person phrases like "I couldn't find", "I was unable to", or "I don't have access to"
+- Output must be written in third-person, factual documentation style
 
 You may only use:
 ✔ The manufacturer-provided document
 ✔ The device name/model
 ✔ Widely confirmed public information
-✔ Industry-standard general behaviors (ONLY if noted as “typical, but not confirmed”)
+✔ Industry-standard general behaviors (ONLY if noted as "typical, but not confirmed")
 
 ---
 
@@ -281,7 +288,7 @@ Generate a Markdown document with the following sections.
 - Wireless range
 
 For any unavailable spec, write:
-"Manufacturer specification not publicly available."
+"Specification not available from manufacturer documentation."
 
 ---
 
@@ -292,7 +299,7 @@ For any unavailable spec, write:
 - Troubleshooting for failed pairing
 
 If missing, write:
-"Exact procedure not provided by manufacturer."
+"Procedure not available from manufacturer documentation."
 
 ---
 
@@ -313,7 +320,7 @@ Do NOT fabricate issues or fixes.
 - Long-term reliability notes
 
 If not documented, note:
-"Information not publicly documented by manufacturer."
+"Information not available from manufacturer documentation."
 
 ---
 
@@ -344,27 +351,40 @@ STYLE REQUIREMENTS
             messages = [
                 {
                     "role": "system",
-                    "content": """
-            You are an expert technical writer generating device documentation.
-            Follow these rules STRICTLY:
+                    "content": """You are an expert technical writer generating device documentation.
+Follow these rules STRICTLY:
 
-            1. USE ONLY information explicitly provided in the user prompt or the provided documentation text.
-            2. NEVER guess, infer, or create any technical details. If a detail is not present in the documentation text, state: "Manufacturer specification not publicly available."
-            3. NEVER invent or hallucinate part numbers, pairing steps, reset sequences, LED patterns, or exact measurements.
-            4. If documentation text is not provided, return a short 'unverified' summary and explicitly label it as unverified.
-            5. Output must be structured Markdown suitable for ingestion.
-            6. Accuracy is more important than completeness.
-            """
+1. USE ONLY information explicitly provided in the user prompt or the provided documentation text.
+2. NEVER guess, infer, or create any technical details. If a detail is not present, state: "Specification not available from manufacturer documentation."
+3. NEVER invent part numbers, pairing steps, reset sequences, LED patterns, or measurements.
+4. NEVER use first-person phrases. Do NOT write: "I couldn't find", "I was unable to", "I don't have access to"
+5. ALWAYS write in third-person factual style: "Specification not available", "Documentation not provided", etc.
+6. If no documentation is provided, generate a minimal template with all sections marked as unavailable.
+7. Output must be structured Markdown suitable for knowledge base ingestion.
+8. Accuracy is more important than completeness.
+
+UNACCEPTABLE OUTPUT EXAMPLES (NEVER USE):
+❌ "I couldn't find specific information about..."
+❌ "I was unable to locate documentation for..."
+❌ "I don't have access to the official manual..."
+
+ACCEPTABLE OUTPUT EXAMPLES:
+✅ "Specification not available from manufacturer documentation."
+✅ "Procedure not documented by manufacturer."
+✅ "Official documentation not provided."
+"""
                 }
             ]
 
             user_payload = f"Manufacturer: {manufacturer}\nModel: {model}\nType: {device_type}\n\n"
             if doc_text_snippet:
                 user_payload += f"Source Documentation:\n\n{doc_text_snippet}\n\n"
+                user_payload += "Please generate the structured knowledge base entry as described, using ONLY information from the documentation above."
             else:
-                user_payload += "Source Documentation: (none provided)\n\n"
-
-            user_payload += "Please generate the structured knowledge base entry as described. If no documentation is provided, produce a short UNVERIFIED summary and clearly label it."
+                user_payload += "Source Documentation: NOT PROVIDED\n\n"
+                user_payload += """Since no official documentation was provided, generate a minimal knowledge base template with the required sections.
+For each section, state: "Specification not available from manufacturer documentation."
+Do NOT attempt to fill in details from general knowledge. Keep entries factual and minimal."""
 
             messages.append({"role": "user", "content": user_payload})
 

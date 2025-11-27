@@ -118,20 +118,27 @@ const (
 
 // Incident represents a detected issue or alert
 type Incident struct {
-	ID          string           `json:"id"`
-	Title       string           `json:"title"`
-	Description string           `json:"description"`
-	Severity    IncidentSeverity `json:"severity"`
-	Status      IncidentStatus   `json:"status"`
-	DeviceID    string           `json:"device_id"`
-	SensorID    string           `json:"sensor_id"`
-	ZoneID      string           `json:"zone_id"`
-	AssetID     string           `json:"asset_id"`
-	RuleName    string           `json:"rule_name"`
-	Data        map[string]any   `json:"data"`
-	CreatedAt   time.Time        `json:"created_at"`
-	UpdatedAt   time.Time        `json:"updated_at"`
-	ResolvedAt  *time.Time       `json:"resolved_at"`
+	ID             string           `json:"id"`
+	Title          string           `json:"title"`
+	Description    string           `json:"description"`
+	Severity       IncidentSeverity `json:"severity"`
+	Status         IncidentStatus   `json:"status"`
+	DeviceID       string           `json:"device_id"`
+	SensorID       string           `json:"sensor_id"`
+	ZoneID         string           `json:"zone_id"`
+	AssetID        string           `json:"asset_id"`
+	RuleName       string           `json:"rule_name"`
+	Data           map[string]any   `json:"data"`
+	CreatedAt      time.Time        `json:"created_at"`
+	UpdatedAt      time.Time        `json:"updated_at"`
+	ResolvedAt     *time.Time       `json:"resolved_at"`
+	// AI Analysis fields
+	AnalysisStatus string           `json:"analysis_status"` // "pending", "completed", "failed"
+	Analysis       string           `json:"analysis"`
+	Insights       []string         `json:"insights"`
+	Actions        []string         `json:"actions"`
+	AnalysisData   map[string]any   `json:"analysis_data"`   // metadata, sources, etc.
+	AnalyzedAt     *time.Time       `json:"analyzed_at"`
 }
 
 // Task represents a maintenance or action item

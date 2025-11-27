@@ -8,8 +8,9 @@ troubleshooting guides, and home maintenance documentation.
 import hashlib
 import chromadb
 from chromadb.config import Settings
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 from pathlib import Path
+from functools import lru_cache
 import logging
 import asyncio
 import time
@@ -34,6 +35,14 @@ class RAGEngine:
         """
         self.persist_directory = Path(persist_directory)
         self.persist_directory.mkdir(parents=True, exist_ok=True)
+
+        # Query result cache (LRU cache for repeated queries)
+        # Cache key: (query_text, n_results, where_clause_hash)
+        # Improves performance for repeated queries (common in chat sessions)
+        self._query_cache: Dict[Tuple[str, int, str], Tuple[List[Dict], float]] = {}
+        self._query_cache_lock = threading.Lock()
+        self._query_cache_max_size = 100  # Max cached queries
+        self._query_cache_ttl = 300  # 5 minutes TTL
 
         # Initialize ChromaDB client
         self.client = chromadb.PersistentClient(
@@ -87,13 +96,20 @@ class RAGEngine:
         )
 
         # Async processing support
-        # Use 4 workers to handle concurrent embedding operations without blocking API
-        self._executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="rag-worker")
+        # Increased thread pool from 4 to 8 workers for better concurrency
+        # ThreadPool is appropriate here because:
+        # 1. FastEmbed releases GIL during embedding computation
+        # 2. ChromaDB is thread-safe
+        # 3. ProcessPool would require pickling complex objects (ChromaDB client)
+        # 4. 8 threads can handle ~16-24 concurrent device ingestions
+        import os
+        max_workers = int(os.environ.get('RAG_MAX_WORKERS', '8'))
+        self._executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="rag-worker")
         self._ingestion_lock = threading.Lock()
         self._ingestion_queue: asyncio.Queue = None
         self._ingestion_worker_task = None
 
-        logger.info("RAG engine initialized with local embeddings (offline mode)")
+        logger.info(f"RAG engine initialized with local embeddings (offline mode, {max_workers} workers)")
     
     def add_document(
         self,
@@ -201,16 +217,41 @@ class RAGEngine:
         where: Optional[Dict[str, Any]] = None
     ) -> List[Dict[str, Any]]:
         """
-        Query for relevant documents
+        Query for relevant documents with caching
 
         Returns documents with relevance scores (1 - distance).
         Higher relevance scores are better (closer to 1 = more relevant).
+
+        Caching Strategy:
+        - Cache key: (query_text, n_results, where_clause_hash)
+        - TTL: 5 minutes
+        - Max size: 100 queries
+        - Thread-safe
         """
         start_time = time.time()
         status = "error"
 
+        # Generate cache key
+        where_hash = hashlib.md5(str(where).encode()).hexdigest() if where else "none"
+        cache_key = (query_text, n_results, where_hash)
+
+        # Check cache
+        with self._query_cache_lock:
+            if cache_key in self._query_cache:
+                cached_results, cached_time = self._query_cache[cache_key]
+                age = time.time() - cached_time
+
+                if age < self._query_cache_ttl:
+                    # Cache hit!
+                    logger.debug(f"Query cache hit (age: {age:.1f}s)")
+                    rag_retrievals.labels(status="cache_hit").inc()
+                    return cached_results
+                else:
+                    # Expired - remove it
+                    del self._query_cache[cache_key]
+
         try:
-            # Query collection (ChromaDB handles query embedding automatically)
+            # Cache miss - query collection (ChromaDB handles query embedding automatically)
             results = self.collection.query(
                 query_texts=[query_text],
                 n_results=n_results,
@@ -239,6 +280,15 @@ class RAGEngine:
                 status = "empty"
             else:
                 status = "success"
+
+            # Cache the results
+            with self._query_cache_lock:
+                # Evict oldest if cache full (simple FIFO)
+                if len(self._query_cache) >= self._query_cache_max_size:
+                    oldest_key = next(iter(self._query_cache))
+                    del self._query_cache[oldest_key]
+
+                self._query_cache[cache_key] = (formatted_results, time.time())
 
             return formatted_results
 

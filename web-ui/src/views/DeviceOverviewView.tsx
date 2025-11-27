@@ -1,8 +1,9 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useCallback, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { Stack, Title, Text, Card, Group, Badge, Loader, Button, Table, Paper, Tabs, Container } from '@mantine/core';
 import { ArrowLeft, FileText, Activity, Droplets, Thermometer } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
+import { useEventSubscription } from '../useEventSubscription';
 
 const API_BASE = 'http://localhost:8080/api';
 
@@ -64,6 +65,7 @@ export function DeviceOverviewView() {
   const [knowledgeBase, setKnowledgeBase] = useState<KnowledgeBase | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const deviceRef = useRef<Device | null>(null);
 
   useEffect(() => {
     async function fetchData() {
@@ -79,7 +81,9 @@ export function DeviceOverviewView() {
         // Fetch device
         const deviceRes = await fetch(`${API_BASE}/devices/${deviceId}`);
         if (!deviceRes.ok) throw new Error('Failed to fetch device');
-        setDevice(await deviceRes.json());
+        const deviceData = await deviceRes.json();
+        setDevice(deviceData);
+        deviceRef.current = deviceData;
 
         // Fetch knowledge base
         try {
@@ -113,6 +117,35 @@ export function DeviceOverviewView() {
 
     fetchData();
   }, [deviceId]);
+
+  // SSE event handling for real-time device updates
+  const handleEvent = useCallback((event: any) => {
+    console.log('DeviceOverviewView received event:', event);
+    if (event.type === "device_updated") {
+      // Only update if it's the device we're currently viewing
+      if (event.data.id === deviceId) {
+        console.log('Updating device from SSE event:', event.data);
+
+        // Check if docs_status changed before updating
+        const docsStatusChanged = deviceRef.current && event.data.docs_status !== deviceRef.current.docs_status;
+
+        setDevice(event.data);
+        deviceRef.current = event.data;
+
+        // If docs_status changed, refresh knowledge base
+        if (docsStatusChanged) {
+          console.log('Docs status changed, refreshing knowledge base');
+          fetch(`${API_BASE}/devices/${deviceId}/knowledge-base`)
+            .then(res => res.ok ? res.json() : null)
+            .then(kb => {
+              if (kb) setKnowledgeBase(kb);
+            })
+            .catch(err => console.error('Failed to refresh knowledge base:', err));
+        }
+      }
+    }
+  }, [deviceId]);
+  useEventSubscription(handleEvent);
 
   function createMockSensors(devId: string): Sensor[] {
     const mockSensors: Record<string, Sensor[]> = {

@@ -15,6 +15,13 @@ import time
 from typing import Optional, List, Dict, Any, Tuple
 from pathlib import Path
 import json
+from tenacity import (
+    retry,
+    stop_after_attempt,
+    wait_exponential,
+    retry_if_exception_type,
+    before_sleep_log
+)
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +31,57 @@ from metrics import (
     llm_input_tokens,
     llm_output_tokens
 )
+
+
+class CircuitBreaker:
+    """
+    Simple circuit breaker to prevent cascading failures.
+
+    States:
+    - CLOSED: Normal operation, requests pass through
+    - OPEN: Too many failures, reject requests immediately
+    - HALF_OPEN: Testing if service recovered
+    """
+
+    def __init__(self, failure_threshold: int = 5, recovery_timeout: int = 60):
+        """
+        Args:
+            failure_threshold: Number of failures before opening circuit
+            recovery_timeout: Seconds to wait before trying again
+        """
+        self.failure_threshold = failure_threshold
+        self.recovery_timeout = recovery_timeout
+        self.failure_count = 0
+        self.last_failure_time = None
+        self.state = "CLOSED"  # CLOSED, OPEN, HALF_OPEN
+
+    def call(self, func, *args, **kwargs):
+        """Execute function with circuit breaker protection"""
+        if self.state == "OPEN":
+            # Check if recovery timeout has elapsed
+            if time.time() - self.last_failure_time >= self.recovery_timeout:
+                logger.info("Circuit breaker entering HALF_OPEN state (testing recovery)")
+                self.state = "HALF_OPEN"
+            else:
+                raise Exception(f"Circuit breaker OPEN - OpenAI API unavailable (tried {self.failure_count} times)")
+
+        try:
+            result = func(*args, **kwargs)
+            # Success - reset circuit breaker
+            if self.state == "HALF_OPEN":
+                logger.info("Circuit breaker closing (service recovered)")
+            self.failure_count = 0
+            self.state = "CLOSED"
+            return result
+        except Exception as e:
+            self.failure_count += 1
+            self.last_failure_time = time.time()
+
+            if self.failure_count >= self.failure_threshold:
+                logger.error(f"Circuit breaker OPEN after {self.failure_count} failures")
+                self.state = "OPEN"
+
+            raise
 
 
 class LLMProvider:
@@ -45,6 +103,12 @@ class LLMProvider:
         self.openai_client = None
         self.local_llm = None
         self.chat_mode = getattr(config, 'chat_mode', 'cloud')  # Config-driven
+
+        # Initialize circuit breaker for OpenAI API
+        self.circuit_breaker = CircuitBreaker(
+            failure_threshold=int(os.environ.get('OPENAI_CIRCUIT_BREAKER_THRESHOLD', '5')),
+            recovery_timeout=int(os.environ.get('OPENAI_CIRCUIT_BREAKER_TIMEOUT', '60'))
+        )
 
         if self.chat_mode not in ('cloud', 'local'):
             raise ValueError(f"Invalid chat_mode: {self.chat_mode}. Must be 'cloud' or 'local'")
@@ -140,12 +204,51 @@ class LLMProvider:
             logger.error(f"Model download failed: {e}")
             return False
 
+    def _prepare_openai_kwargs(
+        self,
+        messages: List[Dict[str, str]],
+        temperature: float,
+        max_tokens: int,
+        tools: Optional[List[Dict[str, Any]]] = None
+    ) -> Dict[str, Any]:
+        """
+        Prepare OpenAI API kwargs with model-specific parameter handling.
+
+        Consolidates GPT-5 special cases in one place.
+
+        GPT-5 Differences:
+        - Doesn't support temperature parameter (always uses default=1)
+        - Uses max_completion_tokens instead of max_tokens
+        """
+        kwargs = {
+            "model": self.config.openai_model,
+            "messages": messages,
+        }
+
+        # GPT-5-mini doesn't support temperature parameter
+        if "gpt-5" not in self.config.openai_model.lower():
+            kwargs["temperature"] = temperature
+
+        # GPT-5 models use max_completion_tokens instead of max_tokens
+        if "gpt-5" in self.config.openai_model.lower():
+            kwargs["max_completion_tokens"] = max_tokens
+        else:
+            kwargs["max_tokens"] = max_tokens
+
+        # Add tools if provided
+        if tools:
+            kwargs["tools"] = tools
+            kwargs["tool_choice"] = "auto"
+
+        return kwargs
+
     def chat(
         self,
         messages: List[Dict[str, str]],
         tools: Optional[List[Dict[str, Any]]] = None,
         temperature: float = 0.7,
-        max_tokens: int = 1000
+        max_tokens: int = 1000,
+        override_mode: Optional[str] = None
     ) -> Tuple[str, Optional[List[Dict[str, Any]]]]:
         """
         Generate chat response with explicit routing based on config.
@@ -155,16 +258,22 @@ class LLMProvider:
             tools: Optional list of tool definitions (OpenAI format)
             temperature: Sampling temperature
             max_tokens: Maximum tokens to generate
+            override_mode: Optional override for chat_mode ('cloud' or 'local').
+                          Use this to force a specific mode for a single request
+                          without mutating shared state.
 
         Returns:
             Tuple of (response_text, tool_calls)
         """
-        if self.chat_mode == 'cloud':
+        # Use override if provided, otherwise use configured mode
+        effective_mode = override_mode if override_mode is not None else self.chat_mode
+
+        if effective_mode == 'cloud':
             return self._chat_cloud(messages, tools, temperature, max_tokens)
-        elif self.chat_mode == 'local':
+        elif effective_mode == 'local':
             return self._chat_local(messages, temperature, max_tokens), None
         else:
-            return "Invalid chat mode configuration", None
+            return f"Invalid chat mode: {effective_mode}", None
 
     def _chat_cloud(
         self,
@@ -186,6 +295,27 @@ class LLMProvider:
             logger.error(f"OpenAI chat failed: {e}")
             return f"Cloud chat error: {str(e)}", None
 
+    def _call_openai_with_retry(self, **kwargs):
+        """
+        Call OpenAI API with retry logic and circuit breaker.
+
+        Uses tenacity for exponential backoff retry and circuit breaker for failure protection.
+        """
+        @retry(
+            retry=retry_if_exception_type((Exception,)),
+            stop=stop_after_attempt(3),
+            wait=wait_exponential(multiplier=1, min=2, max=10),
+            before_sleep=before_sleep_log(logger, logging.WARNING),
+            reraise=True
+        )
+        def _make_request():
+            return self.circuit_breaker.call(
+                self.openai_client.chat.completions.create,
+                **kwargs
+            )
+
+        return _make_request()
+
     def _chat_openai(
         self,
         messages: List[Dict[str, str]],
@@ -193,31 +323,16 @@ class LLMProvider:
         temperature: float,
         max_tokens: int
     ) -> Tuple[str, Optional[List[Dict[str, Any]]]]:
-        """Chat using OpenAI"""
+        """Chat using OpenAI with retry logic and circuit breaker"""
         start_time = time.time()
         status = "error"
 
         try:
-            kwargs = {
-                "model": self.config.openai_model,
-                "messages": messages,
-            }
+            # Use centralized kwargs preparation (consolidates GPT-5 handling)
+            kwargs = self._prepare_openai_kwargs(messages, temperature, max_tokens, tools)
 
-            # GPT-5-mini doesn't support temperature parameter (only supports default value of 1)
-            if "gpt-5" not in self.config.openai_model.lower():
-                kwargs["temperature"] = temperature
-
-            # GPT-5 models use max_completion_tokens instead of max_tokens
-            if "gpt-5" in self.config.openai_model.lower():
-                kwargs["max_completion_tokens"] = max_tokens
-            else:
-                kwargs["max_tokens"] = max_tokens
-
-            if tools:
-                kwargs["tools"] = tools
-                kwargs["tool_choice"] = "auto"
-
-            response = self.openai_client.chat.completions.create(**kwargs)
+            # Call OpenAI with retry logic and circuit breaker
+            response = self._call_openai_with_retry(**kwargs)
             message = response.choices[0].message
 
             # Track token usage
@@ -344,13 +459,20 @@ class LLMProvider:
         messages: List[Dict[str, str]],
         tools: Optional[List[Dict[str, Any]]] = None,
         temperature: float = 0.7,
-        max_tokens: int = 1000
+        max_tokens: int = 1000,
+        override_mode: Optional[str] = None
     ) -> Tuple[str, Optional[List[Dict[str, Any]]]]:
         """
         Async chat - for OpenAI (which has async client).
         Local mode falls back to sync.
+
+        Args:
+            override_mode: Optional override for chat_mode ('cloud' or 'local')
         """
-        if self.chat_mode == 'cloud' and self.openai_client:
+        # Use override if provided, otherwise use configured mode
+        effective_mode = override_mode if override_mode is not None else self.chat_mode
+
+        if effective_mode == 'cloud' and self.openai_client:
             try:
                 return await self._chat_openai_async(messages, tools, temperature, max_tokens)
             except Exception as e:
@@ -359,14 +481,51 @@ class LLMProvider:
         else:
             # Local mode: run sync in background
             loop = asyncio.get_event_loop()
+            # Pass override_mode to sync chat
             return await loop.run_in_executor(
                 None,
-                self.chat,
-                messages,
-                tools,
-                temperature,
-                max_tokens
+                lambda: self.chat(messages, tools, temperature, max_tokens, override_mode)
             )
+
+    async def _call_openai_async_with_retry(self, client, **kwargs):
+        """
+        Call OpenAI API (async) with retry logic and circuit breaker.
+
+        Uses tenacity for exponential backoff retry and circuit breaker for failure protection.
+        """
+        @retry(
+            retry=retry_if_exception_type((Exception,)),
+            stop=stop_after_attempt(3),
+            wait=wait_exponential(multiplier=1, min=2, max=10),
+            before_sleep=before_sleep_log(logger, logging.WARNING),
+            reraise=True
+        )
+        async def _make_request():
+            # Circuit breaker check (sync operation)
+            if self.circuit_breaker.state == "OPEN":
+                if time.time() - self.circuit_breaker.last_failure_time >= self.circuit_breaker.recovery_timeout:
+                    logger.info("Circuit breaker entering HALF_OPEN state (testing recovery)")
+                    self.circuit_breaker.state = "HALF_OPEN"
+                else:
+                    raise Exception(f"Circuit breaker OPEN - OpenAI API unavailable")
+
+            try:
+                result = await client.chat.completions.create(**kwargs)
+                # Success - reset circuit breaker
+                if self.circuit_breaker.state == "HALF_OPEN":
+                    logger.info("Circuit breaker closing (service recovered)")
+                self.circuit_breaker.failure_count = 0
+                self.circuit_breaker.state = "CLOSED"
+                return result
+            except Exception as e:
+                self.circuit_breaker.failure_count += 1
+                self.circuit_breaker.last_failure_time = time.time()
+                if self.circuit_breaker.failure_count >= self.circuit_breaker.failure_threshold:
+                    logger.error(f"Circuit breaker OPEN after {self.circuit_breaker.failure_count} failures")
+                    self.circuit_breaker.state = "OPEN"
+                raise
+
+        return await _make_request()
 
     async def _chat_openai_async(
         self,
@@ -375,32 +534,17 @@ class LLMProvider:
         temperature: float,
         max_tokens: int
     ) -> Tuple[str, Optional[List[Dict[str, Any]]]]:
-        """Async OpenAI chat using AsyncOpenAI client"""
+        """Async OpenAI chat with retry logic and circuit breaker"""
         from openai import AsyncOpenAI
 
         client = AsyncOpenAI(api_key=self.config.openai_api_key)
 
         try:
-            kwargs = {
-                "model": self.config.openai_model,
-                "messages": messages,
-            }
+            # Use centralized kwargs preparation (consolidates GPT-5 handling)
+            kwargs = self._prepare_openai_kwargs(messages, temperature, max_tokens, tools)
 
-            # GPT-5-mini doesn't support temperature parameter (only supports default value of 1)
-            if "gpt-5" not in self.config.openai_model.lower():
-                kwargs["temperature"] = temperature
-
-            # GPT-5 models use max_completion_tokens instead of max_tokens
-            if "gpt-5" in self.config.openai_model.lower():
-                kwargs["max_completion_tokens"] = max_tokens
-            else:
-                kwargs["max_tokens"] = max_tokens
-
-            if tools:
-                kwargs["tools"] = tools
-                kwargs["tool_choice"] = "auto"
-
-            response = await client.chat.completions.create(**kwargs)
+            # Call OpenAI with retry logic and circuit breaker
+            response = await self._call_openai_async_with_retry(client, **kwargs)
             message = response.choices[0].message
 
             tool_calls = None

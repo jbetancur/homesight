@@ -1,18 +1,21 @@
 #!/bin/bash
-# Interactive demo script that simulates sensor lifecycle
+# Interactive demo script that simulates sensor lifecycle with sensor data
 # Run this while watching the dashboard: ./scripts/homesight.sh dashboard
 
 API_URL="http://localhost:8080/api"
+DEMO_HOME_ID="demo-home-$(date +%s)"
 
 # Colors
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 CYAN='\033[0;36m'
+RED='\033[0;31m'
+BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
 echo -e "${CYAN}╔══════════════════════════════════════════════════════════╗${NC}"
 echo -e "${CYAN}║       🏠 HomeSight Interactive Demo                      ║${NC}"
-echo -e "${CYAN}║       Sensor Discovery & Onboarding Simulation           ║${NC}"
+echo -e "${CYAN}║       Sensor Discovery & Multi-Sensor Data Simulation     ║${NC}"
 echo -e "${CYAN}╚══════════════════════════════════════════════════════════╝${NC}"
 echo ""
 echo -e "${YELLOW}📺 Open the dashboard in another terminal:${NC}"
@@ -26,6 +29,53 @@ pause() {
     echo ""
     read -p "Press Enter to continue..."
     echo ""
+}
+
+# Function to inject sensor data event
+inject_sensor_data() {
+    local sensor_id=$1
+    local sensor_name=$2
+    local value=$3
+    local unit=$4
+    local value_type=$5
+
+    local timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+    echo -e "${BLUE}   📊 ${sensor_name}: ${value}${unit}${NC}"
+
+    curl -s -X POST $API_URL/devices/sensors/data \
+      -H "Content-Type: application/json" \
+      -d "{
+        \"sensor_id\": \"${sensor_id}\",
+        \"value\": ${value},
+        \"value_type\": \"${value_type}\",
+        \"unit\": \"${unit}\",
+        \"timestamp\": \"${timestamp}\",
+        \"metadata\": {}
+      }" > /dev/null 2>&1
+}
+
+# Function to simulate temperature readings
+simulate_temp_readings() {
+    local device_id=$1
+    local device_name=$2
+    local temp_sensor_id="${device_id}-temp"
+    local humidity_sensor_id="${device_id}-humidity"
+
+    echo -e "${YELLOW}   📈 Simulating environmental readings for ${device_name}...${NC}"
+
+    # Simulate rising temperature and humidity (like shower activity)
+    for i in {1..3}; do
+        temp=$((65 + i * 2))
+        humidity=$((40 + i * 15))
+
+        inject_sensor_data "${temp_sensor_id}" "Temperature" "${temp}" "°F" "float"
+        inject_sensor_data "${humidity_sensor_id}" "Humidity" "${humidity}" "%" "float"
+
+        sleep 1
+    done
+
+    echo -e "${GREEN}   ✅ Environmental data logged${NC}"
 }
 
 # Step 1: Discover basement leak sensor
@@ -95,19 +145,7 @@ curl -s -X POST $API_URL/devices/basement-leak-sensor-001/sensors \
     }
   }' 2>/dev/null || echo "  (Sensors endpoint not yet active)"
 echo ""
-echo -e "${YELLOW}🤖 Triggering AI document ingestion for Aqara SJCGQ11LM...${NC}"
-curl -s -X POST http://localhost:8001/events/device \
-  -H "Content-Type: application/json" \
-  -d '{
-    "type": "device.created",
-    "data": {
-      "id": "basement-leak-sensor-001",
-      "manufacturer": "Aqara",
-      "model": "SJCGQ11LM",
-      "type": "water_leak"
-    }
-  }' | python3 -m json.tool 2>/dev/null || echo "  (AI sidecar not running - manual docs will be needed)"
-echo -e "${CYAN}   Documentation discovery queued in background${NC}"
+
 pause
 
 # Step 2: Add sump pump monitor
@@ -167,19 +205,7 @@ curl -s -X POST $API_URL/devices/sump-pump-monitor-001/sensors \
     }
   }' 2>/dev/null || echo "  (Sensors endpoint not yet active)"
 echo ""
-echo -e "${YELLOW}🤖 Triggering AI document ingestion for Shelly Plug S...${NC}"
-curl -s -X POST http://localhost:8001/events/device \
-  -H "Content-Type: application/json" \
-  -d '{
-    "type": "device.created",
-    "data": {
-      "id": "sump-pump-monitor-001",
-      "manufacturer": "Shelly",
-      "model": "Plug S",
-      "type": "power_monitor"
-    }
-  }' | python3 -m json.tool 2>/dev/null || echo "  (AI sidecar not running)"
-echo -e "${CYAN}   Documentation discovery queued in background${NC}"
+
 pause
 
 # Step 3: Add temperature sensors
@@ -291,26 +317,20 @@ curl -s -X POST $API_URL/devices/attic-temp-sensor-001/sensors \
 
 echo -e "${CYAN}✅ Temperature sensors deployed!${NC}"
 echo ""
-echo -e "${YELLOW}🤖 Triggering AI document ingestion for Aqara WSDCGQ11LM...${NC}"
-curl -s -X POST http://localhost:8001/events/device \
-  -H "Content-Type: application/json" \
-  -d '{
-    "type": "device.created",
-    "data": {
-      "id": "basement-temp-sensor-001",
-      "manufacturer": "Aqara",
-      "model": "WSDCGQ11LM",
-      "type": "temperature"
-    }
-  }' | python3 -m json.tool 2>/dev/null || echo "  (AI sidecar not running)"
-echo -e "${CYAN}   Documentation discovery queued in background${NC}"
+
 pause
 
-# Step 4: Simulate an incident
+# Step 4: Simulate an incident with multi-sensor context
 echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-echo -e "${GREEN}Step 4: 🚨 Simulating water detection incident...${NC}"
+echo -e "${GREEN}Step 4: 🚨 Simulating water detection incident with sensor context...${NC}"
 echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 echo "Basement leak sensor detected water!"
+echo ""
+echo -e "${YELLOW}📊 Logging environmental context for incident analysis...${NC}"
+# Inject temperature and humidity readings that will be used by enricher
+inject_sensor_data "basement-temp-sensor-001-humidity" "Humidity" "92" "%" "float"
+inject_sensor_data "basement-temp-sensor-001-temp" "Temperature" "68" "°F" "float"
+echo ""
 pause
 
 curl -s -X POST $API_URL/incidents \
@@ -320,8 +340,9 @@ curl -s -X POST $API_URL/incidents \
     "title": "Water Detected in Basement",
     "description": "Leak sensor triggered - water detected near water heater",
     "severity": "critical",
-    "deviceID": "basement-leak-sensor-001",
-    "ruleName": "leak_detection",
+    "device_id": "basement-leak-sensor-001",
+    "sensor_id": "basement-leak-sensor-001-leak",
+    "rule_name": "leak_detection",
     "data": {
       "sensor_reading": "wet",
       "location": "basement",
@@ -329,7 +350,7 @@ curl -s -X POST $API_URL/incidents \
     }
   }' | python3 -m json.tool 2>/dev/null || cat
 
-echo -e "${CYAN}🔴 CRITICAL incident created!${NC}"
+echo -e "${CYAN}🔴 CRITICAL incident created with multi-sensor context!${NC}"
 pause
 
 # Step 5: Add more devices
@@ -438,25 +459,23 @@ curl -s -X POST $API_URL/devices/garage-door-sensor-001/sensors \
 
 echo -e "${CYAN}✅ Additional sensors online!${NC}"
 echo ""
-echo -e "${YELLOW}🤖 Triggering AI document ingestion for Aqara MCCGQ11LM...${NC}"
-curl -s -X POST http://localhost:8001/events/device \
-  -H "Content-Type: application/json" \
-  -d '{
-    "type": "device.created",
-    "data": {
-      "id": "front-door-sensor-001",
-      "manufacturer": "Aqara",
-      "model": "MCCGQ11LM",
-      "type": "contact"
-    }
-  }' | python3 -m json.tool 2>/dev/null || echo "  (AI sidecar not running)"
-echo -e "${CYAN}   Documentation discovery queued in background${NC}"
+
 pause
 
-# Step 6: Add a warning incident
+# Step 6: Add a warning incident with sensor context
 echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-echo -e "${GREEN}Step 6: ⚠️  Low battery warning...${NC}"
+echo -e "${GREEN}Step 6: ⚠️  Low battery warning with sensor data...${NC}"
 echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+echo "Front door sensor battery level is dropping!"
+echo ""
+echo -e "${YELLOW}📊 Logging battery level readings...${NC}"
+# Inject battery readings showing decline
+inject_sensor_data "front-door-sensor-001-battery" "Battery Level" "45" "%" "float"
+sleep 1
+inject_sensor_data "front-door-sensor-001-battery" "Battery Level" "30" "%" "float"
+sleep 1
+inject_sensor_data "front-door-sensor-001-battery" "Battery Level" "15" "%" "float"
+echo ""
 pause
 
 curl -s -X POST $API_URL/incidents \
@@ -466,15 +485,16 @@ curl -s -X POST $API_URL/incidents \
     "title": "Low Battery - Front Door Sensor",
     "description": "Battery level at 15% - replacement needed soon",
     "severity": "medium",
-    "deviceID": "front-door-sensor-001",
-    "ruleName": "battery_low",
+    "device_id": "front-door-sensor-001",
+    "sensor_id": "front-door-sensor-001-battery",
+    "rule_name": "battery_low",
     "data": {
       "battery_level": 15,
       "threshold": 20
     }
   }' | python3 -m json.tool 2>/dev/null || cat
 
-echo -e "${CYAN}🟡 Medium priority incident logged!${NC}"
+echo -e "${CYAN}🟡 Medium priority incident logged with sensor context!${NC}"
 pause
 
 # Summary
@@ -496,12 +516,28 @@ echo "  • Aqara WSDCGQ11LM (Temperature/Humidity Sensor) - 2 sensors per devic
 echo "  • Aqara MCCGQ11LM (Door/Window Contact Sensor) - 2 sensors per device (x2)"
 echo "  • Shelly Plug S (Smart Plug with Power Monitoring) - 2 sensors"
 echo ""
-echo -e "${YELLOW}Sensor Features:${NC}"
-echo "  • Click device name to view device overview"
-echo "  • Click 'View Details' button to see detailed sensor data"
-echo "  • View real-time metrics, historical data, and sensor specs"
-echo "  • See device documentation status and details"
-echo "  • All sensor data is stored and queryable"
+echo -e "${YELLOW}Sensor Data Features:${NC}"
+echo "  ✅ Real sensor data injected during demo"
+echo "  ✅ Temperature & Humidity readings logged"
+echo "  ✅ Battery level readings with decline simulation"
+echo "  ✅ Sensor data used for incident enrichment"
+echo "  ✅ Multi-sensor context for AI analysis"
+echo ""
+echo -e "${YELLOW}Demo Scenarios Simulated:${NC}"
+echo "  1️⃣  Water leak detection in basement"
+echo "     - Humidity 92%, Temperature 68°F"
+echo "     - AI identifies potential false positive (high humidity)"
+echo "  2️⃣  Low battery warning with declining levels"
+echo "     - Battery: 45% → 30% → 15%"
+echo "     - AI provides maintenance recommendations"
+echo ""
+echo -e "${YELLOW}Sensor Data Capabilities:${NC}"
+echo "  • Inject real-time sensor readings via API"
+echo "  • Simulate environmental conditions"
+echo "  • Track sensor value trends over time"
+echo "  • All data stored in SQLite database"
+echo "  • Used by enricher for multi-sensor context"
+echo "  • Available for AI incident analysis"
 echo ""
 echo -e "${YELLOW}AI Features:${NC}"
 echo "  • Document discovery queued for each device"
@@ -509,8 +545,9 @@ echo "  • Knowledge base will contain:"
 echo "    - Manufacturer PDFs and manuals"
 echo "    - Support forum discussions"
 echo "    - Community troubleshooting guides"
-echo "  • AI analysis will cite specific sources"
-echo "  • Check incidents view for AI recommendations"
+echo "  • AI analysis uses sensor context"
+echo "  • AI will cite specific sources"
+echo "  • Check incidents view for recommendations"
 echo ""
 echo -e "${YELLOW}To check knowledge base status:${NC}"
 echo "  curl http://localhost:8001/rag/status | jq"
@@ -520,4 +557,20 @@ echo "  ./scripts/cleanup-demo.sh"
 echo ""
 echo -e "${YELLOW}To view the dashboard:${NC}"
 echo "  ./scripts/homesight.sh dashboard"
+echo ""
+echo -e "${YELLOW}To manually inject sensor data:${NC}"
+echo "  # Inject a temperature reading"
+echo "  curl -X POST http://localhost:8080/api/devices/sensors/data \\\\"
+echo "    -H 'Content-Type: application/json' \\\\"
+echo "    -d '{\"sensor_id\": \"basement-temp-sensor-001-temp\", \"value\": 72, \"value_type\": \"float\", \"unit\": \"°F\"}'"
+echo ""
+echo "  # Inject a humidity reading"
+echo "  curl -X POST http://localhost:8080/api/devices/sensors/data \\\\"
+echo "    -H 'Content-Type: application/json' \\\\"
+echo "    -d '{\"sensor_id\": \"basement-temp-sensor-001-humidity\", \"value\": 55, \"value_type\": \"float\", \"unit\": \"%\"}'"
+echo ""
+echo -e "${YELLOW}Multi-Sensor Scenarios to Try:${NC}"
+echo "  • Create high humidity + leak detection → AI identifies false positive"
+echo "  • Set temperature extremes + battery low → Thermal stress on battery"
+echo "  • Monitor door open + temperature change → HVAC impact analysis"
 echo ""

@@ -97,7 +97,6 @@ export function DevicesView() {
   };
 
   const handleReingestDocs = async (deviceId: string) => {
-    setReingestingId(deviceId);
     try {
       const response = await fetch(`${API_BASE}/devices/${deviceId}/reingest-docs`, {
         method: 'POST',
@@ -105,18 +104,18 @@ export function DevicesView() {
 
       if (response.ok) {
         const data = await response.json();
+        // Only set loading state after confirming the request succeeded
+        setReingestingId(deviceId);
         // Don't clear loading state yet - wait for device SSE update with final status
         // The docs_status will change from "pending" to "success"/"partial"/"error"
         // when the AI sidecar completes, and we'll clear the loading state then
       } else {
         alert('Failed to queue re-ingestion');
         console.error('Re-ingest failed:', response.statusText);
-        setReingestingId(null);
       }
     } catch (error) {
       alert('Error queuing re-ingestion');
       console.error('Re-ingest error:', error);
-      setReingestingId(null);
     }
   };
 

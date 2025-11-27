@@ -247,29 +247,23 @@ class ChatService:
         session_incident_context = session.context.get('incident') if session and session.context else None
 
         # Generate response with potential function calling
+        # Use override_mode parameter instead of mutating shared state (RACE-CONDITION-FREE)
         if session_incident_context:
             logger.info("Forcing local LLM for incident chat (incident context present)")
-            # Temporarily override provider chat_mode if needed
-            original_mode = getattr(self.llm, 'chat_mode', None)
-            try:
-                # Force local mode for incident-specific chats
-                setattr(self.llm, 'chat_mode', 'local')
-                response_text, tool_calls = self.llm.chat(
-                    messages=messages,
-                    tools=tools,
-                    temperature=0.7,
-                    max_tokens=1000
-                )
-            finally:
-                # Restore original mode
-                if original_mode is not None:
-                    setattr(self.llm, 'chat_mode', original_mode)
+            response_text, tool_calls = self.llm.chat(
+                messages=messages,
+                tools=tools,
+                temperature=0.7,
+                max_tokens=1000,
+                override_mode='local'  # Force local for this request only
+            )
         else:
             response_text, tool_calls = self.llm.chat(
                 messages=messages,
                 tools=tools,
                 temperature=0.7,
                 max_tokens=1000
+                # No override - use configured default mode
             )
 
         # Execute any tool calls

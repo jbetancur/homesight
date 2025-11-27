@@ -12,6 +12,7 @@ Clean, modular architecture with:
 from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
+from typing import Optional
 import uvicorn
 import logging
 import os
@@ -28,6 +29,7 @@ from metrics import get_metrics, active_sessions, chat_response_time, chat_reque
 from models.chat import ChatRequest, ChatResponse
 from models.analyze import AnalyzeRequest, AnalyzeResponse
 from models.device import DeviceEvent
+from models.device_profile import DeviceProfile
 
 # Services
 from services.session_service import SessionService
@@ -91,6 +93,10 @@ analysis_queue = None
 discovery_queue = None
 ingestion_queue = None
 analysis_task_queue = None
+
+# Incident analysis cache (in-memory storage for background analyses)
+# Key: incident_id, Value: {analysis, insights, actions, metadata, timestamp, status}
+incident_analysis_cache = {}
 
 # Cached health status (updated periodically, never blocks)
 import asyncio
@@ -362,48 +368,52 @@ async def handle_device_event(event: dict, background_tasks: BackgroundTasks):
 
     if event_type == "device.created":
         device_data = event.get("data", {})
-        manufacturer = device_data.get("manufacturer", "")
-        model = device_data.get("model", "")
         force = event.get("force", False)  # Force refresh/re-ingest flag
 
-        if manufacturer and model:
-            action = "force refresh" if force else "comprehensive doc discovery"
-            logger.info(f"Device created: {manufacturer} {model} - queuing {action}")
-
-            # Queue document discovery in background
-            background_tasks.add_task(discover_device_docs, device_data, force=force)
-
+        # Convert to DeviceProfile for type safety
+        try:
+            device = DeviceProfile.from_dict(device_data)
+        except Exception as e:
+            logger.error(f"Invalid device data: {e}")
             return {
-                "status": "queued",
-                "message": f"{action.title()} queued for {manufacturer} {model}",
-                "force": force
+                "status": "error",
+                "message": f"Invalid device data: {str(e)}"
             }
-        else:
-            return {
-                "status": "skipped",
-                "message": "Device missing manufacturer or model metadata"
-            }
+
+        action = "force refresh" if force else "comprehensive doc discovery"
+        logger.info(f"Device created: {device.manufacturer} {device.model} - queuing {action}")
+
+        # Queue document discovery in background
+        background_tasks.add_task(discover_device_docs, device, force=force)
+
+        return {
+            "status": "queued",
+            "message": f"{action.title()} queued for {device.manufacturer} {device.model}",
+            "force": force
+        }
 
     return {"status": "ignored", "message": f"Unknown event type: {event_type}"}
 
 
-async def discover_device_docs(device: dict, force: bool = False):
-    """Background task for comprehensive document discovery"""
+async def discover_device_docs(device: DeviceProfile, force: bool = False):
+    """
+    Background task for comprehensive document discovery
+
+    Args:
+        device: DeviceProfile with full device metadata
+        force: If True, bypass cache and force refresh
+    """
     try:
-        device_id = device.get("id")
-        logger.info(f"Starting document discovery for device: {device_id} (force={force})")
+        logger.info(f"Starting document discovery for device: {device.id} (force={force})")
 
         if document_service:
             result = await document_service.discover_and_ingest_device_docs(device, force=force)
             logger.info(f"Doc discovery complete: {result}")
 
             # Update device documentation status in Go backend
-            if device_id:
-                logger.info(f"Updating device {device_id} docs status in Go backend...")
-                await update_device_docs_status(device_id, result)
-                logger.info(f"Successfully updated device {device_id} docs status")
-            else:
-                logger.warning("Device ID not found in discovery result")
+            logger.info(f"Updating device {device.id} docs status in Go backend...")
+            await update_device_docs_status(device.id, result)
+            logger.info(f"Successfully updated device {device.id} docs status")
         else:
             logger.warning("Document service not available")
     except Exception as e:
@@ -439,6 +449,150 @@ async def update_device_docs_status(device_id: str, discovery_result: dict):
         logger.error(f"Connection timeout updating device {device_id} docs status - backend may be unreachable")
     except Exception as e:
         logger.error(f"Error updating device docs status: {e}", exc_info=True)
+
+
+# Incident event handler (background analysis)
+@app.post("/events/incident")
+async def handle_incident_event(event: dict, background_tasks: BackgroundTasks):
+    """
+    Handle incident lifecycle events and trigger background analysis
+
+    When an incident is created, automatically analyze it in the background
+    and notify the Go backend when complete via callback.
+    """
+    event_type = event.get("type", "")
+
+    if event_type == "incident.created":
+        incident_data = event.get("data", {})
+        incident_id = incident_data.get("id")
+        callback_url = event.get("callback_url")  # Optional callback URL from Go backend
+
+        if not incident_id:
+            raise HTTPException(status_code=400, detail="Incident ID required")
+
+        # Mark analysis as pending in cache
+        incident_analysis_cache[incident_id] = {
+            "status": "pending",
+            "analysis": "",
+            "insights": [],
+            "timestamp": None
+        }
+
+        # Queue background analysis with callback
+        background_tasks.add_task(analyze_incident_background, incident_data, callback_url)
+
+        logger.info(f"Queued background analysis for incident {incident_id}")
+        return {
+            "status": "queued",
+            "incident_id": incident_id,
+            "message": "Incident analysis queued"
+        }
+
+    return {"status": "ignored", "message": f"Event type {event_type} not handled"}
+
+
+async def analyze_incident_background(incident_data: dict, callback_url: Optional[str] = None):
+    """
+    Analyze incident in background and save results to Go backend database
+
+    This allows the UI to retrieve pre-computed analysis instead of
+    waiting for LLM inference when the user expands the incident.
+    """
+    import httpx
+    import time
+
+    incident_id = incident_data.get("id")
+
+    if not incident_id or not analysis_service:
+        return
+
+    try:
+        logger.info(f"Starting background analysis for incident {incident_id}")
+
+        # Create analysis request
+        request = AnalyzeRequest(
+            type="incident",
+            data={
+                "id": incident_id,
+                "type": incident_data.get("title", "Unknown incident"),
+                "severity": incident_data.get("severity", "unknown"),
+                "device_id": incident_data.get("device_id"),
+                "description": incident_data.get("description", "")
+            },
+            context={
+                "incident_id": incident_id,
+                "device_id": incident_data.get("device_id")
+            }
+        )
+
+        # Perform analysis
+        result = await analysis_service.analyze(request)
+
+        logger.info(f"✅ Completed analysis for incident {incident_id}")
+
+        # Save analysis to Go backend database via HTTP PATCH
+        try:
+            go_backend_url = os.getenv("BACKEND_URL", "http://localhost:8080")
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                await client.patch(
+                    f"{go_backend_url}/api/incidents/{incident_id}/analysis",
+                    json={
+                        "analysis_status": "completed",
+                        "analysis": result.analysis,
+                        "insights": result.insights,
+                        "actions": result.actions,
+                        "analysis_data": result.metadata,
+                    }
+                )
+            logger.info(f"✅ Saved analysis for incident {incident_id} to database")
+        except Exception as db_err:
+            logger.error(f"Failed to save analysis for incident {incident_id}: {db_err}")
+
+    except Exception as e:
+        logger.error(f"Background analysis failed for incident {incident_id}: {e}")
+
+        # Save error status to Go backend database
+        try:
+            go_backend_url = os.getenv("BACKEND_URL", "http://localhost:8080")
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                await client.patch(
+                    f"{go_backend_url}/api/incidents/{incident_id}/analysis",
+                    json={
+                        "analysis_status": "failed",
+                        "analysis": "Analysis failed",
+                        "insights": [str(e)],
+                    }
+                )
+            logger.info(f"Saved error status for incident {incident_id}")
+        except Exception as db_err:
+            logger.error(f"Failed to save error status for incident {incident_id}: {db_err}")
+
+
+# Get cached incident analysis
+@app.get("/incidents/{incident_id}/analysis")
+async def get_incident_analysis(incident_id: str):
+    """
+    Retrieve cached incident analysis
+
+    Returns pre-computed analysis if available, otherwise returns pending status.
+    UI should poll this endpoint after incident creation.
+    """
+    analysis = incident_analysis_cache.get(incident_id)
+
+    if not analysis:
+        return {
+            "status": "not_found",
+            "message": "No analysis available for this incident"
+        }
+
+    return {
+        "status": analysis["status"],
+        "analysis": analysis.get("analysis", ""),
+        "insights": analysis.get("insights", []),
+        "actions": analysis.get("actions"),
+        "metadata": analysis.get("metadata"),
+        "loading": analysis["status"] == "pending"
+    }
 
 
 # RAG status endpoint

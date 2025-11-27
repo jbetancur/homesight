@@ -32,11 +32,16 @@ func (s *Service) CreateOrUpdate(ctx context.Context, incident *model.Incident) 
 	if err == nil && existing != nil {
 		// Update existing
 		incident.CreatedAt = existing.CreatedAt
-		incident.UpdatedAt = time.Now()
+		// Only set UpdatedAt if it wasn't already set by the caller
+		if incident.UpdatedAt.IsZero() {
+			incident.UpdatedAt = time.Now()
+		}
 	} else {
 		// New incident
 		incident.CreatedAt = time.Now()
-		incident.UpdatedAt = time.Now()
+		if incident.UpdatedAt.IsZero() {
+			incident.UpdatedAt = time.Now()
+		}
 	}
 
 	return s.repo.Upsert(ctx, incident)

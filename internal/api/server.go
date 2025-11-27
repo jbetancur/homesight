@@ -1,10 +1,14 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"log"
 	"net/http"
+	"os"
 	"sync"
 	"time"
 
@@ -95,6 +99,7 @@ func (s *Server) setupRoutes() {
 			r.Get("/", s.listIncidents)
 			r.Get("/{id}", s.getIncident)
 			r.Post("/{id}/resolve", s.resolveIncident)
+			r.Patch("/{id}/analysis", s.updateIncidentAnalysis) // Update incident analysis (from AI sidecar)
 			// Demo/Testing endpoints - In production, guard with admin authentication
 			r.Post("/", s.createIncident)       // Manual incident creation (testing only)
 			r.Delete("/{id}", s.deleteIncident) // Hard delete (testing/cleanup only)
@@ -263,6 +268,76 @@ func (s *Server) resolveIncident(w http.ResponseWriter, r *http.Request) {
 
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(map[string]string{"status": "resolved"})
+}
+
+// updateIncidentAnalysis updates the analysis results for an incident (called by AI sidecar)
+func (s *Server) updateIncidentAnalysis(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	id := chi.URLParam(r, "id")
+
+	var payload struct {
+		AnalysisStatus string                 `json:"analysis_status"`
+		Analysis       string                 `json:"analysis"`
+		Insights       []string               `json:"insights"`
+		Actions        []string               `json:"actions"`
+		AnalysisData   map[string]interface{} `json:"analysis_data"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	// Get existing incident to preserve all fields
+	incident, err := s.incidentService.Get(ctx, id)
+	if err != nil || incident == nil {
+		http.Error(w, "incident not found", http.StatusNotFound)
+		return
+	}
+
+	// Update only the analysis fields, preserving all other fields
+	now := time.Now()
+	incident.AnalysisStatus = payload.AnalysisStatus
+	incident.Analysis = payload.Analysis
+	incident.Insights = payload.Insights
+	incident.Actions = payload.Actions
+	incident.AnalysisData = payload.AnalysisData
+	incident.AnalyzedAt = &now
+	incident.UpdatedAt = now
+
+	// Save using CreateOrUpdate (which handles timestamps correctly)
+	if err := s.incidentService.CreateOrUpdate(ctx, incident); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Publish SSE event so UI updates in real-time
+	if s.eventBus != nil {
+		if payload.AnalysisStatus == "completed" {
+			s.eventBus.Publish(Event{
+				Type: "incident_analysis_completed",
+				Data: map[string]interface{}{
+					"incident_id": id,
+					"analysis":    payload.Analysis,
+					"insights":    payload.Insights,
+					"actions":     payload.Actions,
+					"metadata":    payload.AnalysisData,
+				},
+			})
+		} else if payload.AnalysisStatus == "failed" {
+			s.eventBus.Publish(Event{
+				Type: "incident_analysis_failed",
+				Data: map[string]interface{}{
+					"incident_id": id,
+					"error":       payload.Analysis, // Use analysis field for error message
+				},
+			})
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(incident)
 }
 
 // listDevices returns all devices
@@ -748,6 +823,8 @@ func (s *Server) createIncident(w http.ResponseWriter, r *http.Request) {
 	if incident.Status == "" {
 		incident.Status = "open"
 	}
+	// Set analysis status to pending (will be updated when AI sidecar completes)
+	incident.AnalysisStatus = "pending"
 
 	if err := s.incidentService.CreateOrUpdate(ctx, &incident); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -758,6 +835,9 @@ func (s *Server) createIncident(w http.ResponseWriter, r *http.Request) {
 	if s.eventBus != nil {
 		s.eventBus.Publish(Event{Type: IncidentAdded, Data: incident})
 	}
+
+	// Notify AI sidecar to start background analysis
+	go s.notifyAIIncidentCreated(incident)
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(incident)
@@ -812,5 +892,35 @@ func getValue(ch <-chan string, defaultValue string) string {
 	case <-time.After(12 * time.Second):
 		// Wait up to 12 seconds for AI sidecar response (15s context timeout - 3s buffer)
 		return defaultValue
+	}
+}
+
+// notifyAIIncidentCreated sends an incident creation event to the AI sidecar for background analysis
+func (s *Server) notifyAIIncidentCreated(incident model.Incident) {
+	aiSidecarURL := os.Getenv("AI_SIDECAR_URL")
+	if aiSidecarURL == "" {
+		aiSidecarURL = "http://localhost:8001"
+	}
+
+	url := fmt.Sprintf("%s/events/incident", aiSidecarURL)
+
+	payload := map[string]interface{}{
+		"type": "incident.created",
+		"data": incident,
+	}
+
+	body, _ := json.Marshal(payload)
+	resp, err := http.Post(url, "application/json", bytes.NewBuffer(body))
+	if err != nil {
+		log.Printf("Failed to notify AI sidecar of incident %s: %v", incident.ID, err)
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		log.Printf("AI sidecar returned status %d for incident %s: %s", resp.StatusCode, incident.ID, string(bodyBytes))
+	} else {
+		log.Printf("✅ Notified AI sidecar of incident %s for background analysis", incident.ID)
 	}
 }

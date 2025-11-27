@@ -555,7 +555,7 @@ class DocumentAutoFetcher:
         except Exception as e:
             logger.warning(f"Error deleting manual files: {e}")
 
-    async def fetch_for_device(self, device: Dict, force: bool = False) -> bool:
+    async def fetch_for_device(self, device, force: bool = False) -> bool:
         """
         Auto-fetch and ingest documentation for a device.
 
@@ -568,18 +568,28 @@ class DocumentAutoFetcher:
         6. Download and ingest
 
         Args:
-            device: Dict with keys: manufacturer, model, type
+            device: DeviceProfile or Dict (backward compatible)
             force: If True, bypass cache and RAG check, re-ingest everything
 
         Returns:
             True if docs were fetched/ingested, False otherwise.
         """
-        manufacturer = (device.get("manufacturer") or "").strip()
-        model = (device.get("model") or "").strip()
-        device_type = device.get("type", "")
+        # Handle both DeviceProfile and legacy Dict
+        if hasattr(device, 'manufacturer'):
+            # DeviceProfile object
+            manufacturer = device.manufacturer
+            model = device.model
+            device_type = device.device_type if isinstance(device.device_type, str) else device.device_type.value
+            device_dict = device.to_dict()
+        else:
+            # Legacy dict format
+            manufacturer = (device.get("manufacturer") or "").strip()
+            model = (device.get("model") or "").strip()
+            device_type = device.get("type", "")
+            device_dict = device
 
         if not manufacturer or not model:
-            logger.warning(f"Device missing manufacturer or model: {device}")
+            logger.warning(f"Device missing manufacturer or model")
             return False
 
         # If force=True, clean up all caches first
@@ -598,7 +608,7 @@ class DocumentAutoFetcher:
             logger.info(f"Found cached URL for {manufacturer} {model}: {cached_url}")
             doc_path = await self.generic_fetcher._download_from_url(model, cached_url)
             if doc_path:
-                await self._ingest_document(doc_path, device)
+                await self._ingest_document(doc_path, device_dict)
                 return True
             else:
                 logger.warning(f"Cached URL no longer valid: {cached_url}")
@@ -610,7 +620,7 @@ class DocumentAutoFetcher:
             doc_path = await self.generic_fetcher._download_from_url(model, known_url)
             if doc_path:
                 self.url_cache.set(manufacturer, model, known_url, confidence="high")
-                await self._ingest_document(doc_path, device)
+                await self._ingest_document(doc_path, device_dict)
                 return True
             else:
                 logger.warning(f"Known URL failed to download: {known_url}")
@@ -628,7 +638,7 @@ class DocumentAutoFetcher:
             doc_path = await self.generic_fetcher._download_from_url(model, doc_url)
             if doc_path:
                 self.url_cache.set(manufacturer, model, doc_url, confidence="high")
-                await self._ingest_document(doc_path, device)
+                await self._ingest_document(doc_path, device_dict)
                 return True
 
         # Fallback to search-based discovery
@@ -638,7 +648,7 @@ class DocumentAutoFetcher:
                 doc_path = await self.generic_fetcher._search_and_download(model, q)
                 if doc_path:
                     logger.info(f"Found via search query: {q}")
-                    await self._ingest_document(doc_path, device)
+                    await self._ingest_document(doc_path, device_dict)
                     return True
 
         logger.warning(f"Could not find documentation for {manufacturer} {model}")

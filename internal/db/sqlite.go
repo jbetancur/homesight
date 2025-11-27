@@ -121,6 +121,12 @@ func (s *SQLiteDB) initSchema() error {
 			created_at DATETIME NOT NULL,
 			updated_at DATETIME NOT NULL,
 			resolved_at DATETIME,
+			analysis_status TEXT DEFAULT 'pending',
+			analysis TEXT,
+			insights TEXT,
+			actions TEXT,
+			analysis_data TEXT,
+			analyzed_at DATETIME,
 			FOREIGN KEY (device_id) REFERENCES devices(id),
 			FOREIGN KEY (sensor_id) REFERENCES sensors(id),
 			FOREIGN KEY (zone_id) REFERENCES zones(id),
@@ -357,11 +363,15 @@ func (r *IncidentRepo) Get(ctx context.Context, id string) (*model.Incident, err
 	var i model.Incident
 	var dataJSON sql.NullString
 	var resolvedAt sql.NullTime
+	var insightsJSON sql.NullString
+	var actionsJSON sql.NullString
+	var analysisDataJSON sql.NullString
+	var analyzedAt sql.NullTime
 
 	err := r.db.QueryRowContext(ctx,
-		`SELECT id, title, description, severity, status, device_id, sensor_id, zone_id, asset_id, rule_name, data, created_at, updated_at, resolved_at
+		`SELECT id, title, description, severity, status, device_id, sensor_id, zone_id, asset_id, rule_name, data, created_at, updated_at, resolved_at, analysis_status, analysis, insights, actions, analysis_data, analyzed_at
 		 FROM incidents WHERE id = ?`, id).Scan(
-		&i.ID, &i.Title, &i.Description, &i.Severity, &i.Status, &i.DeviceID, &i.SensorID, &i.ZoneID, &i.AssetID, &i.RuleName, &dataJSON, &i.CreatedAt, &i.UpdatedAt, &resolvedAt)
+		&i.ID, &i.Title, &i.Description, &i.Severity, &i.Status, &i.DeviceID, &i.SensorID, &i.ZoneID, &i.AssetID, &i.RuleName, &dataJSON, &i.CreatedAt, &i.UpdatedAt, &resolvedAt, &i.AnalysisStatus, &i.Analysis, &insightsJSON, &actionsJSON, &analysisDataJSON, &analyzedAt)
 
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -376,12 +386,24 @@ func (r *IncidentRepo) Get(ctx context.Context, id string) (*model.Incident, err
 	if dataJSON.Valid {
 		json.Unmarshal([]byte(dataJSON.String), &i.Data)
 	}
+	if insightsJSON.Valid {
+		json.Unmarshal([]byte(insightsJSON.String), &i.Insights)
+	}
+	if actionsJSON.Valid {
+		json.Unmarshal([]byte(actionsJSON.String), &i.Actions)
+	}
+	if analysisDataJSON.Valid {
+		json.Unmarshal([]byte(analysisDataJSON.String), &i.AnalysisData)
+	}
+	if analyzedAt.Valid {
+		i.AnalyzedAt = &analyzedAt.Time
+	}
 
 	return &i, nil
 }
 
 func (r *IncidentRepo) List(ctx context.Context, filters map[string]any) ([]model.Incident, error) {
-	query := `SELECT id, title, description, severity, status, device_id, sensor_id, zone_id, asset_id, rule_name, data, created_at, updated_at, resolved_at FROM incidents WHERE 1=1`
+	query := `SELECT id, title, description, severity, status, device_id, sensor_id, zone_id, asset_id, rule_name, data, created_at, updated_at, resolved_at, analysis_status, analysis, insights, actions, analysis_data, analyzed_at FROM incidents WHERE 1=1`
 	args := make([]any, 0)
 
 	if status, ok := filters["status"]; ok {
@@ -406,8 +428,12 @@ func (r *IncidentRepo) List(ctx context.Context, filters map[string]any) ([]mode
 		var i model.Incident
 		var dataJSON sql.NullString
 		var resolvedAt sql.NullTime
+		var insightsJSON sql.NullString
+		var actionsJSON sql.NullString
+		var analysisDataJSON sql.NullString
+		var analyzedAt sql.NullTime
 
-		if err := rows.Scan(&i.ID, &i.Title, &i.Description, &i.Severity, &i.Status, &i.DeviceID, &i.SensorID, &i.ZoneID, &i.AssetID, &i.RuleName, &dataJSON, &i.CreatedAt, &i.UpdatedAt, &resolvedAt); err != nil {
+		if err := rows.Scan(&i.ID, &i.Title, &i.Description, &i.Severity, &i.Status, &i.DeviceID, &i.SensorID, &i.ZoneID, &i.AssetID, &i.RuleName, &dataJSON, &i.CreatedAt, &i.UpdatedAt, &resolvedAt, &i.AnalysisStatus, &i.Analysis, &insightsJSON, &actionsJSON, &analysisDataJSON, &analyzedAt); err != nil {
 			return nil, err
 		}
 
@@ -416,6 +442,18 @@ func (r *IncidentRepo) List(ctx context.Context, filters map[string]any) ([]mode
 		}
 		if dataJSON.Valid {
 			json.Unmarshal([]byte(dataJSON.String), &i.Data)
+		}
+		if insightsJSON.Valid {
+			json.Unmarshal([]byte(insightsJSON.String), &i.Insights)
+		}
+		if actionsJSON.Valid {
+			json.Unmarshal([]byte(actionsJSON.String), &i.Actions)
+		}
+		if analysisDataJSON.Valid {
+			json.Unmarshal([]byte(analysisDataJSON.String), &i.AnalysisData)
+		}
+		if analyzedAt.Valid {
+			i.AnalyzedAt = &analyzedAt.Time
 		}
 
 		incidents = append(incidents, i)
@@ -426,13 +464,17 @@ func (r *IncidentRepo) List(ctx context.Context, filters map[string]any) ([]mode
 
 func (r *IncidentRepo) Upsert(ctx context.Context, incident *model.Incident) error {
 	dataJSON, _ := json.Marshal(incident.Data)
+	insightsJSON, _ := json.Marshal(incident.Insights)
+	actionsJSON, _ := json.Marshal(incident.Actions)
+	analysisDataJSON, _ := json.Marshal(incident.AnalysisData)
 
 	_, err := r.db.ExecContext(ctx,
-		`INSERT OR REPLACE INTO incidents (id, title, description, severity, status, device_id, sensor_id, zone_id, asset_id, rule_name, data, created_at, updated_at, resolved_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT OR REPLACE INTO incidents (id, title, description, severity, status, device_id, sensor_id, zone_id, asset_id, rule_name, data, created_at, updated_at, resolved_at, analysis_status, analysis, insights, actions, analysis_data, analyzed_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		incident.ID, incident.Title, incident.Description, incident.Severity, incident.Status,
 		incident.DeviceID, incident.SensorID, incident.ZoneID, incident.AssetID, incident.RuleName,
-		string(dataJSON), incident.CreatedAt, incident.UpdatedAt, incident.ResolvedAt)
+		string(dataJSON), incident.CreatedAt, incident.UpdatedAt, incident.ResolvedAt,
+		incident.AnalysisStatus, incident.Analysis, string(insightsJSON), string(actionsJSON), string(analysisDataJSON), incident.AnalyzedAt)
 	return err
 }
 
