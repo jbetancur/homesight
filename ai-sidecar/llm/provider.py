@@ -144,16 +144,9 @@ class LLMProvider:
                 model_path = Path(__file__).parent.parent / model_path
 
             if not model_path.exists():
-                if self.config.local_auto_download:
-                    logger.info("Local model not found, attempting download...")
-                    if self._download_model(model_path):
-                        logger.info("Model downloaded successfully")
-                    else:
-                        logger.warning("Model download failed, local LLM unavailable")
-                        return
-                else:
-                    logger.warning(f"Local model not found: {model_path}")
-                    return
+                logger.error(f"Local model not found: {model_path}")
+                logger.error("Download the model using: scripts/download-model.sh")
+                return
 
             logger.info(f"Loading local LLM from {model_path}")
             self.local_llm = Llama(
@@ -169,40 +162,6 @@ class LLMProvider:
             logger.warning("llama-cpp-python not installed, local LLM unavailable")
         except Exception as e:
             logger.error(f"Failed to load local LLM: {e}")
-
-    def _download_model(self, model_path: Path) -> bool:
-        """Download model from HuggingFace"""
-        try:
-            from huggingface_hub import hf_hub_download
-            import os
-
-            model_path.parent.mkdir(parents=True, exist_ok=True)
-
-            # Default to Llama 3.2 3B
-            repo_id = "bartowski/Llama-3.2-3B-Instruct-GGUF"
-            filename = "Llama-3.2-3B-Instruct-Q4_K_M.gguf"
-
-            logger.info(f"Downloading {filename} from {repo_id}...")
-
-            hf_hub_download(
-                repo_id=repo_id,
-                filename=filename,
-                local_dir=str(model_path.parent),
-                local_dir_use_symlinks=False,
-                token=os.environ.get('HF_TOKEN')
-            )
-
-            temp_path = model_path.parent / filename
-            if temp_path.exists():
-                temp_path.rename(model_path)
-                logger.info(f"✅ Model downloaded: {model_path}")
-                return True
-
-            return False
-
-        except Exception as e:
-            logger.error(f"Model download failed: {e}")
-            return False
 
     def _prepare_openai_kwargs(
         self,

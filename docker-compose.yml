@@ -33,6 +33,9 @@ services:
       # survives container recreation and large files need not be baked into
       # the image.
       - /var/lib/homesight/rag:/var/lib/homesight/rag:rw
+      # Mount host models directory for Llama 3.2 3B model (~2GB)
+      # Pre-download model to /home/homesight/models/ to avoid re-downloading on container restarts
+      - /home/homesight/models:/home/homesight/models:rw
       - /etc/localtime:/etc/localtime:ro
       - /home/homesight/logs:/app/log:rw
     logging:

@@ -1,8 +1,9 @@
 #!/bin/bash
 # Interactive demo script that simulates sensor lifecycle with sensor data
 # Run this while watching the dashboard: ./scripts/homesight.sh dashboard
+HOST=10.0.20.175
 
-API_URL="http://localhost:8080/api"
+API_URL="http://${HOST}:8080/api"
 DEMO_HOME_ID="demo-home-$(date +%s)"
 
 # Colors
@@ -550,7 +551,7 @@ echo "  • AI will cite specific sources"
 echo "  • Check incidents view for recommendations"
 echo ""
 echo -e "${YELLOW}To check knowledge base status:${NC}"
-echo "  curl http://localhost:8001/rag/status | jq"
+echo "  curl http://${HOST}:8001/rag/status | jq"
 echo ""
 echo -e "${YELLOW}To clean up demo data:${NC}"
 echo "  ./scripts/cleanup-demo.sh"
@@ -560,12 +561,12 @@ echo "  ./scripts/homesight.sh dashboard"
 echo ""
 echo -e "${YELLOW}To manually inject sensor data:${NC}"
 echo "  # Inject a temperature reading"
-echo "  curl -X POST http://localhost:8080/api/devices/sensors/data \\\\"
+echo "  curl -X POST http://${HOST}:8080/api/devices/sensors/data \\\\"
 echo "    -H 'Content-Type: application/json' \\\\"
 echo "    -d '{\"sensor_id\": \"basement-temp-sensor-001-temp\", \"value\": 72, \"value_type\": \"float\", \"unit\": \"°F\"}'"
 echo ""
 echo "  # Inject a humidity reading"
-echo "  curl -X POST http://localhost:8080/api/devices/sensors/data \\\\"
+echo "  curl -X POST http://${HOST}:8080/api/devices/sensors/data \\\\"
 echo "    -H 'Content-Type: application/json' \\\\"
 echo "    -d '{\"sensor_id\": \"basement-temp-sensor-001-humidity\", \"value\": 55, \"value_type\": \"float\", \"unit\": \"%\"}'"
 echo ""

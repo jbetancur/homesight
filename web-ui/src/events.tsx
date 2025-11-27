@@ -1,6 +1,7 @@
 import React, { useEffect, useRef } from 'react';
 import { EventContext } from './eventContext';
 import type { EventCallback } from './eventContext';
+import { API_BASE_WITH_PATHS } from './apiConfig';
 
 export const EventProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const callbacksRef = useRef<EventCallback[]>([]);
@@ -10,7 +11,7 @@ export const EventProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   useEffect(() => {
     const connect = () => {
       console.log('🔌 Establishing SSE connection...');
-      const es = new window.EventSource('http://localhost:8080/api/events');
+      const es = new window.EventSource(`${API_BASE_WITH_PATHS}/events`);
       eventSourceRef.current = es;
 
       es.onopen = () => {

@@ -29,7 +29,6 @@ class LLMConfig(BaseModel):
 
     # Local LLM settings
     local_model_path: str = Field(default="./models/llama-3.2-3b-instruct.gguf")
-    local_auto_download: bool = True
     local_n_ctx: int = 4096
     local_n_threads: int = 4
     local_n_gpu_layers: int = 0
@@ -121,8 +120,6 @@ class Config(BaseModel):
             local_section = llm_section.get('local', {})
             if 'model_path' in local_section:
                 llm_config_data['local_model_path'] = local_section['model_path']
-            if 'auto_download' in local_section:
-                llm_config_data['local_auto_download'] = local_section['auto_download']
             if 'n_ctx' in local_section:
                 llm_config_data['local_n_ctx'] = local_section['n_ctx']
             if 'n_threads' in local_section:

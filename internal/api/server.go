@@ -16,6 +16,7 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/go-chi/cors"
 	"github.com/homesight/homesight/internal/ai"
+	"github.com/homesight/homesight/internal/config"
 	"github.com/homesight/homesight/internal/db"
 	"github.com/homesight/homesight/internal/discovery"
 	"github.com/homesight/homesight/internal/incidents"
@@ -36,6 +37,7 @@ type Server struct {
 	discoveryListener   *discovery.MQTTDiscoveryListener
 	discoveryMutex      sync.RWMutex
 	eventBus            *EventBus
+	cfg                 *config.Config
 }
 
 // NewServer creates a new API server
@@ -47,6 +49,7 @@ func NewServer(
 	knowledgeBaseRepo db.KnowledgeBaseRepository,
 	metricsSink metrics.MetricsSink,
 	aiClient ai.Client,
+	cfg *config.Config,
 ) *Server {
 	s := &Server{
 		router:            chi.NewRouter(),
@@ -58,6 +61,7 @@ func NewServer(
 		aiClient:          aiClient,
 		addr:              addr,
 		eventBus:          NewEventBus(),
+		cfg:               cfg,
 	}
 
 	s.setupRoutes()
@@ -183,12 +187,17 @@ func (s *Server) handleAIStatus(w http.ResponseWriter, r *http.Request) {
 
 // handlePrometheusStatus returns Prometheus health status
 func (s *Server) handlePrometheusStatus(w http.ResponseWriter, r *http.Request) {
+	promURL := "http://localhost:9090"
+	if s.cfg != nil && s.cfg.Prometheus.URL != "" {
+		promURL = s.cfg.Prometheus.URL
+	}
+
 	status := map[string]interface{}{
 		"name": "Prometheus",
-		"url":  "http://localhost:9090",
+		"url":  promURL,
 	}
 	promClient := &http.Client{Timeout: 1 * time.Second}
-	if resp, err := promClient.Get("http://localhost:9090/-/healthy"); err == nil {
+	if resp, err := promClient.Get(promURL + "/-/healthy"); err == nil {
 		resp.Body.Close()
 		if resp.StatusCode == 200 {
 			status["status"] = "healthy"

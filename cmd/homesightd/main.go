@@ -166,7 +166,7 @@ func main() {
 	go processEvents(ctx, eventBus, ruleEngine, incidentService, metricsSink)
 
 	// Start API server
-	server := api.NewServer(cfg.API.Addr, incidentService, deviceRepo, sensorRepo, knowledgeBaseRepo, metricsSink, aiClient)
+	server := api.NewServer(cfg.API.Addr, incidentService, deviceRepo, sensorRepo, knowledgeBaseRepo, metricsSink, aiClient, cfg)
 
 	// Set up generic MQTT discovery listener (supports Home Assistant, Homie, Tasmota, etc.)
 	// This will work with ANY connected MQTT broker

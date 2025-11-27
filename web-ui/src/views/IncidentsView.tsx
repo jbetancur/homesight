@@ -33,8 +33,9 @@ import { useEventSubscription } from '../useEventSubscription';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import rehypeSanitize from 'rehype-sanitize';
+import { API_BASE_WITH_PATHS } from '../apiConfig';
 
-const API_BASE = 'http://localhost:8080/api';
+const API_BASE = API_BASE_WITH_PATHS;
 // All AI routes are proxied through Go API at /api/ai/*
 
 function getSeverityColor(severity?: string) {

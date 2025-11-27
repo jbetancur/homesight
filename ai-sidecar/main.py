@@ -256,19 +256,6 @@ app = FastAPI(
     lifespan=lifespan
 )
 
-# CORS middleware - restricted to Go API only
-# Web UI now goes through Go API proxy (/api/ai/*)
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[
-        "http://localhost:8080",  # Go API server
-    ],
-    allow_credentials=True,
-    allow_methods=["GET", "POST"],
-    allow_headers=["Content-Type", "Authorization"],
-)
-
-
 # Health check
 @app.get("/health")
 async def health_check():
@@ -410,6 +397,18 @@ async def discover_device_docs(device: DeviceProfile, force: bool = False):
             result = await document_service.discover_and_ingest_device_docs(device, force=force)
             logger.info(f"Doc discovery complete: {result}")
 
+            # Verify documents are queryable before updating status
+            if result.get("status") == "success":
+                verified = await verify_documents_queryable(device)
+                if not verified:
+                    logger.error(f"Document verification failed for {device.manufacturer} {device.model}")
+                    result["status"] = "partial"
+                    result["verification_failed"] = True
+                else:
+                    # Force filesystem sync to ensure durability across container restarts
+                    await force_rag_sync()
+                    logger.info(f"✅ Documents verified and synced for {device.manufacturer} {device.model}")
+
             # Update device documentation status in Go backend
             logger.info(f"Updating device {device.id} docs status in Go backend...")
             await update_device_docs_status(device.id, result)
@@ -449,6 +448,73 @@ async def update_device_docs_status(device_id: str, discovery_result: dict):
         logger.error(f"Connection timeout updating device {device_id} docs status - backend may be unreachable")
     except Exception as e:
         logger.error(f"Error updating device docs status: {e}", exc_info=True)
+
+
+async def verify_documents_queryable(device) -> bool:
+    """
+    Verify that documents are actually queryable in ChromaDB.
+
+    This ensures that documents have been fully ingested and are available
+    for retrieval before we update the device status in the Go backend.
+    """
+    try:
+        if not rag_engine:
+            logger.warning("RAG engine not available for verification")
+            return False
+
+        # Try to retrieve device-specific documents from ChromaDB
+        results = rag_engine.collection.get(
+            where={
+                "$and": [
+                    {"manufacturer": device.manufacturer.title()},
+                    {"model": device.model}
+                ]
+            },
+            limit=1
+        )
+
+        doc_count = len(results.get('ids', []))
+        if doc_count > 0:
+            logger.info(f"✅ Verification successful: Found {doc_count} documents for {device.manufacturer} {device.model}")
+            return True
+        else:
+            logger.warning(f"⚠️  Verification failed: No documents found for {device.manufacturer} {device.model}")
+            return False
+
+    except Exception as e:
+        logger.error(f"Document verification query failed: {e}", exc_info=True)
+        return False
+
+
+async def force_rag_sync():
+    """
+    Force filesystem sync on RAG directory to ensure durability.
+
+    This addresses the Docker volume buffering issue where data might be
+    in OS buffers but not yet written to disk. Critical for container
+    restart scenarios.
+    """
+    try:
+        import os
+        config = get_config()
+        rag_path = Path(config.rag.persist_directory if hasattr(config, 'rag') else "./rag-db")
+
+        if not rag_path.exists():
+            logger.warning(f"RAG directory does not exist: {rag_path}")
+            return
+
+        # Open directory and force fsync to flush OS buffers to disk
+        fd = os.open(str(rag_path), os.O_RDONLY)
+        try:
+            os.fsync(fd)
+            logger.debug(f"RAG directory fsync completed: {rag_path}")
+        finally:
+            os.close(fd)
+
+    except Exception as e:
+        # Log warning but don't fail - this is a safety measure
+        # that degrades gracefully if OS doesn't support it
+        logger.warning(f"Failed to fsync RAG directory (non-critical): {e}")
 
 
 # Incident event handler (background analysis)
@@ -532,7 +598,8 @@ async def analyze_incident_background(incident_data: dict, callback_url: Optiona
 
         # Save analysis to Go backend database via HTTP PATCH
         try:
-            go_backend_url = os.getenv("BACKEND_URL", "http://localhost:8080")
+            config = get_config()
+            go_backend_url = config.backend_url
             async with httpx.AsyncClient(timeout=10.0) as client:
                 await client.patch(
                     f"{go_backend_url}/api/incidents/{incident_id}/analysis",
@@ -553,7 +620,8 @@ async def analyze_incident_background(incident_data: dict, callback_url: Optiona
 
         # Save error status to Go backend database
         try:
-            go_backend_url = os.getenv("BACKEND_URL", "http://localhost:8080")
+            config = get_config()
+            go_backend_url = config.backend_url
             async with httpx.AsyncClient(timeout=10.0) as client:
                 await client.patch(
                     f"{go_backend_url}/api/incidents/{incident_id}/analysis",

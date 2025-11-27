@@ -4,8 +4,9 @@ import { Stack, Title, Text, Card, Group, Badge, Loader, Button, Table, Paper, T
 import { ArrowLeft, FileText, Activity, Droplets, Thermometer } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import { useEventSubscription } from '../useEventSubscription';
+import { API_BASE_WITH_PATHS } from '../apiConfig';
 
-const API_BASE = 'http://localhost:8080/api';
+const API_BASE = API_BASE_WITH_PATHS;
 
 interface Sensor {
   id: string;

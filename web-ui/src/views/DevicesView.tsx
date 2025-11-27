@@ -4,8 +4,9 @@ import { useNavigate } from 'react-router-dom';
 import { Table, Badge, Loader, Stack, Title, Text, Card, Group, Paper, Button, Modal, ActionIcon, Tooltip, ScrollArea } from '@mantine/core';
 import { Wifi, CheckCircle, Activity, Trash2, RefreshCw, FileText } from 'lucide-react';
 import { useEventSubscription } from '../useEventSubscription';
+import { API_BASE_WITH_PATHS } from '../apiConfig';
 
-const API_BASE = 'http://localhost:8080/api';
+const API_BASE = API_BASE_WITH_PATHS;
 
 function getDeviceStatus(lastSeen: string) {
   const lastSeenDate = new Date(lastSeen);

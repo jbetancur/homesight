@@ -21,8 +21,8 @@ import {
   XCircle,
   Clock,
 } from 'lucide-react';
+import { API_BASE_WITH_PATHS } from '../apiConfig';
 
-const API_BASE = 'http://localhost:8080';
 
 interface ServiceStatus {
   name: string;
@@ -168,7 +168,7 @@ export function StatusView() {
 
   const fetchServiceStatus = async (serviceName: keyof SystemStatus['services']) => {
     try {
-      const response = await fetch(`${API_BASE}/api/status/${serviceName}`);
+      const response = await fetch(`${API_BASE_WITH_PATHS}/status/${serviceName}`);
       if (!response.ok) {
         throw new Error(`HTTP error! status: ${response.status}`);
       }
