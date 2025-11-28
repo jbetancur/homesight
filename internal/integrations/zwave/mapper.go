@@ -8,9 +8,9 @@ import (
 )
 
 // MapNodeToDevice converts a Z-Wave node to a HomeSight device
-func MapNodeToDevice(node *ZWaveNode, homeID int) *model.Device {
-	// Generate stable device ID: zwave-{homeId}-{nodeId}
-	deviceID := fmt.Sprintf("zwave-%d-%d", homeID, node.NodeID)
+func MapNodeToDevice(node *ZWaveNode, homeID uint32) *model.Device {
+	// Generate stable device ID: zwave-{nodeId}
+	deviceID := fmt.Sprintf("zwave-%d", node.NodeID)
 
 	// Extract manufacturer/model from device database
 	manufacturer := node.DeviceConfig.Manufacturer
@@ -32,6 +32,7 @@ func MapNodeToDevice(node *ZWaveNode, homeID int) *model.Device {
 		"firmware":        node.FirmwareVersion,
 		"security":        node.Security,
 		"node_id":         fmt.Sprintf("%d", node.NodeID),
+		"home_id":         fmt.Sprintf("0x%08x", homeID),
 		"interview_stage": fmt.Sprintf("%d", node.InterviewStage),
 		"is_listening":    fmt.Sprintf("%t", node.IsListening),
 		"supports_beaming": fmt.Sprintf("%t", node.SupportsBeaming),
@@ -248,4 +249,96 @@ func ExtractCapabilities(node *ZWaveNode) []string {
 	}
 
 	return capabilities
+}
+
+// ExtractDeviceState extracts current state from a Z-Wave node
+// Returns a map suitable for device.State field
+func ExtractDeviceState(node *ZWaveNode) map[string]interface{} {
+	state := make(map[string]interface{})
+
+	// Extract battery percentage
+	if level, ok := findBatteryLevel(node); ok {
+		state["battery"] = level
+	}
+
+	// Extract state from values (stored during events)
+	// Note: Values are updated dynamically via value_updated events
+	if valuesMap, ok := node.Values.(map[string]interface{}); ok {
+		// Look for common state values
+		for key, value := range valuesMap {
+			keyLower := strings.ToLower(key)
+
+			// Binary states (leak, motion, contact, tamper)
+			if strings.Contains(keyLower, "leak") || strings.Contains(keyLower, "water") {
+				if boolVal, ok := value.(bool); ok {
+					state["leak"] = boolVal
+				}
+			}
+
+			if strings.Contains(keyLower, "motion") {
+				if boolVal, ok := value.(bool); ok {
+					state["motion"] = boolVal
+				}
+			}
+
+			if strings.Contains(keyLower, "contact") || strings.Contains(keyLower, "door") || strings.Contains(keyLower, "window") {
+				if boolVal, ok := value.(bool); ok {
+					state["contact"] = boolVal
+				}
+			}
+
+			if strings.Contains(keyLower, "tamper") {
+				if boolVal, ok := value.(bool); ok {
+					state["tamper"] = boolVal
+				}
+			}
+
+			// Numeric sensors
+			if strings.Contains(keyLower, "temperature") {
+				if floatVal, ok := value.(float64); ok {
+					state["temperature"] = floatVal
+				}
+			}
+
+			if strings.Contains(keyLower, "humidity") {
+				if floatVal, ok := value.(float64); ok {
+					state["humidity"] = floatVal
+				}
+			}
+
+			if strings.Contains(keyLower, "power") {
+				if floatVal, ok := value.(float64); ok {
+					state["power"] = floatVal
+				}
+			}
+
+			if strings.Contains(keyLower, "energy") {
+				if floatVal, ok := value.(float64); ok {
+					state["energy"] = floatVal
+				}
+			}
+
+			// On/off state
+			if strings.Contains(keyLower, "currentvalue") || strings.Contains(keyLower, "state") {
+				if boolVal, ok := value.(bool); ok {
+					state["on"] = boolVal
+				} else if intVal, ok := value.(int); ok {
+					state["on"] = intVal > 0
+				} else if floatVal, ok := value.(float64); ok {
+					state["on"] = floatVal > 0
+				}
+			}
+
+			// Brightness level
+			if strings.Contains(keyLower, "level") || strings.Contains(keyLower, "brightness") {
+				if intVal, ok := value.(int); ok {
+					state["brightness"] = intVal
+				} else if floatVal, ok := value.(float64); ok {
+					state["brightness"] = int(floatVal)
+				}
+			}
+		}
+	}
+
+	return state
 }

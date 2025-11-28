@@ -17,6 +17,7 @@ import (
 	"github.com/homesight/homesight/internal/events"
 	"github.com/homesight/homesight/internal/incidents"
 	"github.com/homesight/homesight/internal/integrations"
+	"github.com/homesight/homesight/internal/integrations/zwave"
 	"github.com/homesight/homesight/internal/metrics"
 	"github.com/homesight/homesight/internal/model"
 	"github.com/homesight/homesight/internal/rules"
@@ -142,6 +143,23 @@ func main() {
 		lanIntegration := integrations.NewLANIntegration()
 		activeIntegrations = append(activeIntegrations, lanIntegration)
 		log.Println("LAN integration enabled")
+	}
+
+	// Initialize Z-Wave integration (separate service, not using Integration interface)
+	var zwaveService *zwave.Service
+	if cfg.Integrations.ZWave {
+		zwaveService = zwave.NewService(
+			cfg.ZWave.WebSocketURL,
+			deviceRepo,
+			eventBus,
+			incidentService,
+		)
+		if err := zwaveService.Start(); err != nil {
+			log.Printf("Failed to start Z-Wave integration: %v", err)
+		} else {
+			log.Printf("Z-Wave integration enabled (WebSocket: %s)", cfg.ZWave.WebSocketURL)
+		}
+		defer zwaveService.Stop()
 	}
 
 	// Start integration subscriptions

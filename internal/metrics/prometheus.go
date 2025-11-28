@@ -3,6 +3,7 @@ package metrics
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/homesight/homesight/internal/model"
@@ -34,6 +35,16 @@ func NewPrometheusMetricsSink(prometheusURL string) (*PrometheusMetricsSink, err
 	}, nil
 }
 
+// sanitizeMetricName converts a sensor ID to a valid Prometheus metric name
+// Prometheus metric names must match [a-zA-Z_:][a-zA-Z0-9_:]*
+func sanitizeMetricName(sensorID string) string {
+	// Replace hyphens and other invalid characters with underscores
+	sanitized := strings.ReplaceAll(sensorID, "-", "_")
+	sanitized = strings.ReplaceAll(sanitized, ".", "_")
+	sanitized = strings.ReplaceAll(sanitized, " ", "_")
+	return sanitized
+}
+
 // Record stores a metric data point
 func (s *PrometheusMetricsSink) Record(ctx context.Context, sensorID string, ts time.Time, value float64, labels map[string]string) error {
 	gauge, ok := s.gauges[sensorID]
@@ -43,8 +54,11 @@ func (s *PrometheusMetricsSink) Record(ctx context.Context, sensorID string, ts 
 			promLabels[k] = v
 		}
 
+		// Sanitize the metric name to be Prometheus-compliant
+		metricName := sanitizeMetricName(sensorID)
+
 		gauge = promauto.NewGauge(prometheus.GaugeOpts{
-			Name:        fmt.Sprintf("homesight_sensor_%s", sensorID),
+			Name:        fmt.Sprintf("homesight_sensor_%s", metricName),
 			Help:        fmt.Sprintf("Sensor reading for %s", sensorID),
 			ConstLabels: promLabels,
 		})
@@ -57,7 +71,8 @@ func (s *PrometheusMetricsSink) Record(ctx context.Context, sensorID string, ts 
 
 // Query retrieves metrics for a sensor within a time range
 func (s *PrometheusMetricsSink) Query(ctx context.Context, sensorID string, from, to time.Time) ([]model.MetricPoint, error) {
-	query := fmt.Sprintf(`homesight_sensor_%s`, sensorID)
+	metricName := sanitizeMetricName(sensorID)
+	query := fmt.Sprintf(`homesight_sensor_%s`, metricName)
 	r := promv1.Range{
 		Start: from,
 		End:   to,

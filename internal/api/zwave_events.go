@@ -99,7 +99,7 @@ func (s *Server) syncZWaveNode(node *zwave.ZWaveNode) {
 	homeID := s.zwaveHomeID
 	s.zwaveMutex.RUnlock()
 
-	device := zwave.MapNodeToDevice(node, homeID)
+	device := zwave.MapNodeToDevice(node, uint32(homeID))
 
 	// Check if device already exists
 	existing, err := s.deviceRepo.Get(context.Background(), device.ID)
@@ -163,7 +163,7 @@ func (s *Server) handleZWaveNodeReady(event zwave.Event) {
 	homeID := s.zwaveHomeID
 	s.zwaveMutex.RUnlock()
 
-	device := zwave.MapNodeToDevice(node, homeID)
+	device := zwave.MapNodeToDevice(node, uint32(homeID))
 	device.LastSeen = time.Now()
 	device.CreatedAt = time.Now()
 	device.UpdatedAt = time.Now()
@@ -203,15 +203,13 @@ func (s *Server) handleZWaveValueUpdated(event zwave.Event) {
 	property, _ := args["property"].(string)
 	newValue := args["newValue"]
 
-	// Generate device ID
-	s.zwaveMutex.RLock()
-	homeID := s.zwaveHomeID
-	s.zwaveMutex.RUnlock()
-	deviceID := fmt.Sprintf("zwave-%d-%d", homeID, nodeID)
+	// Use new device ID format (matches service.go)
+	deviceID := fmt.Sprintf("zwave-%d", nodeID)
 
 	// Get device
 	device, err := s.deviceRepo.Get(context.Background(), deviceID)
-	if err != nil {
+	if err != nil || device == nil {
+		// Device not found, skip update
 		return
 	}
 
@@ -276,15 +274,12 @@ func (s *Server) handleZWaveNotification(event zwave.Event) {
 	label, _ := args["label"].(string)
 	eventLabel, _ := args["eventLabel"].(string)
 
-	// Generate device ID
-	s.zwaveMutex.RLock()
-	homeID := s.zwaveHomeID
-	s.zwaveMutex.RUnlock()
-	deviceID := fmt.Sprintf("zwave-%d-%d", homeID, nodeID)
+	// Use new device ID format
+	deviceID := fmt.Sprintf("zwave-%d", nodeID)
 
 	// Get device
 	device, err := s.deviceRepo.Get(context.Background(), deviceID)
-	if err != nil {
+	if err != nil || device == nil {
 		log.Printf("[ZWAVE] Device not found for node %d", nodeID)
 		return
 	}
@@ -339,13 +334,10 @@ func (s *Server) handleZWaveNodeDead(event zwave.Event) {
 		return
 	}
 
-	s.zwaveMutex.RLock()
-	homeID := s.zwaveHomeID
-	s.zwaveMutex.RUnlock()
-	deviceID := fmt.Sprintf("zwave-%d-%d", homeID, int(nodeID))
+	deviceID := fmt.Sprintf("zwave-%d", int(nodeID))
 
 	device, err := s.deviceRepo.Get(context.Background(), deviceID)
-	if err != nil {
+	if err != nil || device == nil {
 		return
 	}
 
@@ -363,13 +355,10 @@ func (s *Server) handleZWaveNodeAlive(event zwave.Event) {
 		return
 	}
 
-	s.zwaveMutex.RLock()
-	homeID := s.zwaveHomeID
-	s.zwaveMutex.RUnlock()
-	deviceID := fmt.Sprintf("zwave-%d-%d", homeID, int(nodeID))
+	deviceID := fmt.Sprintf("zwave-%d", int(nodeID))
 
 	device, err := s.deviceRepo.Get(context.Background(), deviceID)
-	if err != nil {
+	if err != nil || device == nil {
 		return
 	}
 
