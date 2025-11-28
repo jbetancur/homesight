@@ -104,7 +104,7 @@ export function DevicesView() {
       });
 
       if (response.ok) {
-        const data = await response.json();
+        // const data = await response.json();
         // Only set loading state after confirming the request succeeded
         setReingestingId(deviceId);
         // Don't clear loading state yet - wait for device SSE update with final status
@@ -184,15 +184,15 @@ export function DevicesView() {
                   <Table.Th>Integration</Table.Th>
                   <Table.Th>Manufacturer</Table.Th>
                   <Table.Th>Model</Table.Th>
-                  <Table.Th>Status</Table.Th>
-                  <Table.Th>Last Seen</Table.Th>
+                  {/* <Table.Th>Status</Table.Th>
+                  <Table.Th>Last Seen</Table.Th> */}
                   <Table.Th>Documentation</Table.Th>
                   <Table.Th style={{ textAlign: 'center' }}>Actions</Table.Th>
                 </Table.Tr>
               </Table.Thead>
               <Table.Tbody>
                 {devices.map((device: any) => {
-                  const status = getDeviceStatus(device.last_seen);
+                  // const status = getDeviceStatus(device.last_seen);
                   return (
                     <Table.Tr key={device.id} style={{ cursor: 'pointer' }} onClick={() => navigate(`/devices/${device.id}/overview`)}>
                       <Table.Td>
@@ -209,14 +209,14 @@ export function DevicesView() {
                       </Table.Td>
                       <Table.Td>{device.metadata?.manufacturer || '-'}</Table.Td>
                       <Table.Td>{device.metadata?.model || '-'}</Table.Td>
-                      <Table.Td>
+                      {/* <Table.Td>
                         <Badge color={status.color}>{status.label}</Badge>
-                      </Table.Td>
-                      <Table.Td>
+                      </Table.Td> */}
+                      {/* <Table.Td>
                         <Text size="sm" c="dimmed">
                           {new Date(device.last_seen).toLocaleString()}
                         </Text>
-                      </Table.Td>
+                      </Table.Td> */}
                       <Table.Td>
                         <Tooltip label={device.docs_ingested ? `Ingested at ${new Date(device.docs_ingested_at).toLocaleString()}` : 'Awaiting documentation ingestion'}>
                           <Group gap="xs">

@@ -41,20 +41,3 @@ function getAPIBase(): string {
 
 export const API_BASE = getAPIBase();
 export const API_BASE_WITH_PATHS = `${API_BASE}/api`;
-
-/**
- * How it works:
- *
- * This auto-detects the backend URL based on where the frontend is running.
- *
- * Examples:
- *   Frontend on 10.0.20.175:5173 → API calls go to http://10.0.20.175:8080/api
- *   Frontend on localhost:3000 → API calls go to http://localhost:8080/api
- *   Frontend on example.com:443 → API calls go to https://example.com:443/api
- *
- * The assumption: Backend always runs on :8080 (or same port as frontend in production)
- *
- * Override if needed:
- *   - Set VITE_API_BASE=http://custom-server:8080 before running npm
- *   - Or inject at runtime: window.__API_BASE__ = 'http://your-server:8080'
- */

@@ -9,6 +9,9 @@ Clean, modular architecture with:
 - Hybrid LLM support (OpenAI + local fallback)
 """
 
+from dotenv import load_dotenv
+load_dotenv()
+
 from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
@@ -145,6 +148,12 @@ async def lifespan(app: FastAPI):
         else:
             logger.error("❌ No LLM available!")
 
+        # Initialize manufacturer domain registry
+        logger.info("Initializing manufacturer domain registry...")
+        from rag.manufacturer_domains import initialize_known_domains
+        initialize_known_domains()
+        logger.info("✅ Manufacturer domain registry initialized")
+
         # Initialize services
         session_service = SessionService(session_timeout_minutes=60)
         chat_service = ChatService(
@@ -241,10 +250,25 @@ async def lifespan(app: FastAPI):
     # Start health status updater in background
     health_task = asyncio.create_task(update_health_status())
 
+    # Optionally start vendor indexer (background documentation crawler)
+    vendor_indexer_task = None
+    if config.search.enable_vendor_indexer:
+        try:
+            logger.info("Starting vendor indexer (background documentation crawler)...")
+            from vendor_indexer import start_background_indexer
+            vendor_indexer_task = asyncio.create_task(start_background_indexer())
+            logger.info("✅ Vendor indexer started")
+        except Exception as e:
+            logger.warning(f"Failed to start vendor indexer: {e}")
+
     yield
 
-    # Cancel background task on shutdown
+    # Cancel background tasks on shutdown
     health_task.cancel()
+    if vendor_indexer_task:
+        logger.info("Stopping vendor indexer...")
+        from vendor_indexer import stop_background_indexer
+        await stop_background_indexer()
     logger.info("Shutting down HomeSight AI Service")
 
 

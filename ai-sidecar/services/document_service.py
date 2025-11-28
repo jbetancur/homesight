@@ -10,6 +10,7 @@ Strategy:
 import logging
 import asyncio
 import time
+import os
 from typing import Dict, Any, Optional, List
 from pathlib import Path
 from rag.fetcher import DocumentAutoFetcher
@@ -49,17 +50,23 @@ class DocumentService:
         openai_api_key: Optional[str] = None
     ):
         self.rag = rag_engine
-        self.cache_dir = cache_dir or Path.home() / ".homesight" / "manuals"
+        self.cache_dir = cache_dir or Path.home() / "homesight" / "manuals"
         self.cache_dir.mkdir(parents=True, exist_ok=True)
 
         config = get_config()
         self.config = config
         self.openai_api_key = openai_api_key
 
+        # Get search API keys from config or environment
+        brave_api_key = getattr(config.search, 'brave_api_key', None) or os.environ.get('BRAVE_SEARCH_API_KEY')
+        bing_api_key = getattr(config.search, 'bing_api_key', None) or os.environ.get('BING_SEARCH_API_KEY')
+
         self.fetcher = DocumentAutoFetcher(
             rag_engine=rag_engine,
             cache_dir=self.cache_dir,
             openai_api_key=openai_api_key,
+            brave_api_key=brave_api_key,
+            bing_api_key=bing_api_key,
             rag_config=config.rag
         )
 

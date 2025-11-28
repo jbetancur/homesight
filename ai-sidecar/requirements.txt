@@ -3,9 +3,9 @@ uvicorn[standard]==0.38.0
 pydantic==2.12.4
 pyyaml==6.0.3
 openai==2.8.1
-tenacity==9.0.0  # Retry logic with exponential backoff
+tenacity==9.0.0
 prometheus-client==0.23.1
-psutil==6.1.0  # System resource monitoring for queue throttling
+psutil==6.1.0
 
 # RAG Dependencies
 chromadb==1.3.5
@@ -13,11 +13,14 @@ fastembed==0.7.3
 pypdf==6.3.0
 httpx==0.28.1
 beautifulsoup4==4.14.2
+readability-lxml==0.8.1
+lxml[html_clean]==5.2.1
 
-# Local LLM support (required for inference)
+# PDF Extractors
+pdfminer.six==20240706
+PyMuPDF==1.23.26
+pytesseract==0.3.10
+
+# Local LLM support
 llama-cpp-python==0.3.16
-huggingface-hub==0.27.1  # Latest compatible with fastembed<1.0 requirement
-
-# Optional: PDF conversion from HTML
-# Uncomment to enable wkhtmltopdf-based PDF conversion
-# pdfkit==1.0.0
+huggingface-hub==0.27.1

@@ -4,7 +4,7 @@ Dynamic documentation URL discovery and caching system.
 Instead of maintaining a static database, this system uses OpenAI to discover
 documentation URLs on first encounter, then caches them locally for fast retrieval.
 
-Cache format: ~/.homesight/doc_urls.json
+Cache format: ~/homesight/doc_urls.json
 {
   "Aqara:SJCGQ11LM": {
     "url": "https://cdn.aqara.com/...",
@@ -28,7 +28,7 @@ class URLCache:
 
     def __init__(self, cache_file: Path = None):
         if cache_file is None:
-            cache_file = Path.home() / ".homesight" / "doc_urls.json"
+            cache_file = Path.home() / "homesight" / "doc_urls.json"
 
         self.cache_file = cache_file
         self.cache_file.parent.mkdir(parents=True, exist_ok=True)

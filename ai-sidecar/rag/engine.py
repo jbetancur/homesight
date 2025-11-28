@@ -26,12 +26,10 @@ from metrics import rag_retrieval_duration, rag_retrievals
 class RAGEngine:
     """RAG engine using ChromaDB with FastEmbed for fully offline operation"""
 
-    def __init__(self, persist_directory: str = "./rag-db", openai_api_key: Optional[str] = None):
+    def __init__(self, persist_directory: str = "./rag-db"):
         """
         Initialize RAG engine with persistent storage and local FastEmbed embeddings
 
-        Note: openai_api_key parameter kept for backwards compatibility but not used for embeddings.
-        OpenAI may still be used elsewhere (e.g., document fetching).
         """
         self.persist_directory = Path(persist_directory)
         self.persist_directory.mkdir(parents=True, exist_ok=True)

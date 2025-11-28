@@ -24,6 +24,8 @@ class SourceType(Enum):
     OFFICIAL_PDF = "official_pdf"
     AI_GENERATED = "ai_generated"
     TRAINING_DATA = "training_data"
+    VENDOR_INDEX = "vendor_index"  # Tier 1
+    WEB_SEARCH = "web_search"  # Tier 2
 
 
 @dataclass
@@ -41,6 +43,8 @@ class IngestionRecord:
     duration_seconds: float = 0.0
     status: str = "pending"  # pending, success, failed
     error_message: Optional[str] = None
+    discovery_tier: Optional[str] = None  # "tier1_vendor_index", "tier2_web_search", "tier3_llm_ranked", "tier4_ai_fallback"
+    vendor_index_hits: int = 0  # Number of indexed docs found
 
     def __post_init__(self):
         if not self.timestamp:

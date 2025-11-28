@@ -24,11 +24,14 @@ services:
     container_name: homesight-ai-sidecar
     ports:
       - "8001:8001"
+    env_file:
+      - .env      
     environment:
       - BACKEND_URL=http://host.docker.internal:8080
+      - BRAVE_SEARCH_API_KEY=${BRAVE_SEARCH_API_KEY}
     volumes:
       - ./config.yaml:/app/config.yaml:ro
-      - /var/lib/homesight/manuals:/root/.homesight/manuals:rw
+      - /var/lib/homesight/manuals:/root/homesight/manuals:rw
       # Persist RAG database and downloaded models on the host so data
       # survives container recreation and large files need not be baked into
       # the image.

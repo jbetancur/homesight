@@ -86,3 +86,5 @@ prometheus-data/
 web-ui/node_modules/
 web-ui/dist/
 web-ui/.vite/
+
+.env

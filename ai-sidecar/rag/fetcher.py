@@ -2,12 +2,15 @@
 Auto-fetch device documentation from manufacturer websites.
 
 This module automatically downloads manuals when devices are discovered.
-Zero configuration required – uses LLM + heuristics to intelligently find documentation.
+Zero configuration required – uses a robust tiered discovery pipeline.
 
-Hybrid strategy:
-- Prefer official manufacturer PDFs
-- Use brand-specific fetchers where patterns are known (e.g. Aqara, Zooz, Shelly)
-- Fall back to generic LLM-assisted + search-based discovery
+NEW ARCHITECTURE (Tier-based Discovery):
+Tier 1: Vendor Index (persistent, manufacturer-specific catalog)
+Tier 2: Web Search API
+Tier 3: LLM-assisted ranking and validation (NOT URL guessing)
+Tier 4: AI-generated fallback documentation
+
+This replaces the old LLM URL guessing + HTML scraping approach.
 """
 
 import asyncio
@@ -16,14 +19,24 @@ import logging
 import os
 from pathlib import Path
 from typing import Optional, List, Dict, Tuple
+from datetime import datetime
 
+import fitz  # PyMuPDF
+from pdfminer.high_level import extract_text as pdfminer_extract_text
+from PIL import Image
+import io
+import pytesseract
 import httpx
+from .html_fetcher import fetch_html
 from bs4 import BeautifulSoup
 import pypdf
 import tempfile
 import urllib.parse
 
 from .url_cache import URLCache
+from .search_api import SearchAPI, SearchResult
+from .manufacturer_domains import get_manufacturer_domains, register_discovered_domain
+from vendor_indexer import VendorDocumentStorage, VendorIndexScheduler, get_scheduler
 
 logger = logging.getLogger(__name__)
 
@@ -57,12 +70,24 @@ async def get_known_manufacturer_url(manufacturer: str, model: str) -> Optional[
 
 
 # --------------------------------------------------------------------------------------
-# LLM helper: find manufacturer docs & metadata
+# LLM helper: Ranking, validation, and keyword generation (NOT URL guessing)
 # --------------------------------------------------------------------------------------
 
 
 class LLMDocumentFinder:
-    """Use LLM to intelligently find manufacturer documentation and doc patterns."""
+    """
+    Use LLM for document discovery assistance.
+
+    NEW ROLE:
+    - Generate search keywords and synonyms
+    - Rank search results by relevance
+    - Validate document quality
+    - Extract model variants/aliases
+
+    NO LONGER DOES:
+    - URL guessing (moved to search APIs)
+    - Domain inference (moved to manufacturer_domains.py)
+    """
 
     def __init__(self, openai_api_key: Optional[str] = None):
         self.api_key = openai_api_key or os.getenv("OPENAI_API_KEY")
@@ -90,116 +115,62 @@ class LLMDocumentFinder:
         )
         return resp.choices[0].message.content or ""
 
-    async def infer_manufacturer_metadata(self, manufacturer: str) -> Dict[str, str]:
-        """
-        Ask the LLM for high-level manufacturer metadata:
-        - canonical name
-        - primary website/domain
-        - docs/support base URL pattern
-
-        This is used to constrain search (site:domain) and generate
-        better candidate URLs.
-        """
-        if not self.enabled:
-            return {}
-
-        system = (
-            "You are an expert at identifying official manufacturer websites and "
-            "documentation entrypoints. Respond ONLY with strict JSON. Do NOT guess if uncertain."
-        )
-        user = f"""
-Identify metadata for this manufacturer:
-
-Manufacturer: "{manufacturer}"
-
-Return JSON ONLY in this format:
-{{
-  "canonical_name": "Full Canonical Name or empty if unknown",
-  "primary_domain": "https://example.com or empty if unknown",
-  "support_or_docs_base": "https://example.com/support or https://example.com/docs or empty if unknown"
-}}
-If you are not at least reasonably confident, return empty strings for fields.
-"""
-
-        try:
-            content = await self._chat(system, user)
-            # Strip code fences if present
-            if "```" in content:
-                start = content.find("{")
-                end = content.rfind("}") + 1
-                if start != -1 and end > start:
-                    content = content[start:end]
-
-            meta = json.loads(content)
-            if not isinstance(meta, dict):
-                return {}
-            return {
-                "canonical_name": meta.get("canonical_name") or "",
-                "primary_domain": meta.get("primary_domain") or "",
-                "support_or_docs_base": meta.get("support_or_docs_base") or "",
-            }
-        except Exception as e:
-            logger.error(f"LLM metadata inference failed for {manufacturer}: {e}")
-            return {}
-
-    async def find_documentation_url(
+    async def generate_search_keywords(
         self,
         manufacturer: str,
         model: str,
-        device_type: Optional[str] = None,
-        preferred_domain: Optional[str] = None,
-    ) -> Tuple[Optional[str], List[str]]:
+        device_type: Optional[str] = None
+    ) -> List[str]:
         """
-        Intelligently find an official documentation URL using the LLM.
+        Generate search keywords and model variants/synonyms.
 
-        Strategy:
-        1. Ask LLM for likely documentation URLs & search queries.
-        2. Validate URLs via HTTP HEAD/GET.
-        3. Return a (url, search_queries) tuple.
+        This helps find documentation when manufacturers use different
+        naming conventions or model variants.
 
-        NOTE: We always validate URLs; if they 404, we ignore them.
+        Args:
+            manufacturer: Manufacturer name
+            model: Model number
+            device_type: Optional device type
+
+        Returns:
+            List of search keyword strings
         """
         if not self.enabled:
-            logger.warning("LLM document finder not enabled - no API key")
-            return None, []
-
-        device_info = f"{manufacturer} {model}"
-        if device_type:
-            device_info += f" ({device_type})"
-
-        manufacturer = manufacturer.strip()
-        model = model.strip()
+            # Fallback: basic keywords
+            return [
+                f"{manufacturer} {model} manual pdf",
+                f"{manufacturer} {model} user guide",
+                f"{manufacturer} {model} documentation"
+            ]
 
         system = (
-            "You are an expert at finding OFFICIAL manufacturer documentation and product manuals.\n"
-            "You MUST NOT invent or guess non-existent URLs. Only return URLs that are highly likely to exist, "
-            "based on known patterns or widely referenced documentation.\n"
-            "If unsure, keep 'expected_doc_url' and 'pdf_manual_url' empty and rely on 'search_queries'.\n"
-            "Respond with STRICT JSON only."
+            "You are an expert at device documentation search. Generate search keywords "
+            "that will help find official manuals. Include model variants, common "
+            "alternative names, and document type keywords. Respond with JSON only."
         )
 
         user = f"""
-Find official documentation for this device:
+Generate search keywords for finding documentation for:
 
-Device: "{device_info}"
+Manufacturer: {manufacturer}
+Model: {model}
+Type: {device_type or 'unknown'}
 
-If you know the manufacturer documentation patterns, include them.
-Only include URLs that are typical/likely for the official site. If not reasonably confident, leave URL fields empty.
-
-Return JSON ONLY in this format:
+Return JSON in this format:
 {{
-  "manufacturer_name": "Full name if known, else empty",
-  "manufacturer_website": "https://... or empty",
-  "doc_base_url": "https://... documentation or support base URL, or empty",
-  "expected_doc_url": "https://... likely product documentation page (HTML), or empty",
-  "pdf_manual_url": "https://... direct PDF link if known, or empty",
-  "search_queries": [
-    "site:manufacturer.com {manufacturer} {model} manual pdf",
-    "site:manufacturer.com {model} documentation"
+  "keywords": [
+    "{manufacturer} {model} manual pdf",
+    "{manufacturer} {model} user guide",
+    "...additional search queries..."
   ],
-  "confidence": "high|medium|low",
-  "notes": "Brief notes on where docs are usually located"
+  "model_variants": ["{model}", "...possible variants..."]
 }}
+
+Include:
+- Full product name variations
+- Model number with/without hyphens
+- Common abbreviations
+- Document types (manual, guide, datasheet, installation)
 """
 
         try:
@@ -211,34 +182,118 @@ Return JSON ONLY in this format:
                     content = content[start:end]
 
             result = json.loads(content)
-            if not isinstance(result, dict):
-                return None, []
+            keywords = result.get("keywords", [])
 
-            # If we have a preferred domain from the caller, rewrite search queries to constrain site:
-            search_queries = result.get("search_queries", []) or []
-            if preferred_domain:
-                domain = preferred_domain.replace("https://", "").replace("http://", "").strip("/")
-                constrained_queries = []
-                for q in search_queries:
-                    if f"site:{domain}" not in q:
-                        constrained_queries.append(f"site:{domain} {q}")
-                    else:
-                        constrained_queries.append(q)
-                search_queries = constrained_queries
+            # Always include basic fallback
+            if not keywords:
+                keywords = [
+                    f"{manufacturer} {model} manual pdf",
+                    f"{manufacturer} {model} user guide"
+                ]
 
-            # Validate candidate URLs in order of specificity
-            for key in ("pdf_manual_url", "expected_doc_url", "doc_base_url"):
-                url = result.get(key) or None
-                if url and await url_exists(url):
-                    logger.info(f"LLM suggested {key} for {device_info}: {url}")
-                    return url, search_queries
-
-            logger.info(f"LLM could not find direct URL for {device_info}, falling back to search queries.")
-            return None, search_queries
+            return keywords[:5]  # Limit to top 5
 
         except Exception as e:
-            logger.error(f"Error using LLM to find documentation: {e}")
-            return None, []
+            logger.debug(f"LLM keyword generation failed: {e}")
+            return [
+                f"{manufacturer} {model} manual pdf",
+                f"{manufacturer} {model} user guide"
+            ]
+
+    async def rank_search_results(
+        self,
+        manufacturer: str,
+        model: str,
+        results: List[SearchResult]
+    ) -> List[SearchResult]:
+        """
+        Rank search results by relevance to the device.
+
+        Uses LLM to assess which results are most likely to be
+        official manufacturer documentation.
+
+        Args:
+            manufacturer: Manufacturer name
+            model: Model number
+            results: List of SearchResult objects
+
+        Returns:
+            Ranked list of SearchResult objects (best first)
+        """
+        if not self.enabled or not results:
+            # Fallback: sort by existing relevance scores
+            return sorted(results, key=lambda r: r.relevance_score, reverse=True)
+
+        # Build prompt with result summaries
+        result_summaries = []
+        for idx, result in enumerate(results[:10]):  # Limit to top 10
+            result_summaries.append(f"""
+Result {idx + 1}:
+URL: {result.url}
+Title: {result.title}
+Snippet: {result.snippet[:150]}
+""")
+
+        system = (
+            "You are an expert at identifying official manufacturer documentation. "
+            "Rank search results by likelihood of being the official manual. "
+            "Prefer PDFs, official manufacturer domains, and exact model matches. "
+            "Respond with JSON only."
+        )
+
+        user = f"""
+Rank these search results for finding the official manual for:
+
+Manufacturer: {manufacturer}
+Model: {model}
+
+Search Results:
+{''.join(result_summaries)}
+
+Return JSON in this format:
+{{
+  "ranked_indices": [1, 3, 2, ...],
+  "confidence": "high|medium|low"
+}}
+
+The ranked_indices should be result numbers (1-based) in order of best to worst.
+"""
+
+        try:
+            content = await self._chat(system, user, model="gpt-4o-mini")
+            if "```" in content:
+                start = content.find("{")
+                end = content.rfind("}") + 1
+                if start != -1 and end > start:
+                    content = content[start:end]
+
+            ranking = json.loads(content)
+            ranked_indices = ranking.get("ranked_indices", [])
+
+            # Reorder results based on LLM ranking
+            ranked_results = []
+            for idx in ranked_indices:
+                if 1 <= idx <= len(results):
+                    ranked_results.append(results[idx - 1])
+
+            # Add any results not in the ranking
+            seen_indices = set(ranked_indices)
+            for idx, result in enumerate(results, 1):
+                if idx not in seen_indices:
+                    ranked_results.append(result)
+
+            return ranked_results
+
+        except Exception as e:
+            logger.debug(f"LLM ranking failed: {e}")
+            # Fallback to original ordering
+            return sorted(results, key=lambda r: r.relevance_score, reverse=True)
+
+    # DEPRECATED: Old URL guessing method removed
+    # URL discovery is now handled by:
+    # - Tier 1: Vendor Index
+    # - Tier 2: Web Search API
+    # LLM only used for ranking/validation
 
 
 # --------------------------------------------------------------------------------------
@@ -318,112 +373,229 @@ class ManufacturerFetcher:
 
 class GenericFetcher(ManufacturerFetcher):
     """
-    Generic fetcher using:
-    - LLM to locate likely doc URLs
-    - Web search (DuckDuckGo HTML) with "site:" scoping when possible
-    - HTML parsing to find PDF/manual links
+    NEW TIERED DISCOVERY FETCHER
+
+    Discovery pipeline:
+    Tier 1: Vendor Index (persistent catalog)
+    Tier 2: Web Search API (Brave → Bing fallback)
+    Tier 3: LLM-assisted ranking
+    Tier 4: AI-generated fallback (via document_service)
     """
 
-    async def fetch(self, model: str, manufacturer: Optional[str] = None, device_type: Optional[str] = None) -> Optional[Path]:
-        # Check cache first
+    def __init__(
+        self,
+        cache_dir: Path,
+        llm_finder: Optional[LLMDocumentFinder] = None,
+        brave_api_key: Optional[str] = None,
+        bing_api_key: Optional[str] = None
+    ):
+        super().__init__(cache_dir, llm_finder)
+
+        self.vendor_storage = VendorDocumentStorage()
+
+        # NEW SearchAPI (unified Brave + Bing)
+        self.search_api = SearchAPI()
+
+    async def fetch(
+        self,
+        model: str,
+        manufacturer: Optional[str] = None,
+        device_type: Optional[str] = None
+    ) -> Optional[Path]:
+
+        # -------------------------------
+        # CACHE CHECK
+        # -------------------------------
         cached = self._is_cached(model)
         if cached:
             logger.info(f"{manufacturer or 'Generic'} {model} manual found in cache")
             return cached
 
         manufacturer = manufacturer or ""
-        preferred_domain = None
 
-        # Try to infer manufacturer metadata to constrain search / docs
-        if self.llm_finder and self.llm_finder.enabled and manufacturer:
-            meta = await self.llm_finder.infer_manufacturer_metadata(manufacturer)
-            preferred_domain = meta.get("primary_domain") or None
+        if not manufacturer:
+            logger.warning("No manufacturer specified, cannot discover docs")
+            return None
 
-        # Use LLM to find documentation URL with search fallback
-        doc_url = None
-        search_queries: List[str] = []
+        # -------------------------------
+        # TIER 1 — Vendor Index
+        # -------------------------------
+        logger.info(f"[Tier 1] Checking vendor index for {manufacturer} {model}")
+
+        indexed_docs = self.vendor_storage.lookup_docs(manufacturer, model)
+
+        if indexed_docs:
+            logger.info(f"[Tier 1] Found {len(indexed_docs)} indexed docs")
+
+            for doc in indexed_docs[:3]:
+                downloaded = await self._download_from_url(model, doc.url)
+                if downloaded:
+                    self.vendor_storage.update_last_verified(doc.url)
+                    logger.info(f"✅ [Tier 1] Downloaded from vendor index: {doc.url}")
+                    return downloaded
+
+            logger.info("[Tier 1] Indexed URLs failed, continuing → Tier 2")
+
+        # -------------------------------
+        # TIER 2 — Unified Web Search
+        # -------------------------------
+        logger.info(f"[Tier 2] Searching web for {manufacturer} {model}")
+
+        # Manufacturer domains for scoping
+        domains = get_manufacturer_domains(manufacturer)
+        logger.debug(f"[Tier 2] Manufacturer domains: {domains[:5]}")
+
+        # Keyword generation (LLM or fallback)
         if self.llm_finder and self.llm_finder.enabled:
-            doc_url, search_queries = await self.llm_finder.find_documentation_url(
-                manufacturer=manufacturer,
-                model=model,
-                device_type=device_type,
-                preferred_domain=preferred_domain,
+            keywords = await self.llm_finder.generate_search_keywords(
+                manufacturer, model, device_type
             )
+        else:
+            keywords = [
+                f"{manufacturer} {model} manual pdf",
+                f"{manufacturer} {model} user guide",
+                f"{manufacturer} {model} documentation"
+            ]
 
-        # 1) Try direct URL first
-        if doc_url:
-            downloaded = await self._download_from_url(model, doc_url)
+        all_results: List[SearchResult] = []
+
+        # Limit to 2 keyword searches to reduce API usage
+        for keyword in keywords[:2]:
+            try:
+                logger.info(f"[Tier 2] Query → {keyword}")
+
+                results = await self.search_api.search(
+                    query=keyword,
+                    max_results=10,
+                    domains=domains[:5],
+                    keywords=["manual", "pdf", "user", "guide", "datasheet", "installation", "troubleshooting"]
+                )
+
+                if results:
+                    logger.info(f"[Tier 2] {len(results)} results from SearchAPI for '{keyword}'")
+                else:
+                    logger.info(f"[Tier 2] No results found for '{keyword}'")
+
+                all_results.extend(results)
+
+            except Exception as e:
+                logger.warning(f"[Tier 2] Search failed for '{keyword}': {e}")
+
+        if not all_results:
+            logger.info("[Tier 2] No search results found, cannot proceed")
+            return None
+
+        # -------------------------------
+        # TIER 3 — LLM Ranking
+        # -------------------------------
+        logger.info(f"[Tier 3] Ranking {len(all_results)} search results")
+
+        if self.llm_finder and self.llm_finder.enabled:
+            ranked_results = await self.llm_finder.rank_search_results(
+                manufacturer, model, all_results
+            )
+        else:
+            ranked_results = sorted(all_results, key=lambda r: r.relevance_score, reverse=True)
+
+        # Attempt downloading results in ranked order
+        for result in ranked_results[:5]:  # Try top 5
+            logger.info(f"[Tier 3] Trying → {result.url} (score {result.relevance_score:.2f})")
+
+            downloaded = await self._download_from_url(model, result.url)
             if downloaded:
+                logger.info(f"✅ [Tier 3] Downloaded: {result.url}")
+
+                # Register domain for future manufacturer scoping
+                register_discovered_domain(manufacturer, result.url)
+
+                # Insert into vendor index for future fetches
+                from vendor_indexer import IndexedDocument
+                doc = IndexedDocument(
+                    manufacturer=manufacturer,
+                    model=model,
+                    url=result.url,
+                    title=result.title,
+                    document_type="pdf" if result.url.lower().endswith(".pdf") else "html",
+                    discovered_at=datetime.now()
+                )
+                self.vendor_storage.add_document(doc)
+
                 return downloaded
-            logger.warning(f"Failed to download from LLM-provided URL: {doc_url}, trying search fallback...")
 
-        # 2) Fallback to search-based discovery if direct URL failed
-        if search_queries:
-            for q in search_queries[:2]:  # limit for performance
-                doc_path = await self._search_and_download(model, q)
-                if doc_path:
-                    return doc_path
-
-        logger.info(f"Could not find docs for {manufacturer or 'Unknown'} {model} using generic fetcher")
+        logger.info(f"⚠️ No docs found for {manufacturer} {model} — all tiers exhausted")
         return None
 
+    # ------------------------------------------------------------
+    # INTERNAL HELPERS (unchanged)
+    # ------------------------------------------------------------
+
     async def _download_from_url(self, model: str, url: str) -> Optional[Path]:
-        """Download either direct PDF or HTML and convert/extract."""
         try:
             async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
                 resp = await client.get(url)
-                if resp.status_code != 200:
-                    logger.warning(f"Failed to download from {url}: HTTP {resp.status_code}")
-                    return None
 
-                content_type = resp.headers.get("content-type", "").lower()
-                if "pdf" in content_type or url.lower().endswith(".pdf"):
-                    filename = f"{model}_manual.pdf"
-                    cache_path = self._get_cache_path(model, filename)
-                    cache_path.parent.mkdir(parents=True, exist_ok=True)
-                    cache_path.write_bytes(resp.content)
-                    logger.info(f"Downloaded PDF documentation for {model} from {url}")
-                    return cache_path
+            if resp.status_code != 200:
+                logger.warning(f"Failed to download from {url}: HTTP {resp.status_code}")
+                return None
 
-                # HTML or other: try to find PDF links first
-                html = resp.text
-                pdf_url = self._extract_pdf_link_from_html(html, base_url=str(resp.url))
-                if pdf_url:
-                    logger.info(f"Found PDF link in HTML for {model}: {pdf_url}")
-                    return await self._download_from_url(model, pdf_url)
+            content_type = resp.headers.get("content-type", "").lower()
 
-                # Fallback: save HTML as text
-                return await self._download_html_as_text(model, html)
+            # PDF direct
+            if "pdf" in content_type or url.lower().endswith(".pdf"):
+                filename = f"{model}_manual.pdf"
+                cache_path = self._get_cache_path(model, filename)
+                cache_path.parent.mkdir(parents=True, exist_ok=True)
+                cache_path.write_bytes(resp.content)
+                logger.info(f"PDF downloaded for {model} from {url}")
+                return cache_path
+
+            # HTML auto-extract
+            html = resp.text
+            pdf_url = self._extract_pdf_link_from_html(html, base_url=str(resp.url))
+            if pdf_url:
+                logger.info(f"Found PDF link → {pdf_url}")
+                return await self._download_from_url(model, pdf_url)
+
+            readable_text = await fetch_html(str(resp.url))
+            if readable_text and len(readable_text) > 200:
+                filename = f"{model}_manual.txt"
+                cache_path = self._get_cache_path(model, filename)
+                cache_path.parent.mkdir(parents=True, exist_ok=True)
+                cache_path.write_text(readable_text, encoding="utf-8")
+                logger.info(f"HTML converted → {cache_path}")
+                return cache_path
+
+            # Fallback: raw HTML → text
+            return await self._download_html_as_text(model, html)
+
         except Exception as e:
-            logger.error(f"Error downloading from {url}: {e}")
+            logger.error(f"Error downloading {url}: {e}")
             return None
 
     def _extract_pdf_link_from_html(self, html: str, base_url: str) -> Optional[str]:
-        """Scan HTML for links that look like PDFs/manuals."""
         try:
             soup = BeautifulSoup(html, "html.parser")
             links = soup.find_all("a", href=True)
 
-            # First pass: look for PDFs with strong manual indicators
+            # Strict manual keywords first
             for a in links:
                 href = a["href"]
                 text = (a.get_text() or "").lower()
-                if ".pdf" in href.lower() and ("manual" in text or "guide" in text or "user" in text or "documentation" in text or "datasheet" in text):
+                if ".pdf" in href.lower() and any(k in text for k in ["manual", "guide", "user", "documentation", "datasheet"]):
                     return urllib.parse.urljoin(base_url, href)
 
-            # Second pass: look for any PDF link (less strict)
+            # Loose matching second pass
             for a in links:
                 href = a["href"]
                 if ".pdf" in href.lower():
-                    logger.info(f"Found PDF link with less strict matching: {href}")
                     return urllib.parse.urljoin(base_url, href)
 
             return None
+
         except Exception:
             return None
 
     async def _download_html_as_text(self, model: str, html: str) -> Optional[Path]:
-        """Save HTML as text, stripping tags."""
         try:
             soup = BeautifulSoup(html, "html.parser")
             text = soup.get_text(separator="\n", strip=True)
@@ -432,72 +604,11 @@ class GenericFetcher(ManufacturerFetcher):
             cache_path = self._get_cache_path(model, f"{model}_manual.txt")
             cache_path.parent.mkdir(parents=True, exist_ok=True)
             cache_path.write_text(text, encoding="utf-8")
-            logger.info(f"Saved HTML text docs for {model} to {cache_path}")
+            logger.info(f"Raw HTML text saved → {cache_path}")
             return cache_path
         except Exception as e:
-            logger.error(f"Error converting HTML to text: {e}")
+            logger.error(f"HTML→text conversion failed: {e}")
             return None
-
-    async def _search_and_download(self, model: str, search_query: str) -> Optional[Path]:
-        """
-        Search for documentation using DuckDuckGo HTML and download first relevant result.
-        Prefer links that look like manuals or PDFs.
-        """
-        try:
-            search_url = f"https://duckduckgo.com/html/?q={urllib.parse.quote(search_query)}"
-            logger.info(f"Searching for docs using query: {search_query}")
-
-            async with httpx.AsyncClient(timeout=15.0) as client:
-                headers = {
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-                }
-                resp = await client.get(search_url, headers=headers)
-                if resp.status_code != 200:
-                    logger.warning(f"Search failed: HTTP {resp.status_code}")
-                    return None
-
-                soup = BeautifulSoup(resp.text, "html.parser")
-                result_links: List[str] = []
-
-                for a in soup.find_all("a", {"class": "result__a"}, limit=10):
-                    href = a.get("href")
-                    if not href:
-                        continue
-
-                    # DuckDuckGo wraps URLs; unwrap uddg param if present
-                    if href.startswith("//duckduckgo.com/l/"):
-                        try:
-                            parsed = urllib.parse.urlparse(f"https:{href}")
-                            params = urllib.parse.parse_qs(parsed.query)
-                            if "uddg" in params:
-                                href = params["uddg"][0]
-                        except Exception:
-                            continue
-
-                    text = (a.get_text() or "").lower()
-                    if "manual" in text or "documentation" in text or "support" in text or href.lower().endswith(".pdf"):
-                        result_links.append(href)
-                        if len(result_links) >= 3:
-                            break
-
-                if not result_links:
-                    logger.info(f"No obvious manual links found in search results for '{search_query}'")
-                    return None
-
-                for url in result_links[:2]:
-                    logger.info(f"Trying to download from search result: {url}")
-                    doc_path = await self._download_from_url(model, url)
-                    if doc_path:
-                        logger.info(f"✅ Successfully downloaded docs from search: {url}")
-                        return doc_path
-
-                logger.warning(f"Could not download valid docs from search for '{search_query}'")
-                return None
-
-        except Exception as e:
-            logger.error(f"Error during web search: {e}")
-            return None
-
 
 
 # --------------------------------------------------------------------------------------
@@ -515,9 +626,9 @@ class DocumentAutoFetcher:
     - Ingest text/PDF into RAG
     """
 
-    def __init__(self, rag_engine, cache_dir: Path = None, openai_api_key: Optional[str] = None, rag_config=None):
+    def __init__(self, rag_engine, cache_dir: Path = None, openai_api_key: Optional[str] = None, brave_api_key: Optional[str] = None, bing_api_key: Optional[str] = None, rag_config=None):
         self.rag = rag_engine
-        self.cache_dir = cache_dir or Path.home() / ".homesight" / "manuals"
+        self.cache_dir = cache_dir or Path.home() / "homesight" / "manuals"
         self.cache_dir.mkdir(parents=True, exist_ok=True)
 
         self.batch_size_documents = (rag_config.batch_size_documents if rag_config else None) or 3
@@ -525,9 +636,22 @@ class DocumentAutoFetcher:
         self.llm_finder = LLMDocumentFinder(openai_api_key)
         self.url_cache = URLCache()
 
-        # All devices use generic fetcher (no special per-manufacturer logic anymore)
-        # LLM discovery + URL caching handles variation automatically
-        self.generic_fetcher = GenericFetcher(self.cache_dir, self.llm_finder)
+        # Get search API keys from environment if not provided
+        self.brave_api_key = brave_api_key or os.getenv("BRAVE_SEARCH_API_KEY")
+        self.bing_api_key = bing_api_key or os.getenv("BING_SEARCH_API_KEY")
+
+        # All devices use generic fetcher with NEW tiered discovery
+        self.generic_fetcher = GenericFetcher(
+            self.cache_dir,
+            self.llm_finder,
+            brave_api_key=self.brave_api_key,
+            bing_api_key=self.bing_api_key
+        )
+
+        # Initialize vendor index scheduler (background crawling)
+        self.vendor_scheduler = get_scheduler()
+
+        logger.info("DocumentAutoFetcher initialized with tiered discovery pipeline")
 
     async def cleanup_device(self, manufacturer: str, model: str) -> None:
         """
@@ -625,33 +749,21 @@ class DocumentAutoFetcher:
             else:
                 logger.warning(f"Known URL failed to download: {known_url}")
 
-        # Discover URL via LLM (fallback for unknown manufacturers)
-        logger.info(f"Discovering documentation for {manufacturer} {model}")
-        doc_url, search_queries = await self.llm_finder.find_documentation_url(
-            manufacturer=manufacturer,
+        # Use NEW tiered discovery via GenericFetcher
+        logger.info(f"Starting tiered discovery for {manufacturer} {model}")
+        doc_path = await self.generic_fetcher.fetch(
             model=model,
-            device_type=device_type,
+            manufacturer=manufacturer,
+            device_type=device_type
         )
 
-        if doc_url:
-            logger.info(f"LLM found documentation URL: {doc_url}")
-            doc_path = await self.generic_fetcher._download_from_url(model, doc_url)
-            if doc_path:
-                self.url_cache.set(manufacturer, model, doc_url, confidence="high")
-                await self._ingest_document(doc_path, device_dict)
-                return True
+        if doc_path:
+            logger.info(f"✅ Tiered discovery succeeded for {manufacturer} {model}")
+            await self._ingest_document(doc_path, device_dict)
+            return True
 
-        # Fallback to search-based discovery
-        if search_queries:
-            logger.info(f"Trying search-based discovery with {len(search_queries)} queries")
-            for q in search_queries[:2]:  # limit for performance
-                doc_path = await self.generic_fetcher._search_and_download(model, q)
-                if doc_path:
-                    logger.info(f"Found via search query: {q}")
-                    await self._ingest_document(doc_path, device_dict)
-                    return True
-
-        logger.warning(f"Could not find documentation for {manufacturer} {model}")
+        logger.warning(f"⚠️ Tiered discovery failed for {manufacturer} {model} - all tiers exhausted")
+        # Tier 4 (AI-generated fallback) is handled by document_service
         return False
 
     def _is_indexed(self, manufacturer: str, model: str) -> bool:
@@ -730,18 +842,77 @@ class DocumentAutoFetcher:
             logger.error(f"Error ingesting document {doc_path}: {e}")
 
     def _extract_pdf_text(self, pdf_path: Path) -> str:
-        """Extract text from PDF with simple page markers."""
+        logger.info(f"[PDF] Extracting text from: {pdf_path}")
+
+        text_output = []
+        image_output = []
+
+        # --------------------------------------------
+        # TIER 1 — PDFMiner (best structured text)
+        # --------------------------------------------
         try:
+            logger.info("[PDF] Trying PDFMiner extraction...")
+            text = pdfminer_extract_text(str(pdf_path))
+            if text and len(text.strip()) > 80:
+                logger.info("[PDF] PDFMiner succeeded")
+                return text
+            else:
+                logger.info("[PDF] PDFMiner returned insufficient text")
+        except Exception as e:
+            logger.warning(f"[PDF] PDFMiner failed: {e}")
+
+        # --------------------------------------------
+        # TIER 2 — PyMuPDF extraction (text + images)
+        # --------------------------------------------
+        try:
+            logger.info("[PDF] Trying PyMuPDF extraction...")
+            doc = fitz.open(str(pdf_path))
+
+            for page_num, page in enumerate(doc, start=1):
+                extracted = page.get_text("text")
+                if extracted.strip():
+                    text_output.append(f"[Page {page_num}]\n{extracted}")
+
+                # Extract images + OCR
+                for img_index, img in enumerate(page.get_images(full=True)):
+                    xref = img[0]
+                    base_image = doc.extract_image(xref)
+                    image_bytes = base_image["image"]
+                    image = Image.open(io.BytesIO(image_bytes))
+
+                    if not extracted.strip():  # scanned page
+                        ocr_text = pytesseract.image_to_string(image)
+                        if ocr_text.strip():
+                            text_output.append(f"[Page {page_num} OCR]\n{ocr_text}")
+
+            combined = "\n\n".join(text_output)
+            if len(combined.strip()) > 30:
+                logger.info("[PDF] PyMuPDF succeeded")
+                return combined
+            else:
+                logger.info("[PDF] PyMuPDF returned insufficient text")
+
+        except Exception as e:
+            logger.warning(f"[PDF] PyMuPDF failed: {e}")
+
+        # --------------------------------------------
+        # TIER 3 — pypdf fallback
+        # --------------------------------------------
+        try:
+            logger.info("[PDF] Trying pypdf fallback...")
             reader = pypdf.PdfReader(str(pdf_path))
-            parts: List[str] = []
+            parts = []
             for i, page in enumerate(reader.pages):
                 page_text = page.extract_text() or ""
-                page_text = page_text.strip()
-                if page_text:
-                    parts.append(f"[Page {i + 1}]\n{page_text}")
-            return "\n\n".join(parts)
+                if page_text.strip():
+                    parts.append(f"[Page {i+1}]\n{page_text}")
+
+            final = "\n\n".join(parts)
+            logger.info("[PDF] pypdf fallback succeeded")
+            return final
+
         except Exception as e:
-            logger.error(f"Error extracting PDF text from {pdf_path}: {e}")
-            return ""
+            logger.error(f"[PDF] pypdf fallback failed: {e}")
 
-
+        logger.error("[PDF] All PDF extractors failed — returning empty text")
+        return ""

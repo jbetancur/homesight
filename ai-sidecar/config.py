@@ -47,9 +47,17 @@ class RAGConfig(BaseModel):
     manufacturers: Dict[str, Dict[str, Any]] = Field(default_factory=dict, description="Known manufacturer documentation URL patterns")
 
 
+class SearchConfig(BaseModel):
+    """Web search API configuration"""
+    brave_api_key: Optional[str] = Field(default=None, description="Brave Search API key (recommended, 2,000 searches/month free)")
+    bing_api_key: Optional[str] = Field(default=None, description="Bing Web Search API key (alternative, 1,000 searches/month free)")
+    enable_vendor_indexer: bool = Field(default=True, description="Enable background vendor documentation indexing")
+    vendor_refresh_days: int = Field(default=7, description="Days between vendor index refreshes")
+
+
 class DocumentFetcherConfig(BaseModel):
     """Document fetcher configuration"""
-    cache_directory: str = Field(default="~/.homesight/manuals")
+    cache_directory: str = Field(default="~/homesight/manuals")
 
 
 class SingleQueueConfig(BaseModel):
@@ -71,9 +79,15 @@ class Config(BaseModel):
     """Main application configuration"""
     llm: LLMConfig = Field(default_factory=LLMConfig)
     rag: RAGConfig = Field(default_factory=RAGConfig)
+    search: SearchConfig = Field(default_factory=SearchConfig)
     document_fetcher: DocumentFetcherConfig = Field(default_factory=DocumentFetcherConfig)
     queues: QueuesConfig = Field(default_factory=QueuesConfig)
     backend_url: str = Field(default="http://localhost:8080", description="HomeSight Go backend API URL")
+
+    @property
+    def bing_search_api_key(self) -> Optional[str]:
+        """Convenience property for Bing API key"""
+        return self.search.bing_api_key
 
     @classmethod
     def load_from_yaml(cls, config_path: Optional[str] = None) -> "Config":
@@ -154,9 +168,22 @@ class Config(BaseModel):
             if 'manufacturers' in rag_section:
                 rag_config_data['manufacturers'] = rag_section['manufacturers']
 
+            # Build Search config
+            search_config_data = {}
+            search_section = yaml_data.get('search', {})
+            if 'brave_api_key' in search_section:
+                search_config_data['brave_api_key'] = search_section['brave_api_key']
+            if 'bing_api_key' in search_section:
+                search_config_data['bing_api_key'] = search_section['bing_api_key']
+            if 'enable_vendor_indexer' in search_section:
+                search_config_data['enable_vendor_indexer'] = search_section['enable_vendor_indexer']
+            if 'vendor_refresh_days' in search_section:
+                search_config_data['vendor_refresh_days'] = search_section['vendor_refresh_days']
+
             return cls(
                 llm=LLMConfig(**llm_config_data),
                 rag=RAGConfig(**rag_config_data),
+                search=SearchConfig(**search_config_data),
                 document_fetcher=DocumentFetcherConfig(),
                 backend_url=backend_url
             )

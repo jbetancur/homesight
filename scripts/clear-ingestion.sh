@@ -19,8 +19,8 @@ echo ""
 
 # Confirm before deleting
 echo -e "${YELLOW}⚠️  This will delete:${NC}"
-echo "  1. All cached PDF manuals (~/.homesight/manuals)"
-echo "  2. ChromaDB RAG database (~/.homesight/rag)"
+echo "  1. All cached PDF manuals (~/homesight/manuals)"
+echo "  2. ChromaDB RAG database (~/homesight/rag)"
 echo "  3. Ingestion audit log (.logs/ingestion.jsonl)"
 echo ""
 read -p "Are you sure? (type 'yes' to confirm): " confirm
@@ -45,10 +45,10 @@ echo ""
 
 # Clear cached PDFs
 echo -e "${BLUE}Clearing cached PDF manuals...${NC}"
-if [ -d ~/.homesight/manuals ]; then
-  rm -rf ~/.homesight/manuals
-  mkdir -p ~/.homesight/manuals
-  echo -e "${GREEN}✅ Cleared ~/.homesight/manuals${NC}"
+if [ -d ~/homesight/manuals ]; then
+  rm -rf ~/homesight/manuals
+  mkdir -p ~/homesight/manuals
+  echo -e "${GREEN}✅ Cleared ~/homesight/manuals${NC}"
 else
   echo -e "${YELLOW}ℹ️  No manuals directory found${NC}"
 fi
@@ -57,10 +57,10 @@ echo ""
 
 # Clear RAG database
 echo -e "${BLUE}Clearing RAG database...${NC}"
-if [ -d ~/.homesight/rag ]; then
-  rm -rf ~/.homesight/rag
-  mkdir -p ~/.homesight/rag
-  echo -e "${GREEN}✅ Cleared ~/.homesight/rag${NC}"
+if [ -d ~/homesight/rag ]; then
+  rm -rf ~/homesight/rag
+  mkdir -p ~/homesight/rag
+  echo -e "${GREEN}✅ Cleared ~/homesight/rag${NC}"
 else
   echo -e "${YELLOW}ℹ️  No RAG directory found${NC}"
 fi
