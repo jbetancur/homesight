@@ -39,6 +39,7 @@ from services.session_service import SessionService
 from services.chat_service import ChatService
 from services.analysis_service import AnalysisService
 from services.document_service import DocumentService
+from services.mqtt_service import initialize_mqtt_service, shutdown_mqtt_service, get_mqtt_service
 
 # LLM and RAG
 from llm.provider import LLMProvider
@@ -206,6 +207,28 @@ async def lifespan(app: FastAPI):
         # Keep old analysis_queue for backward compatibility
         analysis_queue = AnalysisQueue(max_concurrent=config.llm.inference.max_concurrent_tasks)
 
+        # Initialize MQTT service for real-time device state
+        logger.info("Initializing MQTT service...")
+        try:
+            mqtt_broker = os.getenv("MQTT_BROKER_URL", "localhost")
+            mqtt_port = int(os.getenv("MQTT_BROKER_PORT", "1883"))
+            initialize_mqtt_service(broker_url=mqtt_broker, broker_port=mqtt_port)
+            logger.info(f"✅ MQTT service connected to {mqtt_broker}:{mqtt_port}")
+
+            # Register incident callback for real-time analysis
+            mqtt_svc = get_mqtt_service()
+            if mqtt_svc:
+                def on_incident_received(incident_payload):
+                    """Queue incidents for AI analysis when received via MQTT."""
+                    logger.info(f"Incident received via MQTT: {incident_payload.get('title')}")
+                    # TODO: Queue for analysis using analysis_queue
+
+                mqtt_svc.on_incident(on_incident_received)
+                logger.info("✅ Registered MQTT incident callback")
+        except Exception as e:
+            logger.warning(f"Failed to initialize MQTT service: {e}")
+            logger.warning("Continuing without real-time MQTT updates...")
+
         logger.info("✅ All services and queues initialized")
         logger.info(f"Queues: discovery={config.queues.discovery.max_concurrent}, "
                     f"ingestion={config.queues.ingestion.max_concurrent}, "
@@ -262,6 +285,12 @@ async def lifespan(app: FastAPI):
             logger.warning(f"Failed to start vendor indexer: {e}")
 
     yield
+
+    # Shutdown
+    logger.info("Shutting down services...")
+
+    # Shutdown MQTT service
+    shutdown_mqtt_service()
 
     # Cancel background tasks on shutdown
     health_task.cancel()

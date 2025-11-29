@@ -31,18 +31,9 @@ type Config struct {
 		Addr string `yaml:"addr"`
 	} `yaml:"api"`
 
-	Integrations struct {
-		Matter bool `yaml:"matter"`
-		Zigbee bool `yaml:"zigbee"`
-		MQTT   bool `yaml:"mqtt"`
-		LAN    bool `yaml:"lan"`
-		ZWave  bool `yaml:"zwave"`
-	} `yaml:"integrations"`
-
 	ZWave struct {
+		Enabled      bool   `yaml:"enabled"`
 		WebSocketURL string `yaml:"websocket_url"`
-		AutoHeal     bool   `yaml:"auto_heal"`
-		HealHour     int    `yaml:"heal_hour"`
 	} `yaml:"zwave"`
 }
 
@@ -77,9 +68,6 @@ func Load(path string) (*Config, error) {
 	if cfg.ZWave.WebSocketURL == "" {
 		cfg.ZWave.WebSocketURL = "ws://localhost:3001"
 	}
-	if cfg.ZWave.HealHour == 0 {
-		cfg.ZWave.HealHour = 3 // Default: 3 AM
-	}
 
 	return &cfg, nil
 }
@@ -92,6 +80,7 @@ func Default() *Config {
 	cfg.Prometheus.URL = "http://localhost:9090"
 	cfg.AI.ServiceURL = "http://localhost:8001"
 	cfg.API.Addr = ":8000"
-	cfg.Integrations.MQTT = true
+	cfg.ZWave.Enabled = false
+	cfg.ZWave.WebSocketURL = "ws://localhost:3001"
 	return cfg
 }

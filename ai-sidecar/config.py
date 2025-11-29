@@ -24,7 +24,6 @@ class LLMConfig(BaseModel):
     )
 
     provider: str = Field(default="local", description="Provider type for initialization")
-    openai_api_key: Optional[str] = None
     openai_model: str = Field(default="gpt-4o-mini", description="OpenAI model to use")
 
     # Local LLM settings
@@ -35,6 +34,11 @@ class LLMConfig(BaseModel):
 
     # Inference concurrency settings (for background operations)
     inference: InferenceConfig = Field(default_factory=InferenceConfig)
+
+    @property
+    def openai_api_key(self) -> Optional[str]:
+        """Get OpenAI API key from environment variable"""
+        return os.getenv("OPENAI_API_KEY")
 
 
 class RAGConfig(BaseModel):
@@ -49,10 +53,18 @@ class RAGConfig(BaseModel):
 
 class SearchConfig(BaseModel):
     """Web search API configuration"""
-    brave_api_key: Optional[str] = Field(default=None, description="Brave Search API key (recommended, 2,000 searches/month free)")
-    bing_api_key: Optional[str] = Field(default=None, description="Bing Web Search API key (alternative, 1,000 searches/month free)")
     enable_vendor_indexer: bool = Field(default=True, description="Enable background vendor documentation indexing")
     vendor_refresh_days: int = Field(default=7, description="Days between vendor index refreshes")
+
+    @property
+    def brave_api_key(self) -> Optional[str]:
+        """Get Brave Search API key from environment variable"""
+        return os.getenv("BRAVE_SEARCH_API_KEY")
+
+    @property
+    def bing_api_key(self) -> Optional[str]:
+        """Get Bing Search API key from environment variable"""
+        return os.getenv("BING_SEARCH_API_KEY")
 
 
 class DocumentFetcherConfig(BaseModel):
@@ -123,8 +135,6 @@ class Config(BaseModel):
 
             # Build LLM config
             llm_config_data = {}
-            if 'openai_api_key' in ai_config:
-                llm_config_data['openai_api_key'] = ai_config['openai_api_key']
 
             llm_section = ai_config.get('llm', {})
             if 'provider' in llm_section:
@@ -171,10 +181,6 @@ class Config(BaseModel):
             # Build Search config
             search_config_data = {}
             search_section = yaml_data.get('search', {})
-            if 'brave_api_key' in search_section:
-                search_config_data['brave_api_key'] = search_section['brave_api_key']
-            if 'bing_api_key' in search_section:
-                search_config_data['bing_api_key'] = search_section['bing_api_key']
             if 'enable_vendor_indexer' in search_section:
                 search_config_data['enable_vendor_indexer'] = search_section['enable_vendor_indexer']
             if 'vendor_refresh_days' in search_section:

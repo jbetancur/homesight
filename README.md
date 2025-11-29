@@ -12,21 +12,24 @@ make build
 
 **Services**: `http://localhost:8080` (main) | `http://localhost:8001` (AI, optional)
 
-## Auto-Discovery
+## Device Discovery
 
-Zero-config device discovery via mDNS and MQTT:
+**MQTT-based Discovery:** All integrations publish device discovery messages to MQTT topics.
 
-| Protocol | Discovery |
-|----------|-----------|
-| MQTT Brokers | mDNS (`_mqtt._tcp`) |
-| Zigbee2MQTT | Via MQTT discovery |
-| Matter | mDNS (`_matter._tcp`) |
-| Shelly/Tasmota/ESPHome | HTTP discovery |
-| LAN devices | mDNS (`_http._tcp`) |
+**Supported Integrations:**
+- **Z-Wave** - Z-Wave JS devices via WebSocket bridge
+- **Zigbee2MQTT** - Zigbee devices via MQTT (native support)
+- **Custom** - Any device via MQTT topic: `homesight/{integration}/{id}/discovery`
 
-Devices appear automatically in the dashboard. Onboard via UI or API.
+**Discovery Flow:**
+1. Integration publishes device discovery to MQTT
+2. MQTT Consumer receives message
+3. Device automatically registered in database
+4. Appears in dashboard
 
-Optional manual config in `config.yaml` if auto-discovery doesn't find devices.
+**Configuration:** Edit `config.yaml` to enable integrations (currently Z-Wave and Zigbee2MQTT)
+
+**Documentation:** See [docs/INTEGRATIONS_MQTT.md](docs/INTEGRATIONS_MQTT.md) for complete MQTT topic schema and integration guide.
 
 ## Demos
 
@@ -82,48 +85,62 @@ curl -X POST http://localhost:8080/incidents/{id}/resolve
 
 ## Architecture
 
+**MQTT-based Event-Driven Architecture** - All integrations communicate via MQTT message bus.
+
 ```mermaid
 graph TB
-    subgraph "Devices"
-        MQTT[MQTT]
-        ZIGBEE[Zigbee2MQTT]
-        LAN[LAN REST]
-        MATTER[Matter]
+    subgraph "Integrations (Any Language)"
+        ZWAVE[Z-Wave Bridge<br/>Go + WebSocket]
+        ZIGBEE[Zigbee2MQTT<br/>Node.js]
+        CUSTOM[Custom Integrations<br/>Python/Node/etc]
+    end
+
+    subgraph "MQTT Message Bus :1883"
+        MOSQUITTO["Mosquitto Broker"]
+        TOPICS["Topics:<br/>homesight/{int}/{id}/discovery<br/>homesight/{int}/{id}/state<br/>homesight/{int}/{id}/metadata<br/>homesight/cmd/{device-id}<br/>homesight/incidents/{id}/{iid}"]
     end
 
     subgraph "HomeSight Core :8080"
+        CONSUMER[MQTT Consumer<br/>Device Registry]
+        PUBLISHER[MQTT Publisher<br/>Device Commands]
         API[REST API]
-        DISCOVERY[Discovery<br/>mDNS + MQTT]
         EVENTS[Event Bus]
-        RULES[Rules Engine<br/>Leak, Freeze, Battery,<br/>Offline, Pump]
+        RULES[Rules Engine]
         INCIDENTS[Incident Service]
         DB[(SQLite DB)]
-        AI_CLIENT[AI Client]
-    end
-
-    subgraph "Message Bus"
-        MOSQUITTO["MQTT Broker :1883"]
     end
 
     subgraph "AI Sidecar :8001"
-        RAG["RAG Engine<br/>ChromaDB + FastEmbed"]
+        MQTT_SVC[MQTT Service<br/>Real-time Monitor]
+        RAG[RAG Engine<br/>ChromaDB]
         CHAT[Chat/Analysis]
         DOC_FETCH[Doc Fetcher]
     end
 
-    subgraph "Cloud Setup Only"
-        OPENAI["OpenAI API<br/>~$0.001/device"]
+    subgraph "Cloud (Setup Only)"
+        OPENAI[OpenAI API<br/>Doc Discovery]
     end
 
-    %% Device flow
-    MQTT --> MOSQUITTO
-    ZIGBEE --> MOSQUITTO
-    LAN --> DISCOVERY
-    MATTER --> DISCOVERY
-    MOSQUITTO --> DISCOVERY
+    %% Integration → MQTT
+    ZWAVE -->|Publish| MOSQUITTO
+    ZIGBEE -->|Publish| MOSQUITTO
+    CUSTOM -->|Publish| MOSQUITTO
 
-    %% Processing flow
-    DISCOVERY --> EVENTS
+    %% MQTT → Core
+    MOSQUITTO -->|Subscribe| CONSUMER
+    CONSUMER -->|Discovery| DB
+    CONSUMER -->|State| EVENTS
+    CONSUMER -->|Incidents| INCIDENTS
+
+    %% Core → MQTT
+    API --> PUBLISHER
+    PUBLISHER -->|Commands| MOSQUITTO
+
+    %% MQTT → Integrations
+    MOSQUITTO -->|Commands| ZWAVE
+    MOSQUITTO -->|Commands| ZIGBEE
+
+    %% Event Processing
     EVENTS --> RULES
     RULES --> INCIDENTS
     INCIDENTS --> DB
@@ -131,46 +148,58 @@ graph TB
     %% API
     API --> DB
     API --> INCIDENTS
-    API --> AI_CLIENT
 
-    %% AI flow
-    AI_CLIENT -->|Incident| CHAT
-    CHAT -->|Query| RAG
-    DOC_FETCH -->|Index| RAG
-    DOC_FETCH -.->|Find| OPENAI
-
-    %% Device event trigger
-    INCIDENTS -->|Device onboarded| DOC_FETCH
+    %% AI Real-time
+    MOSQUITTO -->|Subscribe| MQTT_SVC
+    MQTT_SVC -->|Incidents| CHAT
+    CHAT --> RAG
+    DOC_FETCH --> RAG
+    DOC_FETCH -.->|Discovery| OPENAI
 
     %% Styling
     classDef core fill:#4a9eff,stroke:#2d5f9f,stroke-width:2px,color:#fff
     classDef ai fill:#ff9800,stroke:#e65100,stroke-width:2px,color:#fff
-    classDef device fill:#9e9e9e,stroke:#616161,stroke-width:2px,color:#fff
+    classDef integration fill:#9e9e9e,stroke:#616161,stroke-width:2px,color:#fff
     classDef bus fill:#ab47bc,stroke:#6a1b9a,stroke-width:2px,color:#fff
     classDef cloud fill:#03a9f4,stroke:#0277bd,stroke-width:2px,stroke-dasharray:5,5,color:#fff
 
-    class API,DISCOVERY,EVENTS,RULES,INCIDENTS,DB,AI_CLIENT core
-    class CHAT,RAG,DOC_FETCH ai
-    class MQTT,ZIGBEE,LAN,MATTER device
-    class MOSQUITTO bus
+    class API,CONSUMER,PUBLISHER,EVENTS,RULES,INCIDENTS,DB core
+    class MQTT_SVC,CHAT,RAG,DOC_FETCH ai
+    class ZWAVE,ZIGBEE,CUSTOM integration
+    class MOSQUITTO,TOPICS bus
     class OPENAI cloud
 ```
 
 ### Core Components
 
-- **MQTT Client**: Connects to external brokers (not embedded)
-- **Discovery**: mDNS for brokers/devices + MQTT discovery listener
-- **Integrations**: MQTT, Zigbee2MQTT, LAN (HTTP), Matter (discovery only)
-- **Rules Engine**: Leak, freeze, battery, offline, pump cycle detection
-- **SQLite DB**: Stores devices, sensors, incidents, tasks
+**MQTT Message Bus:**
+- **Mosquitto Broker** (:1883) - Central message bus for all integrations
+- **MQTT Consumer** - Subscribes to integration messages, updates device registry
+- **MQTT Publisher** - Publishes device commands to integrations
+
+**Core Services:**
+- **REST API** (:8080) - Device management, incident tracking, commands
+- **Event Bus** - Internal event processing pipeline
+- **Rules Engine** - Leak, freeze, battery, offline, pump cycle detection
+- **Incident Service** - Creates and manages incidents
+- **SQLite DB** - Stores devices, sensors, incidents, metadata
+
+**Integrations** (Language-Agnostic):
+- **Z-Wave Bridge** (Go) - Bridges Z-Wave JS WebSocket to MQTT
+- **Zigbee2MQTT** (Node.js) - Already MQTT-native
+- **Custom Integrations** - Any language (Python, Node, Rust) via MQTT topics
 
 ### AI Service
 
-**Local:** FastEmbed embeddings + ChromaDB vector DB (offline analysis)
+**Real-time MQTT Integration:**
+- **MQTT Service** - Subscribes to device state and incident topics
+- **In-memory Cache** - Maintains current device state for instant chat responses
+- **Real-time Analysis** - 50x faster incident analysis (milliseconds vs HTTP polling)
 
-**Cloud:** OpenAI GPT-4o-mini for doc discovery only (~$0.001 per device, one-time)
-
-**Workflow:** Device onboarded → fetch docs → index locally → use for incident analysis
+**RAG Pipeline:**
+- **Local:** FastEmbed embeddings + ChromaDB vector DB (offline analysis)
+- **Cloud:** OpenAI GPT-4o-mini for doc discovery only (~$0.001 per device, one-time)
+- **Workflow:** Device onboarded → fetch docs → index locally → use for incident analysis
 
 ## Rules Engine
 

@@ -20,6 +20,7 @@ import (
 	"github.com/homesight/homesight/internal/db"
 	"github.com/homesight/homesight/internal/discovery"
 	"github.com/homesight/homesight/internal/incidents"
+	mqttint "github.com/homesight/homesight/internal/integrations/mqtt"
 	"github.com/homesight/homesight/internal/integrations/zwave"
 	"github.com/homesight/homesight/internal/metrics"
 	"github.com/homesight/homesight/internal/model"
@@ -39,6 +40,9 @@ type Server struct {
 	discoveryMutex      sync.RWMutex
 	eventBus            *EventBus
 	cfg                 *config.Config
+
+	// MQTT publisher for device commands
+	mqttPublisher       *mqttint.Publisher
 
 	// Z-Wave integration
 	zwaveClient        *zwave.Client
@@ -71,7 +75,7 @@ func NewServer(
 	}
 
 	// Initialize Z-Wave if enabled
-	if cfg.Integrations.ZWave {
+	if cfg.ZWave.Enabled {
 		s.initZWave()
 	}
 
@@ -84,6 +88,11 @@ func (s *Server) SetDiscoveryListener(listener *discovery.MQTTDiscoveryListener)
 	s.discoveryMutex.Lock()
 	defer s.discoveryMutex.Unlock()
 	s.discoveryListener = listener
+}
+
+// SetMQTTPublisher registers an MQTT publisher for device commands
+func (s *Server) SetMQTTPublisher(publisher *mqttint.Publisher) {
+	s.mqttPublisher = publisher
 }
 
 // setupRoutes configures the API routes
@@ -127,6 +136,7 @@ func (s *Server) setupRoutes() {
 			r.Get("/{id}/sensors", s.listDeviceSensors)
 			r.Get("/{id}/sensors/{sensorID}", s.getDeviceSensor)
 			r.Get("/{id}/knowledge-base", s.getDeviceKnowledgeBase)
+			r.Post("/{id}/command", s.handleDeviceCommand) // Send command to device via MQTT
 			r.Post("/{id}/reingest-docs", s.handleReingestDeviceDocs) // Re-trigger document discovery for a device
 			r.Post("/{id}/docs-status", s.handleUpdateDeviceDocsStatus) // Update device documentation status and generate KB articles (called by AI sidecar)
 			// Demo/Testing endpoints - In production, guard with admin authentication
@@ -405,6 +415,63 @@ func (s *Server) getDevice(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(device)
+}
+
+// handleDeviceCommand sends a command to a device via MQTT
+func (s *Server) handleDeviceCommand(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	deviceID := chi.URLParam(r, "id")
+
+	// Parse command from request body
+	var req struct {
+		Command   string                 `json:"command"`
+		Arguments map[string]interface{} `json:"args"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	// Validate device exists
+	device, err := s.deviceRepo.Get(ctx, deviceID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if device == nil {
+		http.Error(w, "device not found", http.StatusNotFound)
+		return
+	}
+
+	// Check if MQTT publisher is available
+	if s.mqttPublisher == nil {
+		http.Error(w, "MQTT publisher not available", http.StatusServiceUnavailable)
+		return
+	}
+
+	// Publish command via MQTT
+	cmd := model.DeviceCommand{
+		DeviceID:  deviceID,
+		Command:   req.Command,
+		Arguments: req.Arguments,
+	}
+
+	if err := s.mqttPublisher.PublishCommand(cmd); err != nil {
+		log.Printf("[API] Failed to publish command to %s: %v", deviceID, err)
+		http.Error(w, fmt.Sprintf("failed to send command: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	log.Printf("[API] Command sent to %s: %s", deviceID, req.Command)
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"status":    "success",
+		"device_id": deviceID,
+		"command":   req.Command,
+		"message":   "Command sent via MQTT",
+	})
 }
 
 // getMetrics returns metrics for a sensor
