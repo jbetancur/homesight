@@ -1,8 +1,14 @@
 
 import { useEffect, useState, useRef, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Table, Badge, Loader, Stack, Title, Text, Card, Group, Paper, Button, Modal, ActionIcon, Tooltip, ScrollArea } from '@mantine/core';
-import { Wifi, CheckCircle, Activity, Trash2, RefreshCw, FileText } from 'lucide-react';
+import {
+  Table, Badge, Loader, Stack, Title, Text, Card, Group, Paper, Button, Modal,
+  ActionIcon, Tooltip, ScrollArea, TextInput, Select, MultiSelect, Grid
+} from '@mantine/core';
+import {
+  Wifi, CheckCircle, Activity, Trash2, RefreshCw, FileText, Search,
+  Filter, Grid3x3, List, Power, Lock, Lightbulb, Thermometer, Home
+} from 'lucide-react';
 import { useEventSubscription } from '../useEventSubscription';
 import { API_BASE_WITH_PATHS } from '../apiConfig';
 
@@ -22,6 +28,20 @@ function getDeviceStatus(lastSeen: string) {
   }
 }
 
+function getDeviceIcon(type: string, size: number = 20) {
+  const iconMap: Record<string, any> = {
+    'switch': Power,
+    'light': Lightbulb,
+    'sensor': Thermometer,
+    'lock': Lock,
+    'climate': Thermometer,
+    'thermostat': Thermometer,
+  };
+
+  const Icon = iconMap[type.toLowerCase()] || Activity;
+  return <Icon size={size} />;
+}
+
 export function DevicesView() {
   const navigate = useNavigate();
   const [devices, setDevices] = useState<any[]>([]);
@@ -33,6 +53,15 @@ export function DevicesView() {
     deviceId: null,
     deviceName: ''
   });
+
+  // Filters
+  const [searchQuery, setSearchQuery] = useState('');
+  const [selectedIntegrations, setSelectedIntegrations] = useState<string[]>([]);
+  const [selectedTypes, setSelectedTypes] = useState<string[]>([]);
+  const [selectedStatus, setSelectedStatus] = useState<string | null>(null);
+  const [selectedRooms, setSelectedRooms] = useState<string[]>([]);
+  const [viewMode, setViewMode] = useState<'table' | 'grid'>('table');
+
   const devicesRef = useRef<any[]>([]);
 
   // Initial fetch
@@ -104,12 +133,7 @@ export function DevicesView() {
       });
 
       if (response.ok) {
-        // const data = await response.json();
-        // Only set loading state after confirming the request succeeded
         setReingestingId(deviceId);
-        // Don't clear loading state yet - wait for device SSE update with final status
-        // The docs_status will change from "pending" to "success"/"partial"/"error"
-        // when the AI sidecar completes, and we'll clear the loading state then
       } else {
         alert('Failed to queue re-ingestion');
         console.error('Re-ingest failed:', response.statusText);
@@ -119,6 +143,56 @@ export function DevicesView() {
       console.error('Re-ingest error:', error);
     }
   };
+
+  // Get unique values for filters
+  const integrations = Array.from(new Set(devices.map(d => d.integration).filter(Boolean)));
+  const types = Array.from(new Set(devices.map(d => d.type).filter(Boolean)));
+  const rooms = Array.from(new Set(
+    devices.map(d => d.metadata?.room || d.metadata?.location).filter(Boolean)
+  ));
+
+  // Apply filters
+  const filteredDevices = devices.filter(device => {
+    // Search filter
+    if (searchQuery) {
+      const query = searchQuery.toLowerCase();
+      const matchesName = device.name?.toLowerCase().includes(query);
+      const matchesType = device.type?.toLowerCase().includes(query);
+      const matchesManufacturer = device.metadata?.manufacturer?.toLowerCase().includes(query);
+      const matchesModel = device.metadata?.model?.toLowerCase().includes(query);
+      if (!matchesName && !matchesType && !matchesManufacturer && !matchesModel) {
+        return false;
+      }
+    }
+
+    // Integration filter
+    if (selectedIntegrations.length > 0 && !selectedIntegrations.includes(device.integration)) {
+      return false;
+    }
+
+    // Type filter
+    if (selectedTypes.length > 0 && !selectedTypes.includes(device.type)) {
+      return false;
+    }
+
+    // Status filter
+    if (selectedStatus) {
+      const status = getDeviceStatus(device.last_seen).label;
+      if (status !== selectedStatus) {
+        return false;
+      }
+    }
+
+    // Room filter
+    if (selectedRooms.length > 0) {
+      const room = device.metadata?.room || device.metadata?.location;
+      if (!room || !selectedRooms.includes(room)) {
+        return false;
+      }
+    }
+
+    return true;
+  });
 
   if (loading) {
     return (
@@ -131,49 +205,187 @@ export function DevicesView() {
 
   const onlineDevices = devices.filter(d => getDeviceStatus(d.last_seen).label === 'Online');
   const totalDevices = devices.length;
+  const filteredCount = filteredDevices.length;
 
   return (
     <Stack gap="md">
       <Group justify="space-between" align="center">
         <div>
           <Title order={2}>Devices</Title>
-          <Text size="sm" c="dimmed">Manage and monitor your connected devices</Text>
+          <Text size="sm" c="dimmed">Manage and monitor all your connected devices</Text>
         </div>
+        <Button
+          variant="light"
+          leftSection={<Home size={16} />}
+          onClick={() => navigate('/integrations')}
+        >
+          Manage Integrations
+        </Button>
       </Group>
 
-      <Group gap="md">
-        <Paper p="md" withBorder style={{ flex: 1 }}>
-          <Group gap="xs">
-            <Wifi size={24} color="#228be6" />
-            <div>
-              <Text size="xl" fw={700}>{totalDevices}</Text>
-              <Text size="xs" c="dimmed">Total Devices</Text>
-            </div>
-          </Group>
-        </Paper>
+      {/* Stats */}
+      <Grid>
+        <Grid.Col span={{ base: 12, xs: 6, sm: 3 }}>
+          <Paper p="md" withBorder>
+            <Group gap="xs">
+              <Wifi size={24} color="#228be6" />
+              <div>
+                <Text size="xl" fw={700}>{totalDevices}</Text>
+                <Text size="xs" c="dimmed">Total Devices</Text>
+              </div>
+            </Group>
+          </Paper>
+        </Grid.Col>
 
-        <Paper p="md" withBorder style={{ flex: 1 }}>
-          <Group gap="xs">
-            <CheckCircle size={24} color="#40c057" />
-            <div>
-              <Text size="xl" fw={700}>{onlineDevices.length}</Text>
-              <Text size="xs" c="dimmed">Online Now</Text>
-            </div>
-          </Group>
-        </Paper>
-      </Group>
+        <Grid.Col span={{ base: 12, xs: 6, sm: 3 }}>
+          <Paper p="md" withBorder>
+            <Group gap="xs">
+              <CheckCircle size={24} color="#40c057" />
+              <div>
+                <Text size="xl" fw={700}>{onlineDevices.length}</Text>
+                <Text size="xs" c="dimmed">Online Now</Text>
+              </div>
+            </Group>
+          </Paper>
+        </Grid.Col>
 
-      {devices.length === 0 ? (
+        <Grid.Col span={{ base: 12, xs: 6, sm: 3 }}>
+          <Paper p="md" withBorder>
+            <Group gap="xs">
+              <Activity size={24} color="#868e96" />
+              <div>
+                <Text size="xl" fw={700}>{integrations.length}</Text>
+                <Text size="xs" c="dimmed">Integrations</Text>
+              </div>
+            </Group>
+          </Paper>
+        </Grid.Col>
+
+        <Grid.Col span={{ base: 12, xs: 6, sm: 3 }}>
+          <Paper p="md" withBorder>
+            <Group gap="xs">
+              <Filter size={24} color="#f59f00" />
+              <div>
+                <Text size="xl" fw={700}>{filteredCount}</Text>
+                <Text size="xs" c="dimmed">Filtered Results</Text>
+              </div>
+            </Group>
+          </Paper>
+        </Grid.Col>
+      </Grid>
+
+      {/* Filters */}
+      <Card withBorder p="md">
+        <Stack gap="md">
+          <Group justify="space-between" align="center">
+            <Text size="sm" fw={600}>Filters</Text>
+            <Group gap="xs">
+              <ActionIcon
+                variant={viewMode === 'table' ? 'filled' : 'light'}
+                onClick={() => setViewMode('table')}
+                title="Table View"
+              >
+                <List size={18} />
+              </ActionIcon>
+              <ActionIcon
+                variant={viewMode === 'grid' ? 'filled' : 'light'}
+                onClick={() => setViewMode('grid')}
+                title="Grid View"
+              >
+                <Grid3x3 size={18} />
+              </ActionIcon>
+            </Group>
+          </Group>
+
+          <Grid>
+            <Grid.Col span={{ base: 12, sm: 6, md: 3 }}>
+              <TextInput
+                placeholder="Search devices..."
+                leftSection={<Search size={16} />}
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+              />
+            </Grid.Col>
+
+            <Grid.Col span={{ base: 12, sm: 6, md: 3 }}>
+              <MultiSelect
+                placeholder="Integration"
+                data={integrations}
+                value={selectedIntegrations}
+                onChange={setSelectedIntegrations}
+                clearable
+              />
+            </Grid.Col>
+
+            <Grid.Col span={{ base: 12, sm: 6, md: 3 }}>
+              <MultiSelect
+                placeholder="Device Type"
+                data={types}
+                value={selectedTypes}
+                onChange={setSelectedTypes}
+                clearable
+              />
+            </Grid.Col>
+
+            <Grid.Col span={{ base: 12, sm: 6, md: 3 }}>
+              <Select
+                placeholder="Status"
+                data={['Online', 'Recent', 'Offline']}
+                value={selectedStatus}
+                onChange={setSelectedStatus}
+                clearable
+              />
+            </Grid.Col>
+
+            {rooms.length > 0 && (
+              <Grid.Col span={{ base: 12, sm: 6, md: 3 }}>
+                <MultiSelect
+                  placeholder="Room/Area"
+                  data={rooms}
+                  value={selectedRooms}
+                  onChange={setSelectedRooms}
+                  clearable
+                />
+              </Grid.Col>
+            )}
+          </Grid>
+
+          {(searchQuery || selectedIntegrations.length > 0 || selectedTypes.length > 0 || selectedStatus || selectedRooms.length > 0) && (
+            <Button
+              variant="subtle"
+              size="xs"
+              onClick={() => {
+                setSearchQuery('');
+                setSelectedIntegrations([]);
+                setSelectedTypes([]);
+                setSelectedStatus(null);
+                setSelectedRooms([]);
+              }}
+            >
+              Clear All Filters
+            </Button>
+          )}
+        </Stack>
+      </Card>
+
+      {/* Device List */}
+      {filteredDevices.length === 0 ? (
         <Card withBorder p="xl">
           <Stack align="center" gap="md">
             <Wifi size={48} color="#868e96" />
             <div style={{ textAlign: 'center' }}>
-              <Text size="lg" fw={600}>No Devices</Text>
-              <Text size="sm" c="dimmed">Visit the Discovery page to onboard new devices</Text>
+              <Text size="lg" fw={600}>
+                {devices.length === 0 ? 'No Devices' : 'No Matching Devices'}
+              </Text>
+              <Text size="sm" c="dimmed">
+                {devices.length === 0
+                  ? 'Visit the Integrations page to connect and onboard new devices'
+                  : 'Try adjusting your filters'}
+              </Text>
             </div>
           </Stack>
         </Card>
-      ) : (
+      ) : viewMode === 'table' ? (
         <Card withBorder p={0}>
           <ScrollArea>
             <Table highlightOnHover striped>
@@ -184,20 +396,19 @@ export function DevicesView() {
                   <Table.Th>Integration</Table.Th>
                   <Table.Th>Manufacturer</Table.Th>
                   <Table.Th>Model</Table.Th>
-                  {/* <Table.Th>Status</Table.Th>
-                  <Table.Th>Last Seen</Table.Th> */}
+                  <Table.Th>Status</Table.Th>
                   <Table.Th>Documentation</Table.Th>
                   <Table.Th style={{ textAlign: 'center' }}>Actions</Table.Th>
                 </Table.Tr>
               </Table.Thead>
               <Table.Tbody>
-                {devices.map((device: any) => {
-                  // const status = getDeviceStatus(device.last_seen);
+                {filteredDevices.map((device: any) => {
+                  const status = getDeviceStatus(device.last_seen);
                   return (
                     <Table.Tr key={device.id} style={{ cursor: 'pointer' }} onClick={() => navigate(`/devices/${device.id}/overview`)}>
                       <Table.Td>
                         <Group gap="xs">
-                          <Activity size={16} />
+                          {getDeviceIcon(device.type, 16)}
                           <Text fw={500} style={{ color: '#228be6', textDecoration: 'underline' }}>{device.name}</Text>
                         </Group>
                       </Table.Td>
@@ -209,14 +420,9 @@ export function DevicesView() {
                       </Table.Td>
                       <Table.Td>{device.metadata?.manufacturer || '-'}</Table.Td>
                       <Table.Td>{device.metadata?.model || '-'}</Table.Td>
-                      {/* <Table.Td>
+                      <Table.Td>
                         <Badge color={status.color}>{status.label}</Badge>
-                      </Table.Td> */}
-                      {/* <Table.Td>
-                        <Text size="sm" c="dimmed">
-                          {new Date(device.last_seen).toLocaleString()}
-                        </Text>
-                      </Table.Td> */}
+                      </Table.Td>
                       <Table.Td>
                         <Tooltip label={device.docs_ingested ? `Ingested at ${new Date(device.docs_ingested_at).toLocaleString()}` : 'Awaiting documentation ingestion'}>
                           <Group gap="xs">
@@ -273,6 +479,67 @@ export function DevicesView() {
             </Table>
           </ScrollArea>
         </Card>
+      ) : (
+        <Grid>
+          {filteredDevices.map((device: any) => {
+            const status = getDeviceStatus(device.last_seen);
+            return (
+              <Grid.Col key={device.id} span={{ base: 12, xs: 6, sm: 4, md: 3 }}>
+                <Card
+                  withBorder
+                  p="md"
+                  style={{ cursor: 'pointer', height: '100%' }}
+                  onClick={() => navigate(`/devices/${device.id}/overview`)}
+                >
+                  <Stack gap="sm">
+                    <Group justify="space-between">
+                      {getDeviceIcon(device.type, 24)}
+                      <Badge color={status.color} size="sm">{status.label}</Badge>
+                    </Group>
+                    <div>
+                      <Text fw={600} lineClamp={1}>{device.name}</Text>
+                      <Text size="xs" c="dimmed" lineClamp={1}>{device.metadata?.manufacturer || device.type}</Text>
+                    </div>
+                    <Group gap="xs">
+                      <Badge variant="light" color="blue" size="xs">{device.type}</Badge>
+                      <Badge variant="outline" size="xs">{device.integration}</Badge>
+                    </Group>
+                    <Group gap={4} justify="flex-end" onClick={(e) => e.stopPropagation()}>
+                      <Tooltip label="Re-ingest Docs">
+                        <ActionIcon
+                          color="blue"
+                          variant="subtle"
+                          size="sm"
+                          onClick={() => handleReingestDocs(device.id)}
+                          loading={reingestingId === device.id}
+                          disabled={reingestingId === device.id}
+                        >
+                          <RefreshCw size={14} />
+                        </ActionIcon>
+                      </Tooltip>
+                      <Tooltip label="Offboard">
+                        <ActionIcon
+                          color="red"
+                          variant="subtle"
+                          size="sm"
+                          onClick={() => setConfirmModal({
+                            open: true,
+                            deviceId: device.id,
+                            deviceName: device.name
+                          })}
+                          loading={offboardingId === device.id}
+                          disabled={offboardingId === device.id}
+                        >
+                          <Trash2 size={14} />
+                        </ActionIcon>
+                      </Tooltip>
+                    </Group>
+                  </Stack>
+                </Card>
+              </Grid.Col>
+            );
+          })}
+        </Grid>
       )}
 
       {/* Confirmation Modal */}
@@ -287,7 +554,7 @@ export function DevicesView() {
             Are you sure you want to offboard <Text component="span" fw={600}>{confirmModal.deviceName}</Text>?
           </Text>
           <Text size="sm" c="dimmed">
-            This will remove the device from monitoring. You can re-onboard it later from the Discovery page if needed.
+            This will remove the device from monitoring. You can re-onboard it later from the Integrations page if needed.
           </Text>
           <Group justify="flex-end" gap="xs">
             <Button

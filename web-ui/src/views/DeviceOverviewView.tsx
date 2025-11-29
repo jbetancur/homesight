@@ -1,10 +1,16 @@
 import { useEffect, useState, useCallback, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { Stack, Title, Text, Card, Group, Badge, Loader, Button, Table, Paper, Tabs, Container } from '@mantine/core';
-import { ArrowLeft, FileText, Activity, Droplets, Thermometer } from 'lucide-react';
+import {
+  Stack, Title, Text, Card, Group, Badge, Loader, Button, Table, Paper, Tabs,
+  Grid, ActionIcon, Tooltip
+} from '@mantine/core';
+import {
+  ArrowLeft, FileText, Activity, Droplets, Thermometer, Info, Clock, RefreshCw
+} from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import { useEventSubscription } from '../useEventSubscription';
 import { API_BASE_WITH_PATHS } from '../apiConfig';
+import { CapabilityWidget } from '../components/DeviceCapabilityWidgets';
 
 const API_BASE = API_BASE_WITH_PATHS;
 
@@ -24,11 +30,15 @@ interface Device {
   name: string;
   type: string;
   integration: string;
-  metadata: Record<string, string>;
+  metadata: Record<string, any>;
+  capabilities?: string[];
+  state?: Record<string, any>;
   docs_ingested: boolean;
   docs_ingested_at: string;
   docs_status: string;
   last_seen: string;
+  created_at: string;
+  updated_at: string;
 }
 
 interface KnowledgeBase {
@@ -58,6 +68,20 @@ function getSensorIcon(type: string) {
   }
 }
 
+function getDeviceStatus(lastSeen: string) {
+  const lastSeenDate = new Date(lastSeen);
+  const now = new Date();
+  const diffMinutes = (now.getTime() - lastSeenDate.getTime()) / (1000 * 60);
+
+  if (diffMinutes < 5) {
+    return { label: 'Online', color: 'green' };
+  } else if (diffMinutes < 30) {
+    return { label: 'Recent', color: 'yellow' };
+  } else {
+    return { label: 'Offline', color: 'red' };
+  }
+}
+
 export function DeviceOverviewView() {
   const { deviceId } = useParams<{ deviceId: string }>();
   const navigate = useNavigate();
@@ -66,6 +90,7 @@ export function DeviceOverviewView() {
   const [knowledgeBase, setKnowledgeBase] = useState<KnowledgeBase | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [refreshing, setRefreshing] = useState(false);
   const deviceRef = useRef<Device | null>(null);
 
   useEffect(() => {
@@ -219,47 +244,156 @@ export function DeviceOverviewView() {
     );
   }
 
+  const status = getDeviceStatus(device.last_seen);
+  const capabilities = device.capabilities || device.metadata?.capabilities || [];
+
+  const handleRefresh = async () => {
+    setRefreshing(true);
+    try {
+      const deviceRes = await fetch(`${API_BASE}/devices/${deviceId}`);
+      if (deviceRes.ok) {
+        const deviceData = await deviceRes.json();
+        setDevice(deviceData);
+        deviceRef.current = deviceData;
+      }
+    } catch (error) {
+      console.error('Failed to refresh device:', error);
+    } finally {
+      setRefreshing(false);
+    }
+  };
+
   return (
     <Stack gap="md">
       {/* Header */}
       <Group justify="space-between" align="center">
-        <Group gap="sm">
-          <Button
-            variant="subtle"
-            leftSection={<ArrowLeft size={18} />}
-            onClick={() => navigate('/')}
+        <Button
+          variant="subtle"
+          leftSection={<ArrowLeft size={18} />}
+          onClick={() => navigate('/')}
+        >
+          Back to Devices
+        </Button>
+        <Tooltip label="Refresh device data">
+          <ActionIcon
+            variant="light"
+            onClick={handleRefresh}
+            loading={refreshing}
+            size="lg"
           >
-            Back to Devices
-          </Button>
-        </Group>
+            <RefreshCw size={18} />
+          </ActionIcon>
+        </Tooltip>
       </Group>
 
-      {/* Device Info */}
-      <Card withBorder p="md">
-        <Group justify="space-between" align="flex-start">
-          <div>
-            <Group gap="sm">
-              <div>
+      {/* Device Header Card */}
+      <Card withBorder p="lg">
+        <Stack gap="md">
+          <Group justify="space-between" align="flex-start">
+            <div>
+              <Group gap="sm" mb="xs">
                 <Title order={2}>{device.name}</Title>
-                <Text size="sm" c="dimmed" mt="xs">
-                  {device.type} • {device.integration}
-                </Text>
-              </div>
-            </Group>
-          </div>
-          <Badge variant="light" color="blue" size="lg">
-            {device.type}
-          </Badge>
-        </Group>
+                <Badge color={status.color}>{status.label}</Badge>
+              </Group>
+              <Group gap="sm">
+                <Badge variant="light" color="blue">{device.type}</Badge>
+                <Badge variant="outline">{device.integration}</Badge>
+              </Group>
+            </div>
+          </Group>
+
+          <Grid>
+            <Grid.Col span={{ base: 12, xs: 6, sm: 3 }}>
+              <Paper p="sm" withBorder>
+                <Group gap="xs">
+                  <Info size={16} color="#868e96" />
+                  <div>
+                    <Text size="xs" c="dimmed">Manufacturer</Text>
+                    <Text size="sm" fw={500}>{device.metadata?.manufacturer || '-'}</Text>
+                  </div>
+                </Group>
+              </Paper>
+            </Grid.Col>
+
+            <Grid.Col span={{ base: 12, xs: 6, sm: 3 }}>
+              <Paper p="sm" withBorder>
+                <Group gap="xs">
+                  <Info size={16} color="#868e96" />
+                  <div>
+                    <Text size="xs" c="dimmed">Model</Text>
+                    <Text size="sm" fw={500}>{device.metadata?.model || '-'}</Text>
+                  </div>
+                </Group>
+              </Paper>
+            </Grid.Col>
+
+            <Grid.Col span={{ base: 12, xs: 6, sm: 3 }}>
+              <Paper p="sm" withBorder>
+                <Group gap="xs">
+                  <Clock size={16} color="#868e96" />
+                  <div>
+                    <Text size="xs" c="dimmed">Last Seen</Text>
+                    <Text size="sm" fw={500}>
+                      {new Date(device.last_seen).toLocaleString()}
+                    </Text>
+                  </div>
+                </Group>
+              </Paper>
+            </Grid.Col>
+
+            <Grid.Col span={{ base: 12, xs: 6, sm: 3 }}>
+              <Paper p="sm" withBorder>
+                <Group gap="xs">
+                  <Activity size={16} color="#868e96" />
+                  <div>
+                    <Text size="xs" c="dimmed">Capabilities</Text>
+                    <Text size="sm" fw={500}>{capabilities.length || 0}</Text>
+                  </div>
+                </Group>
+              </Paper>
+            </Grid.Col>
+          </Grid>
+        </Stack>
       </Card>
 
       {/* Device Details Grid */}
-      <Tabs defaultValue="sensors">
+      <Tabs defaultValue="controls">
         <Tabs.List>
+          <Tabs.Tab value="controls">Controls</Tabs.Tab>
           <Tabs.Tab value="sensors">Sensors</Tabs.Tab>
           <Tabs.Tab value="info">Device Information</Tabs.Tab>
           <Tabs.Tab value="docs">Documentation</Tabs.Tab>
         </Tabs.List>
+
+        {/* Controls Tab - Capability-driven widgets */}
+        <Tabs.Panel value="controls" pt="md">
+          {(!device.capabilities || device.capabilities.length === 0) ? (
+            <Card withBorder p="xl">
+              <Stack align="center" gap="md">
+                <Activity size={48} color="#868e96" />
+                <div style={{ textAlign: 'center' }}>
+                  <Text size="lg" fw={600}>No Controls Available</Text>
+                  <Text size="sm" c="dimmed">
+                    This device hasn't reported any controllable capabilities yet
+                  </Text>
+                </div>
+              </Stack>
+            </Card>
+          ) : (
+            <Grid>
+              {device.capabilities.map((capability: string, idx: number) => (
+                <Grid.Col key={idx} span={{ base: 12, sm: 6, md: 4 }}>
+                  <CapabilityWidget
+                    deviceId={device.id}
+                    capability={capability}
+                    state={device.state}
+                    metadata={device.metadata}
+                  />
+                </Grid.Col>
+              ))}
+            </Grid>
+          )}
+        </Tabs.Panel>
 
         <Tabs.Panel value="sensors" pt="md">
           {sensors.length === 0 ? (
