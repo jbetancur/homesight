@@ -102,7 +102,7 @@ func (s *Server) setupRoutes() {
 	s.router.Use(middleware.Timeout(60 * time.Second))
 	s.router.Use(cors.Handler(cors.Options{
 		AllowedOrigins:   []string{"*"},
-		AllowedMethods:   []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
+		AllowedMethods:   []string{"GET", "POST", "PATCH", "PUT", "DELETE", "OPTIONS"},
 		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type", "X-CSRF-Token"},
 		ExposedHeaders:   []string{"Link"},
 		AllowCredentials: false,
@@ -140,9 +140,15 @@ func (s *Server) setupRoutes() {
 			r.Post("/{id}/command", s.handleDeviceCommand)              // Send command to device via MQTT
 			r.Post("/{id}/reingest-docs", s.handleReingestDeviceDocs)   // Re-trigger document discovery for a device
 			r.Post("/{id}/docs-status", s.handleUpdateDeviceDocsStatus) // Update device documentation status and generate KB articles (called by AI sidecar)
+			r.Patch("/{id}/zone", s.handleUpdateDeviceZone)             // Update device zone assignment
 			// Demo/Testing endpoints - In production, guard with admin authentication
 			r.Post("/", s.createDevice)       // Manual device creation (testing only - normally auto-discovered)
 			r.Delete("/{id}", s.deleteDevice) // Hard delete (testing/cleanup only)
+		})
+
+		// Zones/Rooms
+		r.Route("/zones", func(r chi.Router) {
+			r.Get("/", s.handleListZones)
 		})
 
 		// Metrics
@@ -416,6 +422,86 @@ func (s *Server) updateIncidentAnalysis(w http.ResponseWriter, r *http.Request) 
 	json.NewEncoder(w).Encode(incident)
 }
 
+// enrichDeviceWithState enriches a device with current sensor values and incident state
+func (s *Server) enrichDeviceWithState(ctx context.Context, device model.Device) map[string]interface{} {
+	// Start with all original device fields
+	enriched := map[string]interface{}{
+		"id":               device.ID,
+		"name":             device.Name,
+		"type":             device.Type,
+		"integration":      device.Integration,
+		"zone_id":          device.ZoneID,
+		"asset_id":         device.AssetID,
+		"enabled":          device.Enabled,
+		"last_seen":        device.LastSeen,
+		"metadata":         device.Metadata,
+		"docs_ingested":    device.DocsIngested,
+		"docs_ingested_at": device.DocsIngestedAt,
+		"docs_status":      device.DocsStatus,
+		"created_at":       device.CreatedAt,
+		"updated_at":       device.UpdatedAt,
+		// Add enrichment fields
+		"state":  "normal",
+		"active": false,
+		"value":  nil,
+		"unit":   "",
+		"trend":  nil,
+	}
+
+	// Get latest sensor values
+	sensors, err := s.sensorRepo.ListByDevice(ctx, device.ID)
+	if err == nil && len(sensors) > 0 {
+		// Use first sensor's value (most devices have one primary sensor)
+		sensor := sensors[0]
+
+		// Query latest metric (last 1 minute)
+		to := time.Now()
+		from := to.Add(-1 * time.Minute)
+		metrics, err := s.metricsSink.Query(ctx, sensor.ID, from, to)
+		if err == nil && len(metrics) > 0 {
+			// Get most recent metric
+			metric := metrics[len(metrics)-1]
+			enriched["value"] = metric.Value
+			enriched["unit"] = sensor.Unit
+			enriched["last_updated"] = metric.Timestamp
+		}
+	}
+
+	// Check for active (unresolved) incidents
+	allIncidents, err := s.incidentService.List(ctx, map[string]any{
+		"device_id": device.ID,
+	})
+	if err == nil {
+		// Filter to only unresolved incidents
+		var unresolvedIncidents []model.Incident
+		for _, incident := range allIncidents {
+			if incident.Status != "resolved" {
+				unresolvedIncidents = append(unresolvedIncidents, incident)
+			}
+		}
+
+		if len(unresolvedIncidents) > 0 {
+			enriched["active"] = true
+
+			// Determine state based on severity
+			highestSeverity := "normal"
+			for _, incident := range unresolvedIncidents {
+				switch incident.Severity {
+				case "critical":
+					highestSeverity = "critical"
+				case "warning":
+					if highestSeverity != "critical" {
+						highestSeverity = "warning"
+					}
+				}
+			}
+			enriched["state"] = highestSeverity
+		}
+	}
+
+	return enriched
+}
+
 // listDevices returns all devices
 func (s *Server) listDevices(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
@@ -426,8 +512,15 @@ func (s *Server) listDevices(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Enrich devices with sensor values and incident states
+	enrichedDevices := make([]map[string]interface{}, 0, len(devices))
+	for _, device := range devices {
+		enriched := s.enrichDeviceWithState(ctx, device)
+		enrichedDevices = append(enrichedDevices, enriched)
+	}
+
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(devices)
+	json.NewEncoder(w).Encode(enrichedDevices)
 }
 
 // getDevice returns a specific device
@@ -445,8 +538,11 @@ func (s *Server) getDevice(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Enrich device with current state and sensor values
+	enriched := s.enrichDeviceWithState(ctx, *device)
+
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(device)
+	json.NewEncoder(w).Encode(enriched)
 }
 
 // handleDeviceCommand sends a command to a device via MQTT

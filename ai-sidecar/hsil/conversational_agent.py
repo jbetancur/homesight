@@ -36,15 +36,19 @@ class ConversationalAgentService:
         self,
         llm_provider,
         memory_service,
-        learning_service,
-        policy_engine
+        adaptive_learning,
+        feedback_learning,
+        policy_engine,
+        weather_service=None
     ):
         self.llm = llm_provider
         self.memory = memory_service
-        self.learning = learning_service
+        self.adaptive_learning = adaptive_learning
+        self.feedback_learning = feedback_learning
         self.policy = policy_engine
+        self.weather = weather_service
 
-        logger.info("ConversationalAgentService initialized")
+        logger.info("ConversationalAgentService initialized (adaptive + feedback learning)")
 
     async def chat(
         self,
@@ -72,6 +76,9 @@ class ConversationalAgentService:
             home_state
         )
 
+        # Debug: Log the context sent to the LLM
+        logger.info(f"LLM context for message '{message}': {json.dumps(enriched_context, indent=2)}")
+
         # Get system prompt with learned preferences
         system_prompt = await self._build_system_prompt(enriched_context)
 
@@ -88,9 +95,9 @@ class ConversationalAgentService:
             response = await self._parse_llm_response(llm_response, enriched_context)
 
             # Record interaction for learning
-            if self.learning:
+            if self.adaptive_learning:
                 interaction_id = f"{session_id}_{__import__('uuid').uuid4().hex[:8]}"
-                await self.learning.record_interaction(
+                await self.adaptive_learning.record_interaction(
                     interaction_id=interaction_id,
                     user_query=message,
                     system_response=response.reply,
@@ -134,6 +141,15 @@ class ConversationalAgentService:
         if home_state:
             context["home_state"] = home_state
 
+        # Add weather/environmental context
+        if self.weather:
+            try:
+                env_context = await self.weather.get_environmental_context()
+                if env_context:
+                    context["environment"] = self.weather.format_for_llm(env_context)
+            except Exception as e:
+                logger.warning(f"Failed to fetch weather: {e}")
+
         # Retrieve relevant memories
         # (Simple keyword search for now - could use semantic search with embeddings)
         try:
@@ -150,14 +166,41 @@ class ConversationalAgentService:
             logger.warning(f"Failed to retrieve memories: {e}")
 
         # Add learned preferences
+        # Comfort preferences from adaptive learning
         try:
-            if self.learning:
+            if self.adaptive_learning:
                 location = event_context.location if event_context else "home"
-                comfort_prefs = await self.learning.get_comfort_preference(location)
+                comfort_prefs = await self.adaptive_learning.get_comfort_preference(location)
                 if comfort_prefs:
                     context["learned_preferences"] = comfort_prefs
         except Exception as e:
-            logger.warning(f"Failed to retrieve learned preferences: {e}")
+            logger.warning(f"Failed to retrieve comfort preferences: {e}")
+
+        # User feedback/preferences from feedback learning
+        try:
+            if self.feedback_learning:
+                user_prefs = await self.feedback_learning.get_all_preferences(min_confidence=0.6)
+                if user_prefs:
+                    context["user_preferences"] = user_prefs
+        except Exception as e:
+            logger.warning(f"Failed to retrieve user feedback preferences: {e}")
+
+        # Add RAG context if available
+        if hasattr(self, 'rag_engine') and self.rag_engine:
+            try:
+                rag_results = self.rag_engine.query(message, n_results=3)
+                docs = []
+                for r in rag_results:
+                    if r.get('relevance_score', 0) > 0.3:
+                        docs.append(f"[{r['metadata'].get('source', 'Unknown')}]: {r['text'][:200]}")
+                if docs:
+                    context['rag_context'] = "\nRelevant documentation:\n" + "\n".join(docs)
+            except Exception as e:
+                logger.warning(f"RAG query failed: {e}")
+
+        # Add session history if available
+        if hasattr(self, 'session_history') and self.session_history:
+            context['session_history'] = self.session_history[-4:]
 
         return context
 
@@ -166,14 +209,19 @@ class ConversationalAgentService:
 
         prompt = """You are HomeSight, an intelligent home assistant.
 
-Your capabilities:
-- Monitor home sensors (temperature, humidity, water, motion, etc.)
-- Control HVAC, water valves, and other devices
-- Learn user preferences and adapt over time
-- Detect anomalies and safety issues
+    Your capabilities:
+    - Monitor home sensors (temperature, humidity, water, motion, etc.)
+    - Control HVAC, water valves, and other devices
+    - Learn user preferences and adapt over time
+    - Detect anomalies and safety issues
 
-Current Context:
-"""
+    Instructions:
+    - If a device of type 'leak' is active and state is 'critical', there may be a water leak in that location.
+    - If the sensor history is erratic or confidence is low, mention uncertainty and suggest further investigation or user confirmation.
+    - Use context fields like 'state', 'active', and any available confidence or history to inform your response.
+
+    Current Context:
+    """
 
         # Add home state
         if "home_state" in context:
@@ -191,6 +239,23 @@ Learned User Preferences (based on {prefs.get('sample_count', 0)} interactions):
 - Preferred temperature: {prefs.get('temp_min', 68):.1f}°F - {prefs.get('temp_max', 75):.1f}°F
 - Preferred humidity: {prefs.get('humidity_min', 35):.0f}% - {prefs.get('humidity_max', 55):.0f}%
 """
+
+
+        # Add user feedback/preferences
+        if "user_preferences" in context:
+            prompt += "\nUser Feedback Preferences:\n"
+            for k, v in context["user_preferences"].items():
+                prompt += f"- {k}: {v}\n"
+
+        # Add RAG context
+        if "rag_context" in context:
+            prompt += f"\n{context['rag_context']}\n"
+
+        # Add session history
+        if "session_history" in context:
+            prompt += "\nRecent Conversation:\n"
+            for msg in context["session_history"]:
+                prompt += f"- [{msg['role']}] {msg['content'][:120]}\n"
 
         # Add relevant memories
         if "memories" in context and context["memories"]:
@@ -329,8 +394,8 @@ If no action is needed, omit the action field.
 
         This is how the system learns from user feedback.
         """
-        if not self.learning:
-            logger.warning("Learning service not available for feedback")
+        if not self.feedback_learning:
+            logger.warning("Feedback learning service not available for feedback")
             return
 
         from .learning import UserFeedback, FeedbackType
@@ -342,6 +407,6 @@ If no action is needed, omit the action field.
             correction=correction
         )
 
-        await self.learning.record_feedback(feedback)
+        await self.feedback_learning.record_feedback(feedback)
 
         logger.info(f"Recorded user feedback: {feedback_type} for {interaction_id}")

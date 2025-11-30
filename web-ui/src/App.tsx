@@ -10,7 +10,7 @@ import { IncidentsView } from './views/IncidentsView';
 import { IntegrationsView } from './views/IntegrationsView';
 import { StatusView } from './views/StatusView';
 import { ZWaveView } from './views/ZWaveView';
-import { HSILView } from './views/HSILView';
+import HSILRoomView from './views/HSILRoomView';
 import './App.css';
 
 const navItems = [
@@ -112,7 +112,7 @@ function AppContent() {
         <Container size="xl" py="md">
           <Routes>
             <Route path="/" element={<DevicesView />} />
-            <Route path="/hsil" element={<HSILView />} />
+            <Route path="/hsil" element={<HSILRoomView />} />
             <Route path="/devices/:deviceId/overview" element={<DeviceOverviewView />} />
             <Route path="/devices/:deviceId/sensors/:sensorId" element={<SensorDetailView />} />
             <Route path="/incidents" element={<IncidentsView />} />

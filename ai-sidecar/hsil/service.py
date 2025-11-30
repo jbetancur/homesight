@@ -31,7 +31,8 @@ from .policy_engine import PolicyEngineService
 from .action_dispatcher import ActionDispatcherService
 from .conversational_agent import ConversationalAgentService
 from .adaptive_learning import AdaptiveLearningService
-from .learning import FeedbackLearningService
+from .feedback_learning import FeedbackLearningService
+from .weather_service import WeatherService
 
 logger = logging.getLogger(__name__)
 
@@ -86,12 +87,17 @@ class HSILService:
             mqtt_client=mqtt_client
         )
 
+        # Weather & Environmental
+        self.weather_service = WeatherService()
+
         # Conversational interface
         self.conversational_agent = ConversationalAgentService(
             llm_provider=llm_provider,
             memory_service=self.memory,
-            learning_service=self.feedback_learning,
-            policy_engine=self.policy_engine
+            adaptive_learning=self.adaptive_learning,
+            feedback_learning=self.feedback_learning,
+            policy_engine=self.policy_engine,
+            weather_service=self.weather_service
         )
 
         logger.info("✅ HSIL services initialized successfully")
@@ -317,29 +323,14 @@ class HSILService:
                 if not device_id:
                     continue
 
-                # Get HSIL context for this device
-                context = await self.event_ingestion.get_device_context(device_id)
+                # Use enriched data from backend (state, active, value already included)
+                state_value = device.get("state", "normal")
+                current_value = device.get("value")
+                active = device.get("active", False)
+                trend = device.get("trend")
 
-                # Determine state based on context and device info
-                state_value = "normal"
-                current_value = None
-                trend = None
-
-                if context:
-                    # Get first sensor value
-                    for sensor_id, sensor_data in context.items():
-                        current_value = sensor_data.get("value")
-
-                        # Determine trend
-                        trend_1h = sensor_data.get("trend_1h")
-                        if trend_1h:
-                            if trend_1h > 0.5:
-                                trend = "up"
-                            elif trend_1h < -0.5:
-                                trend = "down"
-                            else:
-                                trend = "stable"
-                        break
+                # Debug logging
+                logger.debug(f"Device {device_id}: state={state_value}, active={active}, raw_device={device}")
 
                 # Determine device type for icon
                 device_type = device.get("type", "unknown")
@@ -359,7 +350,7 @@ class HSILService:
                     label=device.get("name", "Unknown Device"),
                     state=state_value,
                     value=current_value,
-                    active=False,
+                    active=active,
                     location=device.get("zone_id", "Unknown"),
                     last_updated=datetime.now(),
                     trend=trend

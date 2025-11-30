@@ -940,6 +940,30 @@ async def hsil_get_stats():
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get("/hsil/weather")
+async def hsil_get_weather():
+    """
+    Get current weather and environmental conditions.
+
+    Returns current weather, sunrise/sunset times, and air quality.
+    """
+    if not hsil_service:
+        raise HTTPException(status_code=503, detail="HSIL not initialized")
+
+    try:
+        env_context = await hsil_service.weather_service.get_environmental_context()
+        if env_context:
+            return env_context.model_dump(mode='json')
+        else:
+            return {
+                "error": "Weather service not configured",
+                "message": "Set OPENWEATHER_API_KEY environment variable to enable weather data"
+            }
+    except Exception as e:
+        logger.error(f"Weather fetch error: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.get("/hsil/preferences")
 async def hsil_get_preferences():
     """Get all learned preferences"""

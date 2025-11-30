@@ -238,7 +238,6 @@ LLM --> Dashboard
 
 PolicyEngine --> Actions["Action Dispatcher (MQTT Commands)"]
 Actions --> MQTT
-
 ```
 
 ### Core Components

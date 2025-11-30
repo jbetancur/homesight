@@ -34,6 +34,7 @@ class AdaptiveLearningService:
     def __init__(self, db_path: str = "/var/lib/homesight/hsil_memory.db"):
         self.db_path = db_path
         self._init_db()
+        self._init_policy_table()
 
         # In-memory caches for fast lookup
         self.comfort_preferences = {}  # location -> preferred temp range
@@ -44,6 +45,69 @@ class AdaptiveLearningService:
         self._load_learned_data()
 
         logger.info("AdaptiveLearningService initialized")
+
+    def _init_policy_table(self):
+        """Initialize policy table for adaptive automation"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS automation_policies (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id TEXT,
+                device_id TEXT,
+                policy_key TEXT NOT NULL,
+                policy_value TEXT NOT NULL,
+                confidence REAL DEFAULT 0.5,
+                feedback_count INTEGER DEFAULT 0,
+                last_updated TIMESTAMP NOT NULL
+            )
+        """)
+        conn.commit()
+        conn.close()
+
+    def update_policy_from_feedback(self, user_id: str, device_id: str, policy_key: str, preferred_value: str):
+        """
+        Update automation policy based on user feedback. Increments feedback count and confidence.
+        """
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT confidence, feedback_count FROM automation_policies
+            WHERE user_id = ? AND device_id = ? AND policy_key = ?
+        """, (user_id, device_id, policy_key))
+        row = cursor.fetchone()
+        if row:
+            confidence, feedback_count = row
+            new_confidence = min(1.0, confidence + 0.1)
+            new_count = feedback_count + 1
+            cursor.execute("""
+                UPDATE automation_policies SET policy_value = ?, confidence = ?, feedback_count = ?, last_updated = ?
+                WHERE user_id = ? AND device_id = ? AND policy_key = ?
+            """, (preferred_value, new_confidence, new_count, datetime.now().isoformat(), user_id, device_id, policy_key))
+        else:
+            cursor.execute("""
+                INSERT INTO automation_policies (user_id, device_id, policy_key, policy_value, confidence, feedback_count, last_updated)
+                VALUES (?, ?, ?, ?, ?, 1, ?)
+            """, (user_id, device_id, policy_key, preferred_value, 0.6, datetime.now().isoformat()))
+        conn.commit()
+        conn.close()
+        logger.info(f"Policy updated: {policy_key}={preferred_value} for user={user_id}, device={device_id}")
+
+    def get_policy(self, user_id: str, device_id: str, policy_key: str) -> Optional[str]:
+        """
+        Retrieve current automation policy for a user/device/key.
+        """
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT policy_value, confidence FROM automation_policies
+            WHERE user_id = ? AND device_id = ? AND policy_key = ?
+        """, (user_id, device_id, policy_key))
+        row = cursor.fetchone()
+        conn.close()
+        if row and row[1] >= 0.7:
+            return row[0]
+        return None
 
     def _init_db(self):
         """Initialize learning database schema"""
@@ -584,3 +648,50 @@ class AdaptiveLearningService:
             "recent_success_rate": recent_success_rate,
             "locations_with_preferences": len(self.comfort_preferences)
         }
+
+    async def record_interaction(
+        self,
+        interaction_id: str,
+        user_query: str,
+        system_response: str,
+        action_taken: Any = None,
+        context: Any = None
+    ):
+        """
+        Record a conversational interaction for learning purposes.
+        Persists to the conversational_interactions table.
+        """
+        import json
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+
+        # Create table if not exists
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS conversational_interactions (
+                id TEXT PRIMARY KEY,
+                timestamp TEXT NOT NULL,
+                user_query TEXT,
+                system_response TEXT,
+                action_taken TEXT,
+                context TEXT
+            )
+        """)
+
+        cursor.execute("""
+            INSERT OR REPLACE INTO conversational_interactions
+            (id, timestamp, user_query, system_response, action_taken, context)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (
+            interaction_id,
+            datetime.now().isoformat(),
+            user_query,
+            system_response,
+            json.dumps(action_taken) if action_taken is not None else None,
+            json.dumps(context) if context is not None else None
+        ))
+
+        conn.commit()
+        conn.close()
+
+        logger.info(f"Recorded interaction: {interaction_id}, query='{user_query}', response='{system_response}', action={action_taken}")
