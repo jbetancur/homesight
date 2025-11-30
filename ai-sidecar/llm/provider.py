@@ -25,7 +25,7 @@ from tenacity import (
 
 logger = logging.getLogger(__name__)
 
-from metrics import (
+from metrics.metrics  import (
     llm_inference_duration,
     llm_inferences,
     llm_input_tokens,

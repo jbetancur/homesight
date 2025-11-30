@@ -174,6 +174,16 @@ func (s *Server) setupRoutes() {
 			r.Post("/analyze", s.aiAnalyze)
 		})
 
+		// HSIL proxy (HomeSight Intelligence Layer)
+		r.Route("/hsil", func(r chi.Router) {
+			r.Post("/events", s.hsilProcessEvent)
+			r.Post("/chat", s.hsilChat)
+			r.Post("/feedback", s.hsilFeedback)
+			r.Get("/state", s.hsilGetState)
+			r.Get("/stats", s.hsilGetStats)
+			r.Get("/preferences", s.hsilGetPreferences)
+		})
+
 		// Events
 		r.Get("/events", s.handleEvents)
 	})

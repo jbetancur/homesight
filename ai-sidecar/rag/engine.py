@@ -20,7 +20,7 @@ import threading
 logger = logging.getLogger(__name__)
 
 # Import metrics
-from metrics import rag_retrieval_duration, rag_retrievals
+from metrics.metrics import rag_retrieval_duration, rag_retrievals
 
 
 class RAGEngine:

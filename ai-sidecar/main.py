@@ -26,7 +26,7 @@ from contextlib import asynccontextmanager
 from config import get_config
 
 # Metrics
-from metrics import get_metrics, active_sessions, chat_response_time, chat_requests
+from metrics.metrics import get_metrics, active_sessions, chat_response_time, chat_requests
 
 # Models
 from models.chat import ChatRequest, ChatResponse
@@ -46,8 +46,7 @@ from llm.provider import LLMProvider
 from rag.engine import RAGEngine
 
 # Queue management
-from analysis_queue import AnalysisQueue
-from task_queue import TaskQueue, QueueType, QueueConfig
+from queues.task_queue import TaskQueue, QueueType, QueueConfig
 
 # Configure logging to both console and file
 # Use /app/log in Docker, logs locally
@@ -84,6 +83,7 @@ root_logger.addHandler(console_handler)
 # Create module logger
 logger = logging.getLogger(__name__)
 
+
 # Global service instances (initialized on startup)
 llm_provider = None
 rag_engine = None
@@ -91,7 +91,7 @@ session_service = None
 chat_service = None
 analysis_service = None
 document_service = None
-analysis_queue = None
+hsil_service = None  # HSIL service
 
 # Task queues
 discovery_queue = None
@@ -119,7 +119,7 @@ async def lifespan(app: FastAPI):
 
     # Initialize services
     global llm_provider, rag_engine, session_service, chat_service, analysis_service, document_service, analysis_queue
-    global discovery_queue, ingestion_queue, analysis_task_queue
+    global discovery_queue, ingestion_queue, analysis_task_queue, hsil_service
 
     try:
         config = get_config()
@@ -204,9 +204,6 @@ async def lifespan(app: FastAPI):
             )
         )
 
-        # Keep old analysis_queue for backward compatibility
-        analysis_queue = AnalysisQueue(max_concurrent=config.llm.inference.max_concurrent_tasks)
-
         # Initialize MQTT service for real-time device state
         logger.info("Initializing MQTT service...")
         try:
@@ -228,6 +225,31 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.warning(f"Failed to initialize MQTT service: {e}")
             logger.warning("Continuing without real-time MQTT updates...")
+
+        # Initialize HSIL (HomeSight Intelligence Layer)
+        logger.info("Initializing HSIL (HomeSight Intelligence Layer)...")
+        try:
+            from hsil.service import HSILService
+
+            # Get MQTT client
+            mqtt_service = get_mqtt_service()
+            mqtt_client = mqtt_service.client if mqtt_service else None
+
+            # Get ChromaDB client from RAG engine
+            chroma_client = rag_engine.client if rag_engine else None
+
+            hsil_service = HSILService(
+                chroma_client=chroma_client,
+                llm_provider=llm_provider,
+                mqtt_client=mqtt_client,
+                backend_url=config.backend_url,
+                db_path="/var/lib/homesight/hsil_memory.db"
+            )
+
+            logger.info("✅ HSIL initialized successfully")
+        except Exception as e:
+            logger.error(f"Failed to initialize HSIL: {e}")
+            logger.warning("Continuing without HSIL...")
 
         logger.info("✅ All services and queues initialized")
         logger.info(f"Queues: discovery={config.queues.discovery.max_concurrent}, "
@@ -376,15 +398,15 @@ async def analyze(request: AnalyzeRequest):
     """
     if not analysis_service:
         raise HTTPException(status_code=503, detail="Analysis service not initialized")
-    if not analysis_queue:
-        raise HTTPException(status_code=503, detail="Analysis queue not initialized")
+    if not analysis_task_queue:
+        raise HTTPException(status_code=503, detail="Analysis task queue not initialized")
 
     try:
         # Queue the analysis task to limit concurrent LLM inference
         async def analyze_task():
             return await analysis_service.analyze(request)
 
-        response = await analysis_queue.execute(analyze_task, task_id="analyze")
+        response = await analysis_task_queue.enqueue(analyze_task, task_id="analyze")
         return response
     except Exception as e:
         logger.error(f"Analysis error: {e}")
@@ -801,6 +823,142 @@ async def clear_session(session_id: str):
 
     session_service.clear_session(session_id)
     return {"status": "cleared", "session_id": session_id}
+
+
+# ==================== HSIL ENDPOINTS ====================
+
+@app.post("/hsil/events")
+async def hsil_process_event(event: dict):
+    """
+    Process a sensor event through HSIL pipeline.
+
+    Pipeline:
+    1. Event ingestion (normalize, enrich with trends/anomalies)
+    2. Feature extraction (extract high-level features)
+    3. Adaptive learning (update baselines, learn patterns)
+    4. Behavior predictions
+    5. Policy decisions
+    6. Action dispatch
+    """
+    if not hsil_service:
+        raise HTTPException(status_code=503, detail="HSIL not initialized")
+
+    try:
+        result = await hsil_service.process_event(
+            device_id=event.get("device_id"),
+            sensor_id=event.get("sensor_id", event.get("device_id")),
+            event_type=event.get("event_type", "unknown"),
+            value=event.get("value"),
+            location=event.get("location", "Unknown"),
+            device_type=event.get("device_type", "unknown"),
+            metadata=event.get("metadata")
+        )
+        return result
+    except Exception as e:
+        logger.error(f"HSIL event processing error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/hsil/chat")
+async def hsil_chat(request: dict):
+    """
+    Conversational interface to HSIL.
+
+    Integrates:
+    - Learned preferences
+    - Current home state
+    - Memory/history
+    - Policy engine for actions
+    """
+    if not hsil_service:
+        raise HTTPException(status_code=503, detail="HSIL not initialized")
+
+    try:
+        response = await hsil_service.chat(
+            message=request.get("message"),
+            session_id=request.get("session_id")
+        )
+        # Return dict for JSON serialization
+        return {
+            "reply": response.reply,
+            "action": response.action.model_dump() if response.action else None
+        }
+    except Exception as e:
+        logger.error(f"HSIL chat error: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/hsil/feedback")
+async def hsil_feedback(feedback: dict):
+    """
+    Record user feedback on HSIL responses.
+
+    This is how the system learns from user interactions.
+    """
+    if not hsil_service:
+        raise HTTPException(status_code=503, detail="HSIL not initialized")
+
+    try:
+        await hsil_service.provide_feedback(
+            interaction_id=feedback.get("interaction_id"),
+            feedback_type=feedback.get("feedback_type"),
+            rating=feedback.get("rating"),
+            correction=feedback.get("correction")
+        )
+        return {"status": "recorded"}
+    except Exception as e:
+        logger.error(f"HSIL feedback error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/hsil/state")
+async def hsil_get_state():
+    """
+    Get current home state with HSIL enrichment.
+
+    Returns all devices with:
+    - Current values
+    - Learned baselines
+    - Anomaly detection
+    - Predictions
+    """
+    if not hsil_service:
+        raise HTTPException(status_code=503, detail="HSIL not initialized")
+
+    try:
+        state = await hsil_service.get_home_state()
+        return state.model_dump(mode='json')
+    except Exception as e:
+        logger.error(f"HSIL state error: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/hsil/stats")
+async def hsil_get_stats():
+    """Get HSIL statistics and learning metrics"""
+    if not hsil_service:
+        raise HTTPException(status_code=503, detail="HSIL not initialized")
+
+    try:
+        stats = await hsil_service.get_stats()
+        return stats
+    except Exception as e:
+        logger.error(f"HSIL stats error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/hsil/preferences")
+async def hsil_get_preferences():
+    """Get all learned preferences"""
+    if not hsil_service:
+        raise HTTPException(status_code=503, detail="HSIL not initialized")
+
+    try:
+        prefs = await hsil_service.get_learned_preferences()
+        return prefs
+    except Exception as e:
+        logger.error(f"HSIL preferences error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 if __name__ == "__main__":

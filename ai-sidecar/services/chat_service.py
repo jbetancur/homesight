@@ -10,7 +10,7 @@ from services.session_service import SessionService
 from llm.provider import LLMProvider
 from llm.tools import ToolRegistry, get_default_tools
 from rag.engine import RAGEngine
-from metrics import rag_retrieval_duration, rag_retrievals, chat_actions, llm_inferences, llm_inference_duration
+from metrics.metrics import rag_retrieval_duration, rag_retrievals, chat_actions, llm_inferences, llm_inference_duration
 
 logger = logging.getLogger(__name__)
 

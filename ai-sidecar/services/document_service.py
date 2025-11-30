@@ -16,8 +16,8 @@ from pathlib import Path
 from rag.fetcher import DocumentAutoFetcher
 from rag.engine import RAGEngine
 from config import get_config
-from ingestion_tracker import IngestionTracker
-from metrics import kb_ingestions, kb_average_confidence, kb_sources
+from services.ingestion_tracker import IngestionTracker
+from metrics.metrics import kb_ingestions, kb_average_confidence, kb_sources
 
 logger = logging.getLogger(__name__)
 

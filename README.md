@@ -170,6 +170,77 @@ graph TB
     class OPENAI cloud
 ```
 
+**HIL Home Intelligence Layer**
+
+```mermaid
+flowchart TD
+
+%% -------------------------------------
+%% CORE LAYER (EXISTING HOMESIGHT CORE)
+%% -------------------------------------
+
+subgraph Core["HomeSight Core"]
+    MQTT["MQTT Event Bus"]
+    DeviceMgr["Device Manager (Z-Wave, WiFi, Zigbee, Thread)"]
+    Incidents["Incident Engine (Anomaly Detection)"]
+    Summaries["Device Summaries & Documents"]
+    Storage["Device State DB"]
+end
+
+MQTT --> DeviceMgr
+DeviceMgr --> Incidents
+DeviceMgr --> Storage
+Incidents --> Summaries
+
+%% -------------------------------------
+%% INTELLIGENCE LAYER (HSIL)
+%% -------------------------------------
+
+subgraph HSIL["HomeSight Intelligence Layer"]
+    EventIngest["Event Ingestion & Context Builder"]
+    FeatureExtract["Feature Extraction (Trends, Patterns, Context)"]
+    Memory["Home Memory Graph (Preferences, History)"]
+    BehaviorModel["Behavior Model (Comfort, Water, HVAC, Solar)"]
+    PolicyEngine["Policy Engine (Safety & Comfort Rules)"]
+    LLM["Conversational Agent (LLM Wrapper)"]
+end
+
+Storage --> EventIngest
+Incidents --> EventIngest
+Summaries --> EventIngest
+
+EventIngest --> FeatureExtract
+FeatureExtract --> Memory
+FeatureExtract --> BehaviorModel
+
+Memory --> BehaviorModel
+BehaviorModel --> PolicyEngine
+
+Memory --> LLM
+BehaviorModel --> LLM
+PolicyEngine --> LLM
+
+%% -------------------------------------
+%% USER INTERFACE LAYER (CHAT + DASHBOARD)
+%% -------------------------------------
+
+subgraph UI["User Interaction Layer"]
+    SMS["SMS / iMessage / WhatsApp"]
+    Dashboard["Web Dashboard (Tile Grid UI)"]
+end
+
+LLM --> SMS
+LLM --> Dashboard
+
+%% -------------------------------------
+%% ACTION OUTPUT BACK TO HOME
+%% -------------------------------------
+
+PolicyEngine --> Actions["Action Dispatcher (MQTT Commands)"]
+Actions --> MQTT
+
+```
+
 ### Core Components
 
 **MQTT Message Bus:**

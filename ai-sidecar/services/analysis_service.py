@@ -6,7 +6,7 @@ from typing import Dict, Any, Optional, List
 from models.analyze import AnalyzeRequest, AnalyzeResponse
 from llm.provider import LLMProvider
 from rag.engine import RAGEngine
-from metrics import analysis_requests, analysis_time, llm_inferences, llm_inference_duration, rag_retrievals, rag_retrieval_duration
+from metrics.metrics import analysis_requests, analysis_time, llm_inferences, llm_inference_duration, rag_retrievals, rag_retrieval_duration
 
 logger = logging.getLogger(__name__)
 

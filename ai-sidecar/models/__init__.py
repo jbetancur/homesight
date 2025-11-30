@@ -20,8 +20,6 @@ __all__ = [
     "AnalyzeRequest",
     "AnalyzeResponse",
     "DeviceEvent",
-    "DeviceInfo",  # Deprecated
-    # New device ontology
     "DeviceProfile",
     "DeviceType",
     "PowerSource",

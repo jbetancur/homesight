@@ -2,7 +2,7 @@
 import { useState } from 'react';
 import { BrowserRouter as Router, Routes, Route, Link, useLocation } from 'react-router-dom';
 import { AppShell, Group, Stack, Text, Container, Burger } from '@mantine/core';
-import { Home, AlertCircle, Activity, Settings, Server, LogOut, Layers } from 'lucide-react';
+import { Home, AlertCircle, Activity, Settings, Server, LogOut, Layers, Brain } from 'lucide-react';
 import { DevicesView } from './views/DevicesView';
 import { DeviceOverviewView } from './views/DeviceOverviewView';
 import { SensorDetailView } from './views/SensorDetailView';
@@ -10,10 +10,12 @@ import { IncidentsView } from './views/IncidentsView';
 import { IntegrationsView } from './views/IntegrationsView';
 import { StatusView } from './views/StatusView';
 import { ZWaveView } from './views/ZWaveView';
+import { HSILView } from './views/HSILView';
 import './App.css';
 
 const navItems = [
   { label: 'Devices', icon: Activity, path: '/' },
+  { label: 'HSIL', icon: Brain, path: '/hsil' },
   { label: 'Incidents', icon: AlertCircle, path: '/incidents' },
   { label: 'Integrations', icon: Layers, path: '/integrations' },
   { label: 'Status', icon: Server, path: '/status' },
@@ -110,6 +112,7 @@ function AppContent() {
         <Container size="xl" py="md">
           <Routes>
             <Route path="/" element={<DevicesView />} />
+            <Route path="/hsil" element={<HSILView />} />
             <Route path="/devices/:deviceId/overview" element={<DeviceOverviewView />} />
             <Route path="/devices/:deviceId/sensors/:sensorId" element={<SensorDetailView />} />
             <Route path="/incidents" element={<IncidentsView />} />

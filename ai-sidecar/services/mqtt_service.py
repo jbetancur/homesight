@@ -11,7 +11,7 @@ from typing import Dict, Optional, Callable
 from datetime import datetime
 import threading
 
-from mqtt_client import HomeSightMQTTClient
+from services.mqtt_client import HomeSightMQTTClient
 
 logger = logging.getLogger(__name__)
 
