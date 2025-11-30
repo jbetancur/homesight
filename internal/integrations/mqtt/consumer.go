@@ -9,6 +9,7 @@ import (
 	"time"
 
 	mqtt "github.com/eclipse/paho.mqtt.golang"
+	"github.com/homesight/homesight/internal/alarms"
 	"github.com/homesight/homesight/internal/db"
 	"github.com/homesight/homesight/internal/events"
 	"github.com/homesight/homesight/internal/incidents"
@@ -17,12 +18,13 @@ import (
 
 // Consumer processes MQTT messages from integrations and updates the device registry
 type Consumer struct {
-	ctx         context.Context
-	cancel      context.CancelFunc
-	client      mqtt.Client
-	deviceRepo  db.DeviceRepository
-	eventBus    events.EventBus
-	incidentSvc incidents.IncidentService
+	ctx          context.Context
+	cancel       context.CancelFunc
+	client       mqtt.Client
+	deviceRepo   db.DeviceRepository
+	eventBus     events.EventBus
+	incidentSvc  incidents.IncidentService
+	alarmManager *alarms.Manager
 }
 
 // NewConsumer creates a new MQTT consumer
@@ -45,12 +47,13 @@ func NewConsumer(
 	client := mqtt.NewClient(opts)
 
 	c := &Consumer{
-		ctx:         ctx,
-		cancel:      cancel,
-		client:      client,
-		deviceRepo:  deviceRepo,
-		eventBus:    eventBus,
-		incidentSvc: incidentSvc,
+		ctx:          ctx,
+		cancel:       cancel,
+		client:       client,
+		deviceRepo:   deviceRepo,
+		eventBus:     eventBus,
+		incidentSvc:  incidentSvc,
+		alarmManager: alarms.NewManager(incidentSvc),
 	}
 
 	return c, nil
@@ -327,6 +330,11 @@ func (c *Consumer) handleState(deviceID string, payload []byte) {
 			},
 		}
 		c.eventBus.Publish(event)
+
+		// Check for alarm conditions and manage incidents
+		if err := c.alarmManager.ProcessStateUpdate(c.ctx, deviceID, key, value, device); err != nil {
+			log.Printf("[MQTT-CONSUMER] Failed to process alarm for %s/%s: %v", deviceID, key, err)
+		}
 	}
 }
 

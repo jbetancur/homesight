@@ -2,6 +2,7 @@ package zwave
 
 import (
 	"fmt"
+	"log"
 	"strings"
 
 	"github.com/homesight/homesight/internal/model"
@@ -12,11 +13,26 @@ func MapNodeToDevice(node *ZWaveNode, homeID uint32) *model.Device {
 	// Generate stable device ID: zwave-{nodeId}
 	deviceID := fmt.Sprintf("zwave-%d", node.NodeID)
 
-	// Extract manufacturer/model from device database
+	// Extract manufacturer/model - try multiple sources
+	// Priority: DeviceConfig > direct fields > fallback to "Unknown"
 	manufacturer := node.DeviceConfig.Manufacturer
+	if strings.TrimSpace(manufacturer) == "" {
+		manufacturer = node.Manufacturer // Try direct field
+	}
+	if strings.TrimSpace(manufacturer) == "" {
+		manufacturer = "Unknown Manufacturer"
+	}
+
+	// Try multiple sources for model name
 	modelName := node.DeviceConfig.Label
-	if modelName == "" {
-		modelName = fmt.Sprintf("Z-Wave Device (Node %d)", node.NodeID)
+	if strings.TrimSpace(modelName) == "" {
+		modelName = node.Label // Try direct label field
+	}
+	if strings.TrimSpace(modelName) == "" {
+		modelName = node.Name // Try direct name field
+	}
+	if strings.TrimSpace(modelName) == "" {
+		modelName = fmt.Sprintf("Node %d", node.NodeID)
 	}
 
 	// Determine device type from command classes
@@ -25,16 +41,16 @@ func MapNodeToDevice(node *ZWaveNode, homeID uint32) *model.Device {
 	// Build metadata
 	metadata := map[string]string{
 		"manufacturer":     manufacturer,
-		"model":           modelName,
-		"manufacturer_id": fmt.Sprintf("0x%04x", node.ManufacturerID),
-		"product_type":    fmt.Sprintf("0x%04x", node.ProductType),
-		"product_id":      fmt.Sprintf("0x%04x", node.ProductID),
-		"firmware":        node.FirmwareVersion,
-		"security":        node.Security,
-		"node_id":         fmt.Sprintf("%d", node.NodeID),
-		"home_id":         fmt.Sprintf("0x%08x", homeID),
-		"interview_stage": fmt.Sprintf("%d", node.InterviewStage),
-		"is_listening":    fmt.Sprintf("%t", node.IsListening),
+		"model":            modelName,
+		"manufacturer_id":  fmt.Sprintf("0x%04x", node.ManufacturerID),
+		"product_type":     fmt.Sprintf("0x%04x", node.ProductType),
+		"product_id":       fmt.Sprintf("0x%04x", node.ProductID),
+		"firmware":         node.FirmwareVersion,
+		"security":         node.Security,
+		"node_id":          fmt.Sprintf("%d", node.NodeID),
+		"home_id":          fmt.Sprintf("0x%08x", homeID),
+		"interview_stage":  fmt.Sprintf("%d", node.InterviewStage),
+		"is_listening":     fmt.Sprintf("%t", node.IsListening),
 		"supports_beaming": fmt.Sprintf("%t", node.SupportsBeaming),
 	}
 
@@ -56,20 +72,48 @@ func MapNodeToDevice(node *ZWaveNode, homeID uint32) *model.Device {
 		metadata["battery_low"] = "true"
 	}
 
-	return &model.Device{
+	// Determine if device should be enabled
+	// Interview stage 7 = Complete, or node.Ready = true, or status >= 3 (Ready/Alive)
+	isEnabled := node.Ready || node.InterviewStage >= 7 || node.Status >= 3
+
+	device := &model.Device{
 		ID:          deviceID,
 		Name:        modelName,
 		Type:        deviceType,
 		Integration: "zwave",
-		Enabled:     node.Ready,
+		Enabled:     isEnabled,
 		Metadata:    metadata,
 	}
+
+	// Log device mapping for debugging
+	log.Printf("[ZWAVE-MAPPER] Mapped node %d to device: name=%s, type=%s, enabled=%v, ready=%v, status=%d, interviewStage=%d",
+		node.NodeID, modelName, deviceType, device.Enabled, node.Ready, node.Status, node.InterviewStage)
+
+	return device
 }
 
 // inferDeviceType determines HomeSight device type from Z-Wave command classes
 func inferDeviceType(node *ZWaveNode) string {
-	// Check for specific device types based on command classes
+	// Check for specific device types based on command classes and device config
 	// Priority: Most specific first
+
+	// Check deviceConfig description/label for hints
+	desc := strings.ToLower(node.DeviceConfig.Description + " " + node.DeviceConfig.Label)
+	if strings.Contains(desc, "water leak") || strings.Contains(desc, "leak sensor") {
+		return "water_leak"
+	}
+	if strings.Contains(desc, "motion") {
+		return "motion_sensor"
+	}
+	if strings.Contains(desc, "door") || strings.Contains(desc, "window") {
+		return "door_sensor"
+	}
+	if strings.Contains(desc, "smoke") {
+		return "smoke_detector"
+	}
+	if strings.Contains(desc, "co2") || strings.Contains(desc, "carbon monoxide") {
+		return "co_detector"
+	}
 
 	// Water leak sensor (Notification CC with water alarm)
 	if hasCommandClass(node, CC_NOTIFICATION) {
@@ -188,21 +232,21 @@ func isLowBattery(node *ZWaveNode) bool {
 // GetCommandClassName returns human-readable name for command class ID
 func GetCommandClassName(ccID int) string {
 	names := map[int]string{
-		CC_BASIC:                "Basic",
-		CC_SWITCH_BINARY:        "Switch Binary",
-		CC_SWITCH_MULTILEVEL:    "Switch Multilevel",
-		CC_SENSOR_BINARY:        "Sensor Binary",
-		CC_SENSOR_MULTILEVEL:    "Sensor Multilevel",
-		CC_METER:                "Meter",
-		CC_COLOR_SWITCH:         "Color Switch",
-		CC_CONFIGURATION:        "Configuration",
-		CC_NOTIFICATION:         "Notification",
+		CC_BASIC:                 "Basic",
+		CC_SWITCH_BINARY:         "Switch Binary",
+		CC_SWITCH_MULTILEVEL:     "Switch Multilevel",
+		CC_SENSOR_BINARY:         "Sensor Binary",
+		CC_SENSOR_MULTILEVEL:     "Sensor Multilevel",
+		CC_METER:                 "Meter",
+		CC_COLOR_SWITCH:          "Color Switch",
+		CC_CONFIGURATION:         "Configuration",
+		CC_NOTIFICATION:          "Notification",
 		CC_MANUFACTURER_SPECIFIC: "Manufacturer Specific",
-		CC_BATTERY:              "Battery",
-		CC_WAKE_UP:              "Wake Up",
-		CC_ASSOCIATION:          "Association",
-		CC_VERSION:              "Version",
-		CC_INDICATOR:            "Indicator",
+		CC_BATTERY:               "Battery",
+		CC_WAKE_UP:               "Wake Up",
+		CC_ASSOCIATION:           "Association",
+		CC_VERSION:               "Version",
+		CC_INDICATOR:             "Indicator",
 	}
 
 	if name, ok := names[ccID]; ok {

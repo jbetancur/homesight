@@ -5,7 +5,8 @@ import {
   Grid, ActionIcon, Tooltip
 } from '@mantine/core';
 import {
-  ArrowLeft, FileText, Activity, Droplets, Thermometer, Info, Clock, RefreshCw
+  ArrowLeft, FileText, Activity, Droplets, Thermometer, Info, Clock, RefreshCw,
+  AlertCircle, CheckCircle
 } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import { useEventSubscription } from '../useEventSubscription';
@@ -88,10 +89,12 @@ export function DeviceOverviewView() {
   const [device, setDevice] = useState<Device | null>(null);
   const [sensors, setSensors] = useState<Sensor[]>([]);
   const [knowledgeBase, setKnowledgeBase] = useState<KnowledgeBase | null>(null);
+  const [incidents, setIncidents] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const deviceRef = useRef<Device | null>(null);
+  const incidentsRef = useRef<any[]>([]);
 
   useEffect(() => {
     async function fetchData() {
@@ -134,6 +137,18 @@ export function DeviceOverviewView() {
           // If endpoint doesn't exist yet, create mock sensors
           setSensors(createMockSensors(deviceId));
         }
+
+        // Fetch incidents for this device
+        try {
+          const incidentsRes = await fetch(`${API_BASE}/devices/${deviceId}/incidents`);
+          if (incidentsRes.ok) {
+            const incidentData = await incidentsRes.json();
+            setIncidents(incidentData || []);
+            incidentsRef.current = incidentData || [];
+          }
+        } catch (e) {
+          console.log('Incidents not available:', e);
+        }
       } catch (err) {
         setError(err instanceof Error ? err.message : 'Unknown error');
       } finally {
@@ -144,7 +159,7 @@ export function DeviceOverviewView() {
     fetchData();
   }, [deviceId]);
 
-  // SSE event handling for real-time device updates
+  // SSE event handling for real-time device and incident updates
   const handleEvent = useCallback((event: any) => {
     console.log('DeviceOverviewView received event:', event);
     if (event.type === "device_updated") {
@@ -169,6 +184,30 @@ export function DeviceOverviewView() {
             .catch(err => console.error('Failed to refresh knowledge base:', err));
         }
       }
+    } else if (event.type === "incident_added") {
+      // Add incident if it's for this device
+      if (event.data.device_id === deviceId) {
+        const exists = incidentsRef.current.some(i => i.id === event.data.id);
+        if (!exists) {
+          const updated = [...incidentsRef.current, event.data];
+          setIncidents(updated);
+          incidentsRef.current = updated;
+        }
+      }
+    } else if (event.type === "incident_updated") {
+      // Update incident if it's for this device
+      if (event.data.device_id === deviceId) {
+        const updated = incidentsRef.current.map(i =>
+          i.id === event.data.id ? event.data : i
+        );
+        setIncidents(updated);
+        incidentsRef.current = updated;
+      }
+    } else if (event.type === "incident_removed") {
+      // Remove incident
+      const updated = incidentsRef.current.filter(i => i.id !== event.data.id);
+      setIncidents(updated);
+      incidentsRef.current = updated;
     }
   }, [deviceId]);
   useEventSubscription(handleEvent);
@@ -361,6 +400,14 @@ export function DeviceOverviewView() {
         <Tabs.List>
           <Tabs.Tab value="controls">Controls</Tabs.Tab>
           <Tabs.Tab value="sensors">Sensors</Tabs.Tab>
+          <Tabs.Tab value="incidents">
+            Incidents
+            {incidents.filter(i => i.status !== 'resolved').length > 0 && (
+              <Badge size="sm" color="red" ml={5}>
+                {incidents.filter(i => i.status !== 'resolved').length}
+              </Badge>
+            )}
+          </Tabs.Tab>
           <Tabs.Tab value="info">Device Information</Tabs.Tab>
           <Tabs.Tab value="docs">Documentation</Tabs.Tab>
         </Tabs.List>
@@ -457,6 +504,90 @@ export function DeviceOverviewView() {
               </Table>
             </Card>
           )}
+        </Tabs.Panel>
+
+        {/* Incidents Tab */}
+        <Tabs.Panel value="incidents" pt="md">
+          <Stack gap="md">
+            {incidents.length === 0 ? (
+              <Card withBorder p="xl">
+                <Stack align="center" gap="md">
+                  <CheckCircle size={48} color="#40c057" />
+                  <div style={{ textAlign: 'center' }}>
+                    <Text size="lg" fw={600}>No Incidents</Text>
+                    <Text size="sm" c="dimmed">This device has no recorded incidents</Text>
+                  </div>
+                </Stack>
+              </Card>
+            ) : (
+              <>
+                {incidents.filter(i => i.status !== 'resolved').length > 0 && (
+                  <>
+                    <Title order={5} c="red">Active Incidents</Title>
+                    <Stack gap="sm">
+                      {incidents.filter(i => i.status !== 'resolved').map((incident: any) => (
+                        <Card key={incident.id} withBorder padding="md" shadow="sm">
+                          <Stack gap="xs">
+                            <Group justify="space-between">
+                              <Group gap="xs">
+                                <AlertCircle size={18} color="#fa5252" />
+                                <Text fw={600}>{incident.title}</Text>
+                              </Group>
+                              <Group gap="xs">
+                                <Badge color={incident.severity === 'critical' ? 'red' : incident.severity === 'high' ? 'orange' : 'yellow'}>
+                                  {incident.severity}
+                                </Badge>
+                                {incident.type && (
+                                  <Badge color="grape" variant="dot">
+                                    {incident.type.replace(/_/g, ' ')}
+                                  </Badge>
+                                )}
+                              </Group>
+                            </Group>
+                            <Text size="sm">{incident.description}</Text>
+                            <Text size="xs" c="dimmed">
+                              Started: {new Date(incident.created_at).toLocaleString()}
+                            </Text>
+                          </Stack>
+                        </Card>
+                      ))}
+                    </Stack>
+                  </>
+                )}
+                {incidents.filter(i => i.status === 'resolved').length > 0 && (
+                  <>
+                    <Title order={5} c="green" mt="md">Resolved Incidents</Title>
+                    <Stack gap="sm">
+                      {incidents.filter(i => i.status === 'resolved').map((incident: any) => (
+                        <Card key={incident.id} withBorder padding="md" opacity={0.7}>
+                          <Stack gap="xs">
+                            <Group justify="space-between">
+                              <Group gap="xs">
+                                <CheckCircle size={18} color="#40c057" />
+                                <Text fw={600}>{incident.title}</Text>
+                              </Group>
+                              <Group gap="xs">
+                                <Badge color="green">resolved</Badge>
+                                {incident.type && (
+                                  <Badge color="grape" variant="dot">
+                                    {incident.type.replace(/_/g, ' ')}
+                                  </Badge>
+                                )}
+                              </Group>
+                            </Group>
+                            <Text size="sm">{incident.description}</Text>
+                            <Text size="xs" c="dimmed">
+                              Resolved: {incident.resolved_at ? new Date(incident.resolved_at).toLocaleString() : 'Unknown'}
+                            </Text>
+                          </Stack>
+                        </Card>
+                      ))}
+                    </Stack>
+                  </>
+                )}
+              </>
+            )}
+          </Stack>
         </Tabs.Panel>
 
         <Tabs.Panel value="info" pt="md">

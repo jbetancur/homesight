@@ -2,6 +2,7 @@ package zwave
 
 import (
 	"fmt"
+	"log"
 )
 
 // GetController returns controller information from cache
@@ -75,15 +76,26 @@ func (c *Client) StopInclusion() error {
 	return err
 }
 
-// BeginExclusion starts exclusion
+// BeginExclusion starts exclusion mode (for general exclusion from any network)
 func (c *Client) BeginExclusion() error {
+	log.Printf("[ZWAVE] Starting exclusion mode (general exclusion)")
 	_, err := c.Call("controller.begin_exclusion", nil)
 	return err
 }
 
-// StopExclusion stops exclusion
+// StopExclusion stops exclusion mode
 func (c *Client) StopExclusion() error {
+	log.Printf("[ZWAVE] Stopping exclusion mode")
 	_, err := c.Call("controller.stop_exclusion", nil)
+	return err
+}
+
+// RemoveNode removes a specific node from the network (alternative to general exclusion)
+func (c *Client) RemoveNode(nodeID int) error {
+	log.Printf("[ZWAVE] Removing specific node %d from network", nodeID)
+	_, err := c.Call("controller.remove_node", map[string]interface{}{
+		"nodeId": nodeID,
+	})
 	return err
 }
 
@@ -95,17 +107,9 @@ func (c *Client) RemoveFailedNode(nodeID int) error {
 	return err
 }
 
-// HealNode performs node heal
-func (c *Client) HealNode(nodeID int) error {
-	_, err := c.Call("node.heal", map[string]interface{}{
-		"nodeId": nodeID,
-	})
-	return err
-}
-
 // SetNodeName sets friendly name
 func (c *Client) SetNodeName(nodeID int, name string) error {
-	_, err := c.Call("node.set_name", map[string]interface{}{
+	_, err := c.Call("node.set_node_name", map[string]interface{}{
 		"nodeId": nodeID,
 		"name":   name,
 	})
@@ -114,7 +118,7 @@ func (c *Client) SetNodeName(nodeID int, name string) error {
 
 // SetNodeLocation sets location
 func (c *Client) SetNodeLocation(nodeID int, location string) error {
-	_, err := c.Call("node.set_location", map[string]interface{}{
+	_, err := c.Call("node.set_node_location", map[string]interface{}{
 		"nodeId":   nodeID,
 		"location": location,
 	})

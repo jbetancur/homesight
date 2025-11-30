@@ -116,9 +116,28 @@ const (
 	StatusResolved     IncidentStatus = "resolved"
 )
 
+// IncidentType represents the type of incident
+type IncidentType string
+
+const (
+	IncidentTypeWaterLeak    IncidentType = "water_leak"
+	IncidentTypeSmoke        IncidentType = "smoke_alarm"
+	IncidentTypeCO           IncidentType = "co_alarm"
+	IncidentTypeMotion       IncidentType = "motion_alarm"
+	IncidentTypeContact      IncidentType = "contact_alarm"
+	IncidentTypeTamper       IncidentType = "tamper_alarm"
+	IncidentTypeHeat         IncidentType = "heat_alarm"
+	IncidentTypePower        IncidentType = "power_alarm"
+	IncidentTypeGlassBreak   IncidentType = "glass_break"
+	IncidentTypeBurglar      IncidentType = "burglar_alarm"
+	IncidentTypeFreeze       IncidentType = "freeze_alarm"
+	IncidentTypeGeneric      IncidentType = "generic"
+)
+
 // Incident represents a detected issue or alert
 type Incident struct {
 	ID             string           `json:"id"`
+	Type           IncidentType     `json:"type"`            // Type of incident (water_leak, smoke, etc.)
 	Title          string           `json:"title"`
 	Description    string           `json:"description"`
 	Severity       IncidentSeverity `json:"severity"`

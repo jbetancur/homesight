@@ -108,6 +108,7 @@ func (s *SQLiteDB) initSchema() error {
 
 		CREATE TABLE IF NOT EXISTS incidents (
 			id TEXT PRIMARY KEY,
+			type TEXT NOT NULL DEFAULT 'generic',
 			title TEXT NOT NULL,
 			description TEXT,
 			severity TEXT NOT NULL,
@@ -369,9 +370,9 @@ func (r *IncidentRepo) Get(ctx context.Context, id string) (*model.Incident, err
 	var analyzedAt sql.NullTime
 
 	err := r.db.QueryRowContext(ctx,
-		`SELECT id, title, description, severity, status, device_id, sensor_id, zone_id, asset_id, rule_name, data, created_at, updated_at, resolved_at, analysis_status, analysis, insights, actions, analysis_data, analyzed_at
+		`SELECT id, type, title, description, severity, status, device_id, sensor_id, zone_id, asset_id, rule_name, data, created_at, updated_at, resolved_at, analysis_status, analysis, insights, actions, analysis_data, analyzed_at
 		 FROM incidents WHERE id = ?`, id).Scan(
-		&i.ID, &i.Title, &i.Description, &i.Severity, &i.Status, &i.DeviceID, &i.SensorID, &i.ZoneID, &i.AssetID, &i.RuleName, &dataJSON, &i.CreatedAt, &i.UpdatedAt, &resolvedAt, &i.AnalysisStatus, &i.Analysis, &insightsJSON, &actionsJSON, &analysisDataJSON, &analyzedAt)
+		&i.ID, &i.Type, &i.Title, &i.Description, &i.Severity, &i.Status, &i.DeviceID, &i.SensorID, &i.ZoneID, &i.AssetID, &i.RuleName, &dataJSON, &i.CreatedAt, &i.UpdatedAt, &resolvedAt, &i.AnalysisStatus, &i.Analysis, &insightsJSON, &actionsJSON, &analysisDataJSON, &analyzedAt)
 
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -403,7 +404,7 @@ func (r *IncidentRepo) Get(ctx context.Context, id string) (*model.Incident, err
 }
 
 func (r *IncidentRepo) List(ctx context.Context, filters map[string]any) ([]model.Incident, error) {
-	query := `SELECT id, title, description, severity, status, device_id, sensor_id, zone_id, asset_id, rule_name, data, created_at, updated_at, resolved_at, analysis_status, analysis, insights, actions, analysis_data, analyzed_at FROM incidents WHERE 1=1`
+	query := `SELECT id, type, title, description, severity, status, device_id, sensor_id, zone_id, asset_id, rule_name, data, created_at, updated_at, resolved_at, analysis_status, analysis, insights, actions, analysis_data, analyzed_at FROM incidents WHERE 1=1`
 	args := make([]any, 0)
 
 	if status, ok := filters["status"]; ok {
@@ -433,7 +434,7 @@ func (r *IncidentRepo) List(ctx context.Context, filters map[string]any) ([]mode
 		var analysisDataJSON sql.NullString
 		var analyzedAt sql.NullTime
 
-		if err := rows.Scan(&i.ID, &i.Title, &i.Description, &i.Severity, &i.Status, &i.DeviceID, &i.SensorID, &i.ZoneID, &i.AssetID, &i.RuleName, &dataJSON, &i.CreatedAt, &i.UpdatedAt, &resolvedAt, &i.AnalysisStatus, &i.Analysis, &insightsJSON, &actionsJSON, &analysisDataJSON, &analyzedAt); err != nil {
+		if err := rows.Scan(&i.ID, &i.Type, &i.Title, &i.Description, &i.Severity, &i.Status, &i.DeviceID, &i.SensorID, &i.ZoneID, &i.AssetID, &i.RuleName, &dataJSON, &i.CreatedAt, &i.UpdatedAt, &resolvedAt, &i.AnalysisStatus, &i.Analysis, &insightsJSON, &actionsJSON, &analysisDataJSON, &analyzedAt); err != nil {
 			return nil, err
 		}
 
@@ -469,9 +470,9 @@ func (r *IncidentRepo) Upsert(ctx context.Context, incident *model.Incident) err
 	analysisDataJSON, _ := json.Marshal(incident.AnalysisData)
 
 	_, err := r.db.ExecContext(ctx,
-		`INSERT OR REPLACE INTO incidents (id, title, description, severity, status, device_id, sensor_id, zone_id, asset_id, rule_name, data, created_at, updated_at, resolved_at, analysis_status, analysis, insights, actions, analysis_data, analyzed_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		incident.ID, incident.Title, incident.Description, incident.Severity, incident.Status,
+		`INSERT OR REPLACE INTO incidents (id, type, title, description, severity, status, device_id, sensor_id, zone_id, asset_id, rule_name, data, created_at, updated_at, resolved_at, analysis_status, analysis, insights, actions, analysis_data, analyzed_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		incident.ID, incident.Type, incident.Title, incident.Description, incident.Severity, incident.Status,
 		incident.DeviceID, incident.SensorID, incident.ZoneID, incident.AssetID, incident.RuleName,
 		string(dataJSON), incident.CreatedAt, incident.UpdatedAt, incident.ResolvedAt,
 		incident.AnalysisStatus, incident.Analysis, string(insightsJSON), string(actionsJSON), string(analysisDataJSON), incident.AnalyzedAt)

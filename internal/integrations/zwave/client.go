@@ -104,9 +104,8 @@ func (c *Client) Connect() error {
 		c.connected.Store(true)
 		log.Printf("[ZWAVE] Connected to Z-Wave JS WebSocket at %s", c.wsURL)
 
-		if c.onConnect != nil {
-			c.onConnect()
-		}
+		// Note: onConnect callback will be called AFTER start_listening completes
+		// and the initial state is loaded (see handleMessage function)
 
 		// Start health check
 		go c.healthCheck()
@@ -177,6 +176,10 @@ func (c *Client) handleMessage(message []byte) {
 			if resultMap, ok := resp.Result.(map[string]interface{}); ok {
 				if state, ok := resultMap["state"].(map[string]interface{}); ok {
 					c.handleInitialState(state)
+					// Trigger onConnect callback after initial state is loaded
+					if c.onConnect != nil {
+						go c.onConnect()
+					}
 				}
 			}
 		}
@@ -190,11 +193,15 @@ func (c *Client) handleMessage(message []byte) {
 	// Try to parse as Event
 	var event Event
 	if err := json.Unmarshal(message, &event); err == nil {
+		// Log all raw events for debugging
+		if event.Type == "event" {
+			log.Printf("[ZWAVE] 📥 Raw event wrapper: %s", string(message))
+		}
 		c.handleEvent(event)
 		return
 	}
 
-	log.Printf("[ZWAVE] Failed to parse message: %s", string(message))
+	log.Printf("[ZWAVE] ❌ Failed to parse message: %s", string(message))
 }
 
 // handleInitialState processes the initial state from start_listening response
@@ -247,7 +254,12 @@ func (c *Client) handleEvent(event Event) {
 				Type: eventType,
 				Data: event.Event,
 			}
-			log.Printf("[ZWAVE] Event received: %s (source: %v)", eventType, event.Event["source"])
+			// Log all events, with special attention to removal-related events
+			if strings.Contains(eventType, "remov") || strings.Contains(eventType, "exclusion") {
+				log.Printf("[ZWAVE] ⚠️ REMOVAL EVENT: %s (source: %v) - Data: %+v", eventType, event.Event["source"], event.Event)
+			} else {
+				log.Printf("[ZWAVE] Event received: %s (source: %v)", eventType, event.Event["source"])
+			}
 			c.updateStateFromEvent(unwrappedEvent)
 
 			// Dispatch to handlers
@@ -298,16 +310,41 @@ func (c *Client) updateStateFromEvent(event Event) {
 			}
 		}
 
-	case "node added", "node ready", "node interview stage complete":
-		// Parse and store node data from the "node" field
-		if nodeData, ok := event.Data["node"]; ok {
+	case "node added", "ready", "interview stage completed":
+		// Parse and store node data from the "node" or "nodeState" field
+		var nodeData interface{}
+		var ok bool
+
+		// Try "nodeState" first (used by "ready" event)
+		if nodeData, ok = event.Data["nodeState"]; ok {
 			c.parseAndStoreNodeLocked(nodeData)
+		} else if nodeData, ok = event.Data["node"]; ok {
+			// Fallback to "node" field
+			c.parseAndStoreNodeLocked(nodeData)
+		} else {
+			log.Printf("[ZWAVE-CLIENT] Event %s missing 'node'/'nodeState' field, data keys: %v", event.Type, getMapKeys(event.Data))
 		}
 
 	case "node removed":
 		// Remove node from cache
+		// Try direct nodeId field first
 		if nodeIDFloat, ok := event.Data["nodeId"].(float64); ok {
-			delete(c.nodes, int(nodeIDFloat))
+			nodeID := int(nodeIDFloat)
+			log.Printf("[ZWAVE-CLIENT] ⚠️ REMOVING NODE %d from cache (had %d nodes)", nodeID, len(c.nodes))
+			delete(c.nodes, nodeID)
+			log.Printf("[ZWAVE-CLIENT] ✅ Node %d removed from cache (now have %d nodes)", nodeID, len(c.nodes))
+		} else if nodeObj, ok := event.Data["node"].(map[string]interface{}); ok {
+			// Node data is nested in "node" object
+			if nodeIDFloat, ok := nodeObj["nodeId"].(float64); ok {
+				nodeID := int(nodeIDFloat)
+				log.Printf("[ZWAVE-CLIENT] ⚠️ REMOVING NODE %d from cache via nested 'node.nodeId' (had %d nodes)", nodeID, len(c.nodes))
+				delete(c.nodes, nodeID)
+				log.Printf("[ZWAVE-CLIENT] ✅ Node %d removed from cache (now have %d nodes)", nodeID, len(c.nodes))
+			} else {
+				log.Printf("[ZWAVE-CLIENT] ❌ Failed to extract nodeId from node object, keys: %v", getMapKeys(nodeObj))
+			}
+		} else {
+			log.Printf("[ZWAVE-CLIENT] ❌ Failed to extract nodeId from node removed event, data keys: %v", getMapKeys(event.Data))
 		}
 
 	case "value updated", "value added":
@@ -317,13 +354,6 @@ func (c *Client) updateStateFromEvent(event Event) {
 		// TODO: Implement value tracking if needed
 		_ = event // Suppress unused variable warning
 	}
-}
-
-// parseAndStoreNode parses node data and stores it in the cache (acquires lock)
-func (c *Client) parseAndStoreNode(nodeData interface{}) {
-	c.stateMu.Lock()
-	defer c.stateMu.Unlock()
-	c.parseAndStoreNodeLocked(nodeData)
 }
 
 // parseAndStoreNodeLocked parses node data and stores it in the cache (caller must hold lock)
@@ -340,7 +370,8 @@ func (c *Client) parseAndStoreNodeLocked(nodeData interface{}) {
 		return
 	}
 
-	log.Printf("[ZWAVE] Storing node %d: %s (ready=%v)", node.NodeID, node.DeviceConfig.Label, node.Ready)
+	log.Printf("[ZWAVE-CLIENT] Storing node %d: %s (ready=%v, status=%d, interviewStage=%d)",
+		node.NodeID, node.DeviceConfig.Label, node.Ready, node.Status, node.InterviewStage)
 	c.nodes[node.NodeID] = &node
 }
 
@@ -375,7 +406,7 @@ func (c *Client) Call(command string, args map[string]interface{}) (interface{},
 			argsCopy[k] = v
 		}
 
-		if strings.HasPrefix(command, "node.") {
+		if strings.HasPrefix(command, "node.") || strings.HasPrefix(command, "controller.") {
 			if nid, ok := argsCopy["nodeId"]; ok {
 				msg["nodeId"] = nid
 				delete(argsCopy, "nodeId")
@@ -522,4 +553,13 @@ func (c *Client) SetOnConnect(fn func()) {
 // SetOnDisconnect sets callback for disconnection events
 func (c *Client) SetOnDisconnect(fn func()) {
 	c.onDisconnect = fn
+}
+
+// getMapKeys returns the keys from a map for debugging
+func getMapKeys(m map[string]interface{}) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	return keys
 }

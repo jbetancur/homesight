@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"strconv"
 	"time"
 
 	"github.com/homesight/homesight/internal/integrations/zwave"
@@ -33,9 +32,9 @@ func (s *Server) handleZWaveGetController(w http.ResponseWriter, r *http.Request
 	s.zwaveMutex.RUnlock()
 
 	response := map[string]interface{}{
-		"home_id":   fmt.Sprintf("0x%08x", homeID),
-		"connected": true,
-		"ready":     true,
+		"home_id":    fmt.Sprintf("0x%08x", homeID),
+		"connected":  true,
+		"ready":      true,
 		"controller": controller,
 	}
 
@@ -57,7 +56,7 @@ func (s *Server) handleZWaveStartInclusion(w http.ResponseWriter, r *http.Reques
 
 	// Parse request body for options
 	var req struct {
-		Strategy      string `json:"strategy"`       // "Security_S2", "Security_S0", "Insecure"
+		Strategy      string `json:"strategy"` // "Security_S2", "Security_S0", "Insecure"
 		ForceSecurity bool   `json:"force_security"`
 	}
 
@@ -83,8 +82,8 @@ func (s *Server) handleZWaveStartInclusion(w http.ResponseWriter, r *http.Reques
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"status":  "started",
-		"message": "Press the button on your Z-Wave device to pair",
+		"status":   "started",
+		"message":  "Press the button on your Z-Wave device to pair",
 		"strategy": req.Strategy,
 	})
 }
@@ -182,44 +181,6 @@ func (s *Server) handleZWaveGetNodes(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(nodes)
-}
-
-// handleZWaveHealNode performs network heal on a specific node
-func (s *Server) handleZWaveHealNode(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	if s.zwaveClient == nil || !s.zwaveClient.IsConnected() {
-		http.Error(w, "Z-Wave controller not connected", http.StatusServiceUnavailable)
-		return
-	}
-
-	// Get node ID from URL parameter
-	nodeIDStr := r.URL.Query().Get("node_id")
-	if nodeIDStr == "" {
-		http.Error(w, "node_id parameter required", http.StatusBadRequest)
-		return
-	}
-
-	nodeID, err := strconv.Atoi(nodeIDStr)
-	if err != nil {
-		http.Error(w, "Invalid node_id", http.StatusBadRequest)
-		return
-	}
-
-	err = s.zwaveClient.HealNode(nodeID)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"status":  "healing",
-		"node_id": nodeID,
-	})
 }
 
 // handleZWaveRemoveFailedNode removes a dead/failed node

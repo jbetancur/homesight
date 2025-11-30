@@ -218,16 +218,6 @@ export function ZWaveView() {
     setExclusionStatus('idle');
   };
 
-  // Heal node
-  const healNode = async (nodeId: number) => {
-    try {
-      await fetch(`${API_BASE}/zwave/heal?node_id=${nodeId}`, { method: 'POST' });
-      alert(`Network heal started for node ${nodeId}`);
-    } catch (err) {
-      alert('Failed to start network heal');
-    }
-  };
-
   // Remove failed node
   const removeFailedNode = async (nodeId: number) => {
     if (!confirm(`Remove failed node ${nodeId}? This cannot be undone.`)) {

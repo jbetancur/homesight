@@ -28,26 +28,26 @@ import (
 
 // Server is the REST API server
 type Server struct {
-	router              *chi.Mux
-	incidentService     incidents.IncidentService
-	deviceRepo          db.DeviceRepository
-	sensorRepo          db.SensorRepository
-	knowledgeBaseRepo   db.KnowledgeBaseRepository
-	metricsSink         metrics.MetricsSink
-	aiClient            ai.Client
-	addr                string
-	discoveryListener   *discovery.MQTTDiscoveryListener
-	discoveryMutex      sync.RWMutex
-	eventBus            *EventBus
-	cfg                 *config.Config
+	router            *chi.Mux
+	incidentService   incidents.IncidentService
+	deviceRepo        db.DeviceRepository
+	sensorRepo        db.SensorRepository
+	knowledgeBaseRepo db.KnowledgeBaseRepository
+	metricsSink       metrics.MetricsSink
+	aiClient          ai.Client
+	addr              string
+	discoveryListener *discovery.MQTTDiscoveryListener
+	discoveryMutex    sync.RWMutex
+	eventBus          *EventBus
+	cfg               *config.Config
 
 	// MQTT publisher for device commands
-	mqttPublisher       *mqttint.Publisher
+	mqttPublisher *mqttint.Publisher
 
 	// Z-Wave integration
-	zwaveClient        *zwave.Client
-	zwaveHomeID        int
-	zwaveMutex         sync.RWMutex
+	zwaveClient *zwave.Client
+	zwaveHomeID int
+	zwaveMutex  sync.RWMutex
 }
 
 // NewServer creates a new API server
@@ -136,8 +136,9 @@ func (s *Server) setupRoutes() {
 			r.Get("/{id}/sensors", s.listDeviceSensors)
 			r.Get("/{id}/sensors/{sensorID}", s.getDeviceSensor)
 			r.Get("/{id}/knowledge-base", s.getDeviceKnowledgeBase)
-			r.Post("/{id}/command", s.handleDeviceCommand) // Send command to device via MQTT
-			r.Post("/{id}/reingest-docs", s.handleReingestDeviceDocs) // Re-trigger document discovery for a device
+			r.Get("/{id}/incidents", s.listDeviceIncidents)             // Get incidents for a specific device
+			r.Post("/{id}/command", s.handleDeviceCommand)              // Send command to device via MQTT
+			r.Post("/{id}/reingest-docs", s.handleReingestDeviceDocs)   // Re-trigger document discovery for a device
 			r.Post("/{id}/docs-status", s.handleUpdateDeviceDocsStatus) // Update device documentation status and generate KB articles (called by AI sidecar)
 			// Demo/Testing endpoints - In production, guard with admin authentication
 			r.Post("/", s.createDevice)       // Manual device creation (testing only - normally auto-discovered)
@@ -150,7 +151,7 @@ func (s *Server) setupRoutes() {
 		})
 
 		// Discovery & Onboarding
-		r.Get("/discovery", s.handleDiscovery)
+		// r.Get("/discovery", s.handleDiscovery)
 		r.Post("/onboard/device", s.handleOnboardDevice)
 		r.Post("/onboard/broker", s.handleOnboardBroker)
 
@@ -163,7 +164,6 @@ func (s *Server) setupRoutes() {
 			r.Post("/inclusion/stop", s.handleZWaveStopInclusion)
 			r.Post("/exclusion/start", s.handleZWaveStartExclusion)
 			r.Post("/exclusion/stop", s.handleZWaveStopExclusion)
-			r.Post("/heal", s.handleZWaveHealNode)
 			r.Post("/remove-failed", s.handleZWaveRemoveFailedNode)
 			r.Post("/backup", s.handleZWaveBackupNVM)
 		})
@@ -305,9 +305,31 @@ func (s *Server) resolveIncident(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	id := chi.URLParam(r, "id")
 
+	// Get incident before resolving to include in event
+	incident, err := s.incidentService.Get(ctx, id)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if incident == nil {
+		http.Error(w, "incident not found", http.StatusNotFound)
+		return
+	}
+
 	if err := s.incidentService.Resolve(ctx, id); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
+	}
+
+	// Get updated incident after resolution
+	resolvedIncident, _ := s.incidentService.Get(ctx, id)
+	if resolvedIncident != nil {
+		incident = resolvedIncident
+	}
+
+	// Publish incident updated/resolved event
+	if s.eventBus != nil {
+		s.eventBus.Publish(Event{Type: IncidentUpdated, Data: incident})
 	}
 
 	w.WriteHeader(http.StatusOK)
@@ -616,6 +638,42 @@ func (s *Server) getDeviceKnowledgeBase(w http.ResponseWriter, r *http.Request) 
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(knowledgeBase)
+}
+
+// listDeviceIncidents returns all incidents for a specific device
+func (s *Server) listDeviceIncidents(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	deviceID := chi.URLParam(r, "id")
+
+	// Verify device exists
+	device, err := s.deviceRepo.Get(ctx, deviceID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if device == nil {
+		http.Error(w, "device not found", http.StatusNotFound)
+		return
+	}
+
+	// Optional status filter
+	status := r.URL.Query().Get("status")
+
+	filters := map[string]any{
+		"device_id": deviceID,
+	}
+	if status != "" {
+		filters["status"] = status
+	}
+
+	incidents, err := s.incidentService.List(ctx, filters)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(incidents)
 }
 
 // generateDeviceKnowledgeBase generates and stores knowledge base articles for a device
@@ -1011,17 +1069,19 @@ func (s *Server) notifyAIIncidentCreated(incident model.Incident) {
 	}
 
 	body, _ := json.Marshal(payload)
+	log.Printf("[AI-NOTIFY] Sending incident notification to %s for incident %s", url, incident.ID)
+
 	resp, err := http.Post(url, "application/json", bytes.NewBuffer(body))
 	if err != nil {
-		log.Printf("Failed to notify AI sidecar of incident %s: %v", incident.ID, err)
+		log.Printf("[AI-NOTIFY] ❌ Failed to notify AI sidecar of incident %s: %v", incident.ID, err)
 		return
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != 200 {
 		bodyBytes, _ := io.ReadAll(resp.Body)
-		log.Printf("AI sidecar returned status %d for incident %s: %s", resp.StatusCode, incident.ID, string(bodyBytes))
+		log.Printf("[AI-NOTIFY] ⚠️ AI sidecar returned status %d for incident %s: %s", resp.StatusCode, incident.ID, string(bodyBytes))
 	} else {
-		log.Printf("✅ Notified AI sidecar of incident %s for background analysis", incident.ID)
+		log.Printf("[AI-NOTIFY] ✅ Notified AI sidecar of incident %s for background analysis", incident.ID)
 	}
 }

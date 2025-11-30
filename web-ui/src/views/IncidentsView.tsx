@@ -16,7 +16,8 @@ import {
   Divider,
   List,
   ScrollArea,
-  Paper
+  Paper,
+  SegmentedControl
 } from '@mantine/core';
 import {
   ChevronDown,
@@ -70,6 +71,7 @@ export function IncidentsView() {
   const [incidents, setIncidents] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [statusFilter, setStatusFilter] = useState<string>('open'); // 'all', 'open', 'resolved'
   const [recommendations, setRecommendations] = useState<Record<string, AIRecommendation>>({});
   const [chatModal, setChatModal] = useState<{open: boolean, incidentId: string | null}>({open: false, incidentId: null});
   const [chatMessages, setChatMessages] = useState<{role: 'user' | 'assistant', content: string}[]>([]);
@@ -313,11 +315,20 @@ export function IncidentsView() {
     );
   }
 
+  // Filter incidents based on status
+  const filteredIncidents = statusFilter === 'all'
+    ? incidents
+    : incidents.filter((i: any) => i.status === statusFilter);
+
+  // Separate active and resolved incidents
+  const activeIncidents = filteredIncidents.filter((i: any) => i.status !== 'resolved');
+  const resolvedIncidents = filteredIncidents.filter((i: any) => i.status === 'resolved');
+
   if (incidents.length === 0) {
     return (
       <Stack align="center" justify="center" style={{ minHeight: '50vh' }}>
         <CheckCircle size={64} color="#40c057" />
-        <Title order={3}>No Active Incidents</Title>
+        <Title order={3}>No Incidents</Title>
         <Text c="dimmed">All systems operating normally</Text>
       </Stack>
     );
@@ -328,12 +339,26 @@ export function IncidentsView() {
       <Group justify="space-between">
         <div>
           <Title order={2}>Incidents</Title>
-          <Text size="sm" c="dimmed">{incidents.length} active incident{incidents.length !== 1 ? 's' : ''}</Text>
+          <Text size="sm" c="dimmed">
+            {activeIncidents.length} active, {resolvedIncidents.length} resolved
+          </Text>
         </div>
+        <SegmentedControl
+          value={statusFilter}
+          onChange={setStatusFilter}
+          data={[
+            { label: 'Active', value: 'open' },
+            { label: 'Resolved', value: 'resolved' },
+            { label: 'All', value: 'all' },
+          ]}
+        />
       </Group>
 
-      <Stack gap="sm">
-        {incidents.map((incident: any) => {
+      {activeIncidents.length > 0 && (
+        <>
+          <Title order={5} c="red" mt="md">Active Incidents</Title>
+          <Stack gap="sm">
+            {activeIncidents.map((incident: any) => {
           const isExpanded = expandedId === incident.id;
           const recommendation = recommendations[incident.id];
 
@@ -355,6 +380,7 @@ export function IncidentsView() {
                   <Group gap="xs">
                     <Badge color={getSeverityColor(incident.severity)}>{incident.severity}</Badge>
                     <Badge variant="light">{incident.status}</Badge>
+                    {incident.type && <Badge color="grape" variant="dot">{incident.type.replace(/_/g, ' ')}</Badge>}
                     <ActionIcon
                       variant="subtle"
                       onClick={() => {
@@ -582,6 +608,41 @@ export function IncidentsView() {
           );
         })}
       </Stack>
+      </>
+      )}
+
+      {resolvedIncidents.length > 0 && (
+        <>
+          <Title order={5} c="green" mt="xl">Resolved Incidents</Title>
+          <Stack gap="sm">
+            {resolvedIncidents.map((incident: any) => (
+            <Card key={incident.id} withBorder padding="md" shadow="sm" opacity={0.7}>
+              <Stack gap="sm">
+                <Group justify="space-between" wrap="nowrap">
+                  <Group gap="sm">
+                    {getStatusIcon(incident.status)}
+                    <div>
+                      <Text fw={600} size="md">{incident.title}</Text>
+                      <Text size="xs" c="dimmed">
+                        Resolved: {incident.resolved_at && !isNaN(new Date(incident.resolved_at).getTime())
+                          ? new Date(incident.resolved_at).toLocaleString()
+                          : 'Unknown'}
+                      </Text>
+                    </div>
+                  </Group>
+                  <Group gap="xs">
+                    <Badge color={getSeverityColor(incident.severity)}>{incident.severity}</Badge>
+                    <Badge variant="light" color="green">{incident.status}</Badge>
+                    {incident.type && <Badge color="grape" variant="dot">{incident.type.replace(/_/g, ' ')}</Badge>}
+                  </Group>
+                </Group>
+                <Text size="sm">{incident.description}</Text>
+              </Stack>
+            </Card>
+          ))}
+          </Stack>
+        </>
+      )}
 
       {/* AI Chat Modal */}
       <Modal
