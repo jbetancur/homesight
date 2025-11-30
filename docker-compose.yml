@@ -22,11 +22,17 @@ services:
       dockerfile: docker/ai-sidecar/Dockerfile
     image: homesight-ai-sidecar
     container_name: homesight-ai-sidecar
+    # needed for GPU acceleration with Vulkan    
+    devices:
+      - "/dev/dri:/dev/dri"
+    group_add:
+      - video
     ports:
       - "8001:8001"
     env_file:
-      - .env      
+      - .env
     environment:
+      - LLAMA_VULKAN=1
       - BACKEND_URL=http://host.docker.internal:8080
       - BRAVE_SEARCH_API_KEY=${BRAVE_SEARCH_API_KEY}
       - BING_SEARCH_API_KEY=${BING_SEARCH_API_KEY}
@@ -105,7 +111,7 @@ services:
 
     # Health check
     healthcheck:
-      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8091/health"]
+      test: [ "CMD", "wget", "--spider", "-q", "http://localhost:8091/health" ]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -148,6 +154,7 @@ volumes:
   prometheus_data:
   grafana_data:
   zwavejs_data:
+
 
 networks:
   homesight:

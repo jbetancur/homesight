@@ -25,12 +25,14 @@ fi
 # Show menu
 echo "Select model to download:"
 echo ""
-echo "  1) Llama 3.2 3B (Q4_K_M, ~2GB) - No auth required"
-echo "  2) Llama 3.1 8B (Q4_K_M, ~4.9GB) - No auth required"
-echo "  3) DeepSeek R1 Distill Llama 8B (Q4_K_M, ~4.9GB) - Requires HF token"
-echo "  4) Custom model (enter repo ID manually)"
+echo "  1) Llama 3.2 3B (Q4_K_M, ~2GB) - GPU OPTIMAL (Recommended)"
+echo "  2) Phi-2 (2.7B Fast Instruct, ~1.8GB) - GPU FASTEST"
+echo "  3) Llama 3.1 1B (Q4_K_M, ~800MB) - Tiny / Edge"
+echo "  4) Llama 3.1 8B (Q4_K_M, ~4.9GB) - CPU ONLY (Too large for 780M GPU)"
+echo "  5) DeepSeek R1 Distill Llama 8B (Q4_K_M, ~4.9GB) - CPU ONLY"
+echo "  6) Custom model (enter repo ID manually)"
 echo ""
-read -p "Enter choice [1-4]: " choice
+read -p "Enter choice [1-6]: " choice
 
 case $choice in
     1)
@@ -39,19 +41,38 @@ case $choice in
         OUTPUT_NAME="llama-3.2-3b-instruct.gguf"
         REQUIRES_TOKEN=false
         ;;
+
     2)
+        REPO_ID="NousResearch/phi-2-GGUF"
+        FILENAME="phi-2.Q4_K_M.gguf"
+        OUTPUT_NAME="phi-2.q4_k_m.gguf"
+        REQUIRES_TOKEN=false
+        ;;
+
+    3)
+        REPO_ID="bartowski/Llama-3.1-1B-Instruct-GGUF"
+        FILENAME="Llama-3.1-1B-Instruct-Q4_K_M.gguf"
+        OUTPUT_NAME="llama-3.1-1b-instruct.gguf"
+        REQUIRES_TOKEN=false
+        ;;
+
+    4)
+        echo -e "${YELLOW}⚠️ WARNING: 8B models do NOT fit on the 780M GPU (CPU fallback only)${NC}"
         REPO_ID="bartowski/Meta-Llama-3.1-8B-Instruct-GGUF"
         FILENAME="Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf"
         OUTPUT_NAME="llama-3.1-8b-instruct.gguf"
         REQUIRES_TOKEN=false
         ;;
-    3)
+
+    5)
+        echo -e "${YELLOW}⚠️ WARNING: 8B DeepSeek models do NOT fit on the 780M GPU (CPU fallback only)${NC}"
         REPO_ID="bartowski/DeepSeek-R1-Distill-Llama-8B-GGUF"
         FILENAME="DeepSeek-R1-Distill-Llama-8B-Q4_K_M.gguf"
         OUTPUT_NAME="deepseek-r1-distill-llama-8b.gguf"
         REQUIRES_TOKEN=true
         ;;
-    4)
+
+    6)
         read -p "Enter HuggingFace repo ID (e.g. author/model-name): " REPO_ID
         read -p "Enter filename: " FILENAME
         read -p "Enter output name: " OUTPUT_NAME
@@ -62,6 +83,7 @@ case $choice in
             REQUIRES_TOKEN=false
         fi
         ;;
+
     *)
         echo "Invalid choice"
         exit 1

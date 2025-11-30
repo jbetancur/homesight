@@ -106,48 +106,81 @@ class VendorCrawler:
 
                     content_type = response.headers.get("content-type", "").lower()
 
-                    # If it's a PDF, index it directly
-                    if "pdf" in content_type or url.lower().endswith(".pdf"):
-                        doc = IndexedDocument(
-                            manufacturer=manufacturer,
-                            model=None,  # Will try to extract from filename/title
-                            url=url,
-                            title=self._extract_title_from_url(url),
-                            document_type="pdf",
-                            discovered_at=datetime.now(),
-                            file_size=int(response.headers.get("content-length", 0))
-                        )
-                        if self.storage.add_document(doc):
-                            discovered_count += 1
-                            logger.info(f"Discovered PDF: {url}")
-                        continue
+                    # Collect candidate documents for ranking
+                    candidates = []
 
-                    # If it's HTML, parse for links
+                    # If it's a PDF, add to candidates
+                    if "pdf" in content_type or url.lower().endswith(".pdf"):
+                        candidates.append({
+                            "url": url,
+                            "title": self._extract_title_from_url(url),
+                            "type": "pdf",
+                            "source": urlparse(url).netloc,
+                            "size": int(response.headers.get("content-length", 0)),
+                            "depth": depth
+                        })
+
+                    # If it's HTML, parse for links and add candidates
                     if "html" in content_type:
                         html = response.text
                         base_url = str(response.url)
 
-                        # Extract and index PDF links
+                        # Extract PDF links
                         pdf_links = self._extract_pdf_links(html, base_url)
                         for pdf_url, title in pdf_links:
-                            doc = IndexedDocument(
-                                manufacturer=manufacturer,
-                                model=self._extract_model_from_text(title),
-                                url=pdf_url,
-                                title=title,
-                                document_type="pdf",
-                                discovered_at=datetime.now()
-                            )
-                            if self.storage.add_document(doc):
-                                discovered_count += 1
-                                logger.info(f"Discovered PDF: {pdf_url}")
+                            candidates.append({
+                                "url": pdf_url,
+                                "title": title,
+                                "type": "pdf",
+                                "source": urlparse(pdf_url).netloc,
+                                "size": None,
+                                "depth": depth + 1
+                            })
 
-                        # Extract manual/documentation page links to continue crawling
-                        if depth < self.max_depth:
-                            doc_links = self._extract_documentation_links(html, base_url, seed_urls)
-                            for link in doc_links:
-                                if link not in visited and len(to_visit) < self.max_pages_per_domain:
-                                    to_visit.append((link, depth + 1))
+                        # Extract documentation HTML links
+                        doc_links = self._extract_documentation_links(html, base_url, seed_urls)
+                        for link in doc_links:
+                            candidates.append({
+                                "url": link,
+                                "title": self._extract_title_from_url(link),
+                                "type": "html",
+                                "source": urlparse(link).netloc,
+                                "size": None,
+                                "depth": depth + 1
+                            })
+                            if link not in visited and len(to_visit) < self.max_pages_per_domain:
+                                to_visit.append((link, depth + 1))
+
+                    # Rank candidates: prefer PDF/manuals, manufacturer domain, keywords, size, recency
+                    def score(doc):
+                        score = 0
+                        if doc["type"] == "pdf":
+                            score += 10
+                        if "manual" in doc["title"].lower():
+                            score += 5
+                        if doc["source"] in [urlparse(s).netloc for s in seed_urls]:
+                            score += 3
+                        if doc["size"] and doc["size"] > 100000:
+                            score += 2
+                        if doc["depth"] == 0:
+                            score += 1
+                        return score
+
+                    ranked = sorted(candidates, key=score, reverse=True)
+
+                    # Index top-ranked docs (limit to avoid duplicates)
+                    for doc in ranked[:5]:
+                        idx_doc = IndexedDocument(
+                            manufacturer=manufacturer,
+                            model=self._extract_model_from_text(doc["title"]),
+                            url=doc["url"],
+                            title=doc["title"],
+                            document_type=doc["type"],
+                            discovered_at=datetime.now()
+                        )
+                        if self.storage.add_document(idx_doc):
+                            discovered_count += 1
+                            logger.info(f"Indexed {doc['type'].upper()}: {doc['url']}")
 
                 except httpx.TimeoutException:
                     logger.warning(f"Timeout crawling {url}")

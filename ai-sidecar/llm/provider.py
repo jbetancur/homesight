@@ -134,34 +134,63 @@ class LLMProvider:
         except Exception as e:
             logger.error(f"Failed to initialize OpenAI: {e}")
 
+
     def _init_local(self):
-        """Initialize local Llama model"""
+        """Initialize local Llama model with Vulkan GPU acceleration."""
         try:
             from llama_cpp import Llama
-
             model_path = Path(self.config.local_model_path)
-            if not model_path.is_absolute():
-                model_path = Path(__file__).parent.parent / model_path
 
             if not model_path.exists():
-                logger.error(f"Local model not found: {model_path}")
-                logger.error("Download the model using: scripts/download-model.sh")
+                logger.error(f"Local model not found at: {model_path}")
                 return
 
             logger.info(f"Loading local LLM from {model_path}")
-            self.local_llm = Llama(
-                model_path=str(model_path),
-                n_ctx=self.config.local_n_ctx,
-                n_threads=self.config.local_n_threads,
-                n_gpu_layers=self.config.local_n_gpu_layers,
-                verbose=False
-            )
-            logger.info(f"✅ Local LLM loaded (fallback): {model_path.name}")
 
-        except ImportError:
-            logger.warning("llama-cpp-python not installed, local LLM unavailable")
+            llama_kwargs = {
+                "model_path": str(model_path),
+                "n_ctx": self.config.local_n_ctx,
+                "n_threads": self.config.local_n_threads,
+                "verbose": False,
+            }
+
+            # Vulkan activation
+            if os.getenv("LLAMA_VULKAN", "1") == "1":
+                logger.info("🟣 Vulkan GPU backend ACTIVE")
+                llama_kwargs["use_vulkan"] = True
+                llama_kwargs["n_gpu_layers"] = self.config.local_n_gpu_layers
+            else:
+                logger.info("⚠️ Vulkan disabled via LLAMA_VULKAN=0")
+                llama_kwargs["use_vulkan"] = False
+                llama_kwargs["n_gpu_layers"] = 0
+
+            # Instantiate LLM
+            self.local_llm = Llama(**llama_kwargs)
+
+            # ==========================================================
+            # GPU VERIFICATION (working for llama-cpp-python 0.3.16)
+            # ==========================================================
+            try:
+                backend = getattr(self.local_llm._model, "backend", "unknown")
+                gpu_layers = getattr(self.local_llm, "n_gpu_layers", None)
+                vulkan_enabled = getattr(self.local_llm._model, "vulkan_enabled", False)
+
+                logger.info(f"LLAMA backend: {backend}")
+                logger.info(f"Vulkan enabled: {vulkan_enabled}")
+                logger.info(f"GPU layers offloaded: {gpu_layers}")
+
+                if backend != "vulkan" or not vulkan_enabled or gpu_layers in (0, None):
+                    logger.warning("⚠️ Model is NOT using Vulkan acceleration!")
+                else:
+                    logger.info("🚀 Vulkan acceleration ACTIVE!")
+
+            except Exception as e:
+                logger.warning(f"GPU detection failed: {e}")
+
         except Exception as e:
-            logger.error(f"Failed to load local LLM: {e}")
+            logger.error(f"Failed to initialize local LLM: {e}")
+
+
 
     def _prepare_openai_kwargs(
         self,

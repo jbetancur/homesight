@@ -1,12 +1,5 @@
 """
-HomeSight AI Sidecar Service - Refactored
-
-Clean, modular architecture with:
-- Multi-turn conversational AI
-- Function/tool calling
-- Enhanced document discovery (manuals, forums, Reddit, etc.)
-- AI-powered incident analysis (no hard-coded rules)
-- Hybrid LLM support (OpenAI + local fallback)
+HomeSight AI Sidecar Service
 """
 
 from dotenv import load_dotenv
@@ -406,7 +399,7 @@ async def analyze(request: AnalyzeRequest):
         async def analyze_task():
             return await analysis_service.analyze(request)
 
-        response = await analysis_task_queue.enqueue(analyze_task, task_id="analyze")
+        response = await analysis_task_queue.execute(analyze_task, task_id="analyze")
         return response
     except Exception as e:
         logger.error(f"Analysis error: {e}")
