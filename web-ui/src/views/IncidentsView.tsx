@@ -32,8 +32,6 @@ import {
 } from 'lucide-react';
 import { useEventSubscription } from '../useEventSubscription';
 import ReactMarkdown from 'react-markdown';
-import remarkGfm from 'remark-gfm';
-import rehypeSanitize from 'rehype-sanitize';
 import { API_BASE_WITH_PATHS } from '../apiConfig';
 
 const API_BASE = API_BASE_WITH_PATHS;
@@ -672,13 +670,11 @@ export function IncidentsView() {
                   {msg.role === 'assistant' ? (
                     <div style={{ whiteSpace: 'pre-wrap' }}>
                       <ReactMarkdown
-                        remarkPlugins={[remarkGfm]}
-                        rehypePlugins={[rehypeSanitize]}
                         children={msg.content}
                         components={{
-                          p: ({node, ...props}: any) => <Text size="sm" {...props} />,
-                          li: ({node, ...props}: any) => <li style={{ marginLeft: 8 }} {...props} />,
-                          strong: ({node, ...props}: any) => <Text component="span" fw={700} {...props} />
+                          p: ({children}: any) => <Text size="sm">{children}</Text>,
+                          li: ({children}: any) => <li style={{ marginLeft: 8 }}>{children}</li>,
+                          strong: ({children}: any) => <Text component="span" fw={700}>{children}</Text>
                         }}
                       />
                     </div>

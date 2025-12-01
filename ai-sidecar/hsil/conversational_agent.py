@@ -69,13 +69,51 @@ class ConversationalAgentService:
         self.temp_model = TemperaturePreferenceModel()
         self.temp_intent = TemperatureIntent()
 
-        # Conversation memory (last 10 turns)
-        self.conversation_memory: List[Dict[str, str]] = []
+        # Session-based conversation memory {session_id: [messages]}
+        self._session_memories: Dict[str, List[Dict[str, str]]] = {}
+        # Default session for backwards compatibility
+        self._default_session = "default"
+        # Current session (set per chat call)
+        self._current_session: Optional[str] = None
 
-        self.max_system_prompt_chars = 6000
-        self.max_user_message_chars = 2000
+        # Get all chat settings from LLM provider config (with defaults)
+        if hasattr(llm_provider, 'config') and llm_provider.config:
+            cfg = llm_provider.config
+            self.max_system_prompt_chars = getattr(cfg, 'chat_max_system_prompt_chars', 6000)
+            self.max_user_message_chars = getattr(cfg, 'chat_max_user_message_chars', 2000)
+            self.max_memory_turns = getattr(cfg, 'chat_max_memory_turns', 20)
+            self.llm_context_turns = getattr(cfg, 'chat_context_turns', 10)
+            self.chat_temperature = getattr(cfg, 'chat_temperature', 0.3)
+            self.chat_max_tokens = getattr(cfg, 'chat_max_tokens', 400)
+        else:
+            # Defaults if no config available
+            self.max_system_prompt_chars = 6000
+            self.max_user_message_chars = 2000
+            self.max_memory_turns = 20
+            self.llm_context_turns = 10
+            self.chat_temperature = 0.3
+            self.chat_max_tokens = 400
 
-        logger.info("ConversationalAgentService initialized (context-aware + preference-learning + home-aware)")
+        logger.info(
+            f"ConversationalAgentService initialized "
+            f"(temp={self.chat_temperature}, max_tokens={self.chat_max_tokens}, "
+            f"context_turns={self.llm_context_turns}, memory_turns={self.max_memory_turns})"
+        )
+
+    def _get_session_memory(self, session_id: Optional[str] = None) -> List[Dict[str, str]]:
+        """Get memory for a specific session, creating if needed."""
+        sid = session_id or self._current_session or self._default_session
+        if sid not in self._session_memories:
+            self._session_memories[sid] = []
+        return self._session_memories[sid]
+
+    def _add_to_memory(self, role: str, content: str, session_id: Optional[str] = None):
+        """Add a message to the session memory."""
+        memory = self._get_session_memory(session_id)
+        memory.append({"role": role, "content": content})
+        # Keep last N turns per session
+        if len(memory) > self.max_memory_turns:
+            self._session_memories[session_id or self._current_session or self._default_session] = memory[-self.max_memory_turns:]
 
     # ---------------------------------------------------------------------
     # Public API
@@ -96,16 +134,17 @@ class ConversationalAgentService:
         home_state: Optional[Dict[str, Any]] = None,
         session_id: Optional[str] = None
     ) -> ConversationResponse:
+        
+        # Set current session for this chat
+        self._current_session = session_id or self._default_session
 
         # Handle temperature intents BEFORE LLM (prevent "What temperature?" questions)
         if self.temp_intent.is_temperature_related(message):
             temp_response = await self._handle_temperature_request(message, home_state)
             if temp_response:
                 # Add to conversation memory
-                self.conversation_memory.append({"role": "user", "content": message})
-                self.conversation_memory.append({"role": "assistant", "content": temp_response.reply})
-                if len(self.conversation_memory) > 20:
-                    self.conversation_memory = self.conversation_memory[-20:]
+                self._add_to_memory("user", message, session_id)
+                self._add_to_memory("assistant", temp_response.reply, session_id)
                 return temp_response
 
         # Try intent parser for other intents
@@ -120,24 +159,20 @@ class ConversationalAgentService:
         if room_query:
             room_response = await self._handle_room_query(room_query, home_state)
             if room_response:
-                self.conversation_memory.append({"role": "user", "content": message})
-                self.conversation_memory.append({"role": "assistant", "content": room_response.reply})
-                if len(self.conversation_memory) > 20:
-                    self.conversation_memory = self.conversation_memory[-20:]
+                self._add_to_memory("user", message, session_id)
+                self._add_to_memory("assistant", room_response.reply, session_id)
                 return room_response
 
         context = await self._build_context(message, event_context, home_state)
 
         system_prompt = await self._build_system_prompt(context)
-        llm_response = await self._call_llm(system_prompt, message)
+        llm_response = await self._call_llm(system_prompt, message, session_id)
 
         parsed = await self._parse_llm_response(llm_response, context)
 
-        # Add to conversation memory
-        self.conversation_memory.append({"role": "user", "content": message})
-        self.conversation_memory.append({"role": "assistant", "content": parsed.reply})
-        if len(self.conversation_memory) > 20:
-            self.conversation_memory = self.conversation_memory[-20:]
+        # Add to conversation memory for this session
+        self._add_to_memory("user", message, session_id)
+        self._add_to_memory("assistant", parsed.reply, session_id)
 
         return parsed
 
@@ -408,9 +443,10 @@ class ConversationalAgentService:
             "max": temp_range[1]
         }
 
-        # Conversation memory (last 6 turns for context)
-        if self.conversation_memory:
-            context["conversation_history"] = self.conversation_memory[-6:]
+        # Conversation memory for context building
+        session_memory = self._get_session_memory()
+        if session_memory:
+            context["conversation_history"] = session_memory[-self.llm_context_turns:]
 
         # Memory search
         try:
@@ -461,36 +497,35 @@ class ConversationalAgentService:
         """
 
         p = [
-            "You are HomeSight, a contextual, preference-learning home assistant.",
+            "You are HomeSight, a friendly home assistant that ONLY reports actual sensor data.",
             "",
-            "CRITICAL RULES (NEVER VIOLATE):",
-            "1. NEVER invent sensor data - only use provided context",
-            "2. NEVER contradict yourself or home_health status",
-            "3. NEVER ask follow-up questions for temperature (already handled)",
-            "4. ONLY use devices listed in device_summary",
-            "5. ONLY use safe commands: " + ", ".join(SAFE_ACTIONS),
-            "6. If home_health says 'critical' or 'has_leak=true', YOU MUST acknowledge it",
-            "7. If home_health says 'good', DON'T invent problems",
+            "⚠️ STRICT ANTI-HALLUCINATION RULES - VIOLATIONS ARE UNACCEPTABLE:",
             "",
-            "RESPONSE STYLE:",
-            "- When asked about a room/zone, provide a COMPLETE overview:",
-            "  1. Room features/attributes (floor type, plumbing, HVAC, etc.)",
-            "  2. ALL devices/sensors in that room with their current status",
-            "  3. Any active incidents or alerts in that room",
-            "  4. Offer to provide more details (battery levels, history, trends)",
-            "- Be conversational and helpful, not just factual",
-            "- End responses about rooms with a helpful follow-up offer",
+            "YOU HAVE NO INFORMATION ABOUT:",
+            "- Temperature (unless a temp sensor is listed)",
+            "- Sump pump status, water levels, or operation (NO sump pump sensor exists)",
+            "- Water heater status (NO water heater sensor exists)", 
+            "- Washer/dryer status (NO washer/dryer sensor exists)",
+            "- HVAC status (unless thermostat is listed)",
+            "- Any device NOT explicitly listed under 'SENSORS' in ZONE DETAILS",
             "",
-            "EXAMPLE (for room query):",
-            "User: tell me about my basement",
-            "Response: Your basement has a ZSE42 leak sensor which is currently reporting normal (no water detected).",
-            "The room features include: concrete floor, plumbing, water heater, washer/dryer, and sump pump.",
-            "Would you like me to check the sensor's battery level, view its recent history, or check for any past incidents?",
+            "When user asks about something you have NO sensor for, say:",
+            "'I don't have a sensor monitoring the [thing]. The basement has [thing] but I can't report its status.'",
             "",
-            "Capabilities:",
-            "- Remember conversation history",
-            "- Learn temperature preferences",
-            "- Provide authoritative home status (from home_health)",
+            "ONLY REPORT:",
+            "- Devices listed under 'SENSORS (can report status)' in ZONE DETAILS",
+            "- Status/readings explicitly provided for those sensors",
+            "- Room features are just ATTRIBUTES describing what's in the room",
+            "",
+            "EXAMPLE - User asks 'how is the sump pump?'",
+            "CORRECT: 'The basement has a sump pump, but I don't have a sensor monitoring it so I can't report its status.'",
+            "WRONG: 'The sump pump is working normally' (HALLUCINATION - no sensor!)",
+            "",
+            "EXAMPLE - User asks 'what's the temperature?'", 
+            "CORRECT: 'I don't have a temperature sensor in that room.'",
+            "WRONG: 'It's 72°F' (HALLUCINATION - no temp sensor!)",
+            "",
+            "Be conversational and match the user's tone. Offer to help with what you CAN monitor.",
             "",
         ]
 
@@ -544,21 +579,23 @@ class ConversationalAgentService:
             zone_details = summary.get('zone_details', {})
             if zone_details:
                 p.append("")
-                p.append("ZONE DETAILS (ALWAYS include devices when asked about a room):")
+                p.append("ZONE DETAILS (source of truth for what sensors exist):")
+                p.append("NOTE: 'Features' are room attributes, NOT sensors. You cannot report status of features.")
+                p.append("")
                 for zone_id, info in zone_details.items():
                     p.append(f"  📍 {info.get('name', zone_id)} ({info.get('type', 'unknown')}):")
                     
-                    # Devices with types
+                    # Devices with types - ONLY these have sensor data
                     devices = info.get('devices', [])
                     if devices:
-                        p.append(f"     Sensors/Devices: {', '.join(devices)}")
+                        p.append(f"     SENSORS (can report status): {', '.join(devices)}")
                     else:
-                        p.append(f"     Sensors/Devices: None installed")
+                        p.append(f"     SENSORS: None installed - NO sensor data available for this room")
                     
-                    # Room features
+                    # Room features - NOT sensors, just attributes
                     attrs = info.get('attributes', [])
                     if attrs:
-                        p.append(f"     Features: {', '.join(attrs)}")
+                        p.append(f"     Features (room attributes, NOT monitored): {', '.join(attrs)}")
 
         if "home_state" in context:
             p.append(f"Home State: {json.dumps(context['home_state'], indent=2)[:500]}")
@@ -627,21 +664,31 @@ IMPORTANT: The "reply" field should be conversational and complete - include dev
     # LLM Call
     # ---------------------------------------------------------------------
 
-    async def _call_llm(self, system_prompt: str, user_message: str) -> str:
+    async def _call_llm(self, system_prompt: str, user_message: str, session_id: Optional[str] = None) -> str:
 
         if self.llm.chat_mode == "local":
             system_prompt = system_prompt[-self.max_system_prompt_chars:]
             user_message = user_message[-self.max_user_message_chars:]
 
+        # Build messages with conversation history for proper context
         messages = [
             {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_message},
         ]
+        
+        # Add conversation history as actual message turns
+        session_memory = self._get_session_memory(session_id)
+        for msg in session_memory[-self.llm_context_turns:]:
+            messages.append({"role": msg["role"], "content": msg["content"]})
+        
+        # Add current user message
+        messages.append({"role": "user", "content": user_message})
+        
+        logger.debug(f"LLM call with {len(messages)} messages (session={session_id or 'default'})")
 
         resp_text, _ = await self.llm.chat_async(
             messages=messages,
-            temperature=0.7,
-            max_tokens=400
+            temperature=self.chat_temperature,
+            max_tokens=self.chat_max_tokens
         )
 
         return resp_text

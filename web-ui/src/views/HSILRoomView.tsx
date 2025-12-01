@@ -40,6 +40,7 @@ import {
 } from 'lucide-react';
 import { API_BASE } from '../apiConfig';
 import { useEventSubscription } from '../useEventSubscription';
+import ReactMarkdown from 'react-markdown';
 
 interface Device {
   id: string;
@@ -158,6 +159,15 @@ export default function HSILRoomView() {
   const [editingZone, setEditingZone] = useState<Room | null>(null);
   const [editedAttributes, setEditedAttributes] = useState<ZoneAttributes | null>(null);
   const chatEndRef = useRef<HTMLDivElement>(null);
+  
+  // Generate a persistent session ID for this browser tab
+  const [sessionId] = useState(() => {
+    const stored = sessionStorage.getItem('hsil_session_id');
+    if (stored) return stored;
+    const newId = `session_${Date.now()}_${Math.random().toString(36).substring(7)}`;
+    sessionStorage.setItem('hsil_session_id', newId);
+    return newId;
+  });
 
   // Helper to check if device was recently updated (within last 30 seconds)
   const isRecentlyUpdated = (lastUpdated: string | undefined) => {
@@ -301,7 +311,7 @@ export default function HSILRoomView() {
       const res = await fetch(`${API_BASE}/api/hsil/chat`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: chatInput }),
+        body: JSON.stringify({ message: chatInput, session_id: sessionId }),
       });
 
       if (res.ok) {
@@ -675,7 +685,27 @@ export default function HSILRoomView() {
                         maxWidth: '80%',
                       }}
                     >
-                      <Text size="sm">{msg.content}</Text>
+                      {msg.role === 'user' ? (
+                        <Text size="sm">{msg.content}</Text>
+                      ) : (
+                        <Box
+                          className="chat-markdown"
+                          style={{
+                            fontSize: 'var(--mantine-font-size-sm)',
+                            lineHeight: 1.5,
+                          }}
+                        >
+                          <ReactMarkdown
+                            components={{
+                              p: ({children}) => <Text size="sm" style={{ margin: '0 0 0.5em 0' }}>{children}</Text>,
+                              strong: ({children}) => <Text component="span" fw={700}>{children}</Text>,
+                              li: ({children}) => <li style={{ marginLeft: 8 }}>{children}</li>,
+                            }}
+                          >
+                            {msg.content}
+                          </ReactMarkdown>
+                        </Box>
+                      )}
                       {msg.action && (
                         <Badge size="xs" mt="xs" color="green">
                           Action: {msg.action.command}
@@ -693,7 +723,12 @@ export default function HSILRoomView() {
                 placeholder="Type your message..."
                 value={chatInput}
                 onChange={(e) => setChatInput(e.currentTarget.value)}
-                onKeyPress={(e) => e.key === 'Enter' && !e.shiftKey && handleChatSubmit()}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && !e.shiftKey) {
+                    e.preventDefault();
+                    handleChatSubmit();
+                  }
+                }}
                 autosize
                 minRows={1}
                 maxRows={4}

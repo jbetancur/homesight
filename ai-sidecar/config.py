@@ -32,6 +32,14 @@ class LLMConfig(BaseModel):
     local_n_threads: int = 4
     local_n_gpu_layers: int = 0
 
+    # Chat inference settings
+    chat_temperature: float = Field(default=0.3, description="Temperature for chat responses (lower = less hallucination)")
+    chat_max_tokens: int = Field(default=400, description="Max tokens for chat responses")
+    chat_max_system_prompt_chars: int = Field(default=6000, description="Max chars for system prompt")
+    chat_max_user_message_chars: int = Field(default=2000, description="Max chars for user message")
+    chat_max_memory_turns: int = Field(default=20, description="Max conversation turns to store per session")
+    chat_context_turns: int = Field(default=10, description="Conversation turns to include in LLM context")
+
     # Inference concurrency settings (for background operations)
     inference: InferenceConfig = Field(default_factory=InferenceConfig)
 
@@ -155,6 +163,18 @@ class Config(BaseModel):
                 llm_config_data['local_n_threads'] = local_section['n_threads']
             if 'n_gpu_layers' in local_section:
                 llm_config_data['local_n_gpu_layers'] = local_section['n_gpu_layers']
+            if 'temperature' in local_section:
+                llm_config_data['chat_temperature'] = local_section['temperature']
+            if 'max_tokens' in local_section:
+                llm_config_data['chat_max_tokens'] = local_section['max_tokens']
+            if 'max_system_prompt_chars' in local_section:
+                llm_config_data['chat_max_system_prompt_chars'] = local_section['max_system_prompt_chars']
+            if 'max_user_message_chars' in local_section:
+                llm_config_data['chat_max_user_message_chars'] = local_section['max_user_message_chars']
+            if 'max_memory_turns' in local_section:
+                llm_config_data['chat_max_memory_turns'] = local_section['max_memory_turns']
+            if 'context_turns' in local_section:
+                llm_config_data['chat_context_turns'] = local_section['context_turns']
 
             # OpenAI settings
             openai_section = llm_section.get('openai', {})

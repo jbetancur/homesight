@@ -87,10 +87,22 @@ ai:
       # Pre-download model with: scripts/download-model.sh
 
       # Runtime settings
-      n_ctx: 4096          # Context window size
+      # n_ctx options:
+      # 4096 (current): ~2-3K words of context, lower memory, faster
+      # 8192: ~6K words, moderate memory increase
+      # 16384: ~12K words, noticeable memory increase
+      # 32768+: Very long context but requires significant GPU/RAM
+      n_ctx: 16384          # Context window size
       n_threads: 8         # CPU threads (auto-detect based on CPU cores)
       n_gpu_layers: -1      # 0 = CPU only, 35+ = full GPU (if CUDA available)
-      temperature: 0.7     # Sampling temperature (0.0-1.0)
+      
+      # Chat inference settings
+      temperature: 0.3      # Sampling temperature (0.0-1.0, lower = less hallucination)
+      max_tokens: 400       # Max tokens per chat response
+      max_system_prompt_chars: 6000   # Max chars for system prompt (truncated if exceeded)
+      max_user_message_chars: 2000    # Max chars for user message
+      max_memory_turns: 20            # Max conversation turns to store per session
+      context_turns: 10               # Conversation turns to include in LLM context
 
     # OpenAI settings
     # Used for: chat (if chat_mode="cloud"), knowledge generation, incident analysis
