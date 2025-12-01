@@ -138,6 +138,7 @@ func (s *Server) setupRoutes() {
 		r.Route("/devices", func(r chi.Router) {
 			r.Get("/", s.listDevices)
 			r.Get("/{id}", s.getDevice)
+			r.Patch("/{id}", s.updateDevice) // Update device fields (alias, zone_id, etc.)
 			r.Get("/{id}/sensors", s.listDeviceSensors)
 			r.Get("/{id}/sensors/{sensorID}", s.getDeviceSensor)
 			r.Get("/{id}/knowledge-base", s.getDeviceKnowledgeBase)
@@ -145,7 +146,6 @@ func (s *Server) setupRoutes() {
 			r.Post("/{id}/command", s.handleDeviceCommand)              // Send command to device via MQTT
 			r.Post("/{id}/reingest-docs", s.handleReingestDeviceDocs)   // Re-trigger document discovery for a device
 			r.Post("/{id}/docs-status", s.handleUpdateDeviceDocsStatus) // Update device documentation status and generate KB articles (called by AI sidecar)
-			r.Patch("/{id}/zone", s.handleUpdateDeviceZone)             // Update device zone assignment
 			// Demo/Testing endpoints - In production, guard with admin authentication
 			r.Post("/", s.createDevice)       // Manual device creation (testing only - normally auto-discovered)
 			r.Delete("/{id}", s.deleteDevice) // Hard delete (testing/cleanup only)
@@ -434,10 +434,18 @@ func (s *Server) updateIncidentAnalysis(w http.ResponseWriter, r *http.Request) 
 
 // enrichDeviceWithState enriches a device with current sensor values and incident state
 func (s *Server) enrichDeviceWithState(ctx context.Context, device model.Device) map[string]interface{} {
+	// Compute display name (alias if set, otherwise original name)
+	displayName := device.Name
+	if device.Alias != "" {
+		displayName = device.Alias
+	}
+
 	// Start with all original device fields
 	enriched := map[string]interface{}{
 		"id":               device.ID,
 		"name":             device.Name,
+		"alias":            device.Alias,
+		"display_name":     displayName,
 		"type":             device.Type,
 		"integration":      device.Integration,
 		"zone_id":          device.ZoneID,

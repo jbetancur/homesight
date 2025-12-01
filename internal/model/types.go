@@ -32,7 +32,8 @@ type DeviceCommand struct {
 // Device represents a physical or logical device
 type Device struct {
 	ID             string            `json:"id"`
-	Name           string            `json:"name"`
+	Name           string            `json:"name"`            // Original device name from integration
+	Alias          string            `json:"alias,omitempty"` // User-defined friendly name
 	Type           string            `json:"type"`
 	Integration    string            `json:"integration"`
 	ZoneID         string            `json:"zone_id"`
@@ -45,6 +46,14 @@ type Device struct {
 	DocsStatus     string            `json:"docs_status"`      // pending/success/partial/error
 	CreatedAt      time.Time         `json:"created_at"`
 	UpdatedAt      time.Time         `json:"updated_at"`
+}
+
+// DisplayName returns the alias if set, otherwise the original name
+func (d *Device) DisplayName() string {
+	if d.Alias != "" {
+		return d.Alias
+	}
+	return d.Name
 }
 
 // Sensor represents a sensor within a device

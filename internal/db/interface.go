@@ -12,6 +12,7 @@ type DeviceRepository interface {
 	Get(ctx context.Context, id string) (*model.Device, error)
 	List(ctx context.Context) ([]model.Device, error)
 	Upsert(ctx context.Context, device *model.Device) error
+	Update(ctx context.Context, id string, updates map[string]interface{}) error
 	Delete(ctx context.Context, id string) error
 }
 

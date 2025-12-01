@@ -19,12 +19,18 @@ logger = logging.getLogger(__name__)
 class Device:
     """Device representation"""
     device_id: str
-    name: str
+    name: str  # Original device name from integration
     type: str
+    alias: Optional[str] = None  # User-defined friendly name
     location: Optional[str] = None
     zone_id: Optional[str] = None
     capabilities: Optional[List[str]] = None
     metadata: Optional[Dict[str, Any]] = None
+
+    @property
+    def display_name(self) -> str:
+        """Returns alias if set, otherwise the original name"""
+        return self.alias if self.alias else self.name
 
 
 @dataclass
@@ -178,6 +184,7 @@ class DeviceOntology:
             device = Device(
                 device_id=dev_data.get("id", ""),
                 name=dev_data.get("name", ""),
+                alias=dev_data.get("alias"),  # User-defined friendly name
                 type=dev_data.get("type", "unknown"),
                 location=dev_data.get("location"),
                 zone_id=dev_data.get("zone_id"),
@@ -407,7 +414,7 @@ class DeviceOntology:
                 try:
                     battery = int(device.metadata.get("battery_level"))
                     if battery < 20:
-                        low_battery_devices.append(f"{device.name} ({battery}%)")
+                        low_battery_devices.append(f"{device.display_name} ({battery}%)")
                 except (ValueError, TypeError):
                     pass
         if low_battery_devices:
@@ -416,11 +423,11 @@ class DeviceOntology:
         # Zone details with attributes
         summary["zone_details"] = {}
         for zone_id, zone in self.zones.items():
-            # Get devices with more detail (name, type, battery, readings)
+            # Get devices with more detail (display_name, type, battery, readings)
             zone_devices = self.devices_by_zone.get(zone_id, [])
             device_list = []
             for d in zone_devices:
-                device_info = f"{d.name} ({d.type})"
+                device_info = f"{d.display_name} ({d.type})"
                 # Include sensor readings if available
                 readings = self._extract_sensor_readings(d.metadata)
                 if readings:

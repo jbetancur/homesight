@@ -2,11 +2,11 @@ import { useEffect, useState, useCallback, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import {
   Stack, Title, Text, Card, Group, Badge, Loader, Button, Table, Paper, Tabs,
-  Grid, ActionIcon, Tooltip, Progress
+  Grid, ActionIcon, Tooltip, Progress, Modal, TextInput
 } from '@mantine/core';
 import {
   ArrowLeft, FileText, Activity, Droplets, Thermometer, Info, Clock, RefreshCw,
-  AlertCircle, CheckCircle, Battery, Zap, Power, Wind, Eye
+  AlertCircle, CheckCircle, Battery, Zap, Power, Eye, Edit2
 } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import { useEventSubscription } from '../useEventSubscription';
@@ -29,6 +29,8 @@ interface Sensor {
 interface Device {
   id: string;
   name: string;
+  alias?: string;
+  display_name?: string;
   type: string;
   integration: string;
   metadata: Record<string, any>;
@@ -198,6 +200,9 @@ export function DeviceOverviewView() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
+  const [aliasModalOpen, setAliasModalOpen] = useState(false);
+  const [editingAlias, setEditingAlias] = useState('');
+  const [savingAlias, setSavingAlias] = useState(false);
   const deviceRef = useRef<Device | null>(null);
   const incidentsRef = useRef<any[]>([]);
 
@@ -407,8 +412,71 @@ export function DeviceOverviewView() {
     }
   };
 
+  const openAliasModal = () => {
+    setEditingAlias(device?.alias || '');
+    setAliasModalOpen(true);
+  };
+
+  const handleSaveAlias = async () => {
+    if (!deviceId) return;
+    
+    setSavingAlias(true);
+    try {
+      const response = await fetch(`${API_BASE}/devices/${deviceId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ alias: editingAlias.trim() }),
+      });
+      
+      if (response.ok) {
+        const updatedDevice = await response.json();
+        setDevice(updatedDevice);
+        deviceRef.current = updatedDevice;
+        setAliasModalOpen(false);
+      } else {
+        console.error('Failed to save alias');
+      }
+    } catch (error) {
+      console.error('Error saving alias:', error);
+    } finally {
+      setSavingAlias(false);
+    }
+  };
+
+  // Get the display name (alias if set, otherwise original name)
+  const displayName = device?.display_name || device?.alias || device?.name || 'Unknown Device';
+
   return (
     <Stack gap="md">
+      {/* Alias Edit Modal */}
+      <Modal
+        opened={aliasModalOpen}
+        onClose={() => setAliasModalOpen(false)}
+        title="Edit Device Name"
+        size="sm"
+      >
+        <Stack gap="md">
+          <TextInput
+            label="Friendly Name"
+            description="Give this device a custom name (leave empty to use original name)"
+            placeholder={device?.name || 'Enter a friendly name'}
+            value={editingAlias}
+            onChange={(e) => setEditingAlias(e.target.value)}
+          />
+          <Text size="xs" c="dimmed">
+            Original name: {device?.name}
+          </Text>
+          <Group justify="flex-end" gap="sm">
+            <Button variant="subtle" onClick={() => setAliasModalOpen(false)}>
+              Cancel
+            </Button>
+            <Button onClick={handleSaveAlias} loading={savingAlias}>
+              Save
+            </Button>
+          </Group>
+        </Stack>
+      </Modal>
+
       {/* Header */}
       <Group justify="space-between" align="center">
         <Button
@@ -436,12 +504,20 @@ export function DeviceOverviewView() {
           <Group justify="space-between" align="flex-start">
             <div>
               <Group gap="sm" mb="xs">
-                <Title order={2}>{device.name}</Title>
+                <Title order={2}>{displayName}</Title>
+                <Tooltip label="Edit device name">
+                  <ActionIcon variant="subtle" size="sm" onClick={openAliasModal}>
+                    <Edit2 size={16} />
+                  </ActionIcon>
+                </Tooltip>
                 <Badge color={status.color}>{status.label}</Badge>
               </Group>
               <Group gap="sm">
                 <Badge variant="light" color="blue">{device.type}</Badge>
                 <Badge variant="outline">{device.integration}</Badge>
+                {device.alias && (
+                  <Text size="xs" c="dimmed">Original: {device.name}</Text>
+                )}
               </Group>
             </div>
           </Group>

@@ -3,12 +3,12 @@ import { useEffect, useState, useRef, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   Table, Badge, Loader, Stack, Title, Text, Card, Group, Paper, Button, Modal,
-  ActionIcon, Tooltip, ScrollArea, TextInput, Select, MultiSelect, Grid, Progress
+  ActionIcon, Tooltip, ScrollArea, TextInput, Select, MultiSelect, Grid
 } from '@mantine/core';
 import {
   Wifi, CheckCircle, Activity, Trash2, RefreshCw, FileText, Search,
   Filter, Grid3x3, List, Power, Lock, Lightbulb, Thermometer, Home, Battery,
-  Droplets, Wind, Zap
+  Droplets, Zap
 } from 'lucide-react';
 import { useEventSubscription } from '../useEventSubscription';
 import { API_BASE_WITH_PATHS } from '../apiConfig';
@@ -263,14 +263,17 @@ export function DevicesView() {
 
   // Apply filters
   const filteredDevices = devices.filter(device => {
-    // Search filter
+    // Search filter - search by display_name, name, alias, type, manufacturer, model
     if (searchQuery) {
       const query = searchQuery.toLowerCase();
+      const displayName = device.display_name || device.alias || device.name;
+      const matchesDisplayName = displayName?.toLowerCase().includes(query);
       const matchesName = device.name?.toLowerCase().includes(query);
+      const matchesAlias = device.alias?.toLowerCase().includes(query);
       const matchesType = device.type?.toLowerCase().includes(query);
       const matchesManufacturer = device.metadata?.manufacturer?.toLowerCase().includes(query);
       const matchesModel = device.metadata?.model?.toLowerCase().includes(query);
-      if (!matchesName && !matchesType && !matchesManufacturer && !matchesModel) {
+      if (!matchesDisplayName && !matchesName && !matchesAlias && !matchesType && !matchesManufacturer && !matchesModel) {
         return false;
       }
     }
@@ -504,7 +507,6 @@ export function DevicesView() {
                   <Table.Th>Name</Table.Th>
                   <Table.Th>Type</Table.Th>
                   <Table.Th>Integration</Table.Th>
-                  <Table.Th>Readings</Table.Th>
                   <Table.Th>Battery</Table.Th>
                   <Table.Th>Status</Table.Th>
                   <Table.Th>Documentation</Table.Th>
@@ -519,7 +521,7 @@ export function DevicesView() {
                       <Table.Td>
                         <Group gap="xs">
                           {getDeviceIcon(device.type, 16)}
-                          <Text fw={500} style={{ color: '#228be6', textDecoration: 'underline' }}>{device.name}</Text>
+                          <Text fw={500} style={{ color: '#228be6', textDecoration: 'underline' }}>{device.display_name || device.alias || device.name}</Text>
                         </Group>
                       </Table.Td>
                       <Table.Td>
@@ -527,9 +529,6 @@ export function DevicesView() {
                       </Table.Td>
                       <Table.Td>
                         <Badge variant="outline">{device.integration}</Badge>
-                      </Table.Td>
-                      <Table.Td>
-                        <SensorReadings readings={device.readings} />
                       </Table.Td>
                       <Table.Td>
                         <BatteryIndicator level={device.battery_level} />
@@ -576,7 +575,7 @@ export function DevicesView() {
                               onClick={() => setConfirmModal({
                                 open: true,
                                 deviceId: device.id,
-                                deviceName: device.name
+                                deviceName: device.display_name || device.alias || device.name
                               })}
                               loading={offboardingId === device.id}
                               disabled={offboardingId === device.id}
@@ -616,7 +615,7 @@ export function DevicesView() {
                       </Group>
                     </Group>
                     <div>
-                      <Text fw={600} lineClamp={1}>{device.name}</Text>
+                      <Text fw={600} lineClamp={1}>{device.display_name || device.alias || device.name}</Text>
                       <Text size="xs" c="dimmed" lineClamp={1}>{device.metadata?.manufacturer || device.type}</Text>
                     </div>
                     {/* Sensor readings */}
@@ -648,7 +647,7 @@ export function DevicesView() {
                           onClick={() => setConfirmModal({
                             open: true,
                             deviceId: device.id,
-                            deviceName: device.name
+                            deviceName: device.display_name || device.alias || device.name
                           })}
                           loading={offboardingId === device.id}
                           disabled={offboardingId === device.id}

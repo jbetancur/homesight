@@ -316,35 +316,42 @@ func (s *Server) handleDeleteZone(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// handleUpdateDeviceZone updates a device's zone assignment
-func (s *Server) handleUpdateDeviceZone(w http.ResponseWriter, r *http.Request) {
+// updateDevice updates device fields (alias, zone_id, etc.)
+func (s *Server) updateDevice(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
 	deviceID := chi.URLParam(r, "id")
 
-	var req struct {
-		ZoneID string `json:"zone_id"`
-	}
-
+	var req map[string]interface{}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "Invalid request body", http.StatusBadRequest)
 		return
 	}
 
-	// Get the device
-	device, err := s.deviceRepo.Get(r.Context(), deviceID)
-	if err != nil {
+	// Verify device exists
+	device, err := s.deviceRepo.Get(ctx, deviceID)
+	if err != nil || device == nil {
 		http.Error(w, "Device not found", http.StatusNotFound)
 		return
 	}
 
-	// Update zone
-	device.ZoneID = req.ZoneID
-
-	// Save to database
-	if err := s.deviceRepo.Upsert(r.Context(), device); err != nil {
+	// Update using the generic Update method
+	if err := s.deviceRepo.Update(ctx, deviceID, req); err != nil {
 		http.Error(w, "Failed to update device", http.StatusInternalServerError)
 		return
 	}
 
+	// Reload device to get updated data
+	device, _ = s.deviceRepo.Get(ctx, deviceID)
+
+	// Enrich and return
+	enriched := s.enrichDeviceWithState(ctx, *device)
+
+	// Publish update event for SSE
+	s.eventBus.Publish(Event{
+		Type: DeviceUpdated,
+		Data: device,
+	})
+
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(device)
+	json.NewEncoder(w).Encode(enriched)
 }

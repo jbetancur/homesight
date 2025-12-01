@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/homesight/homesight/internal/model"
@@ -79,6 +80,7 @@ func (s *SQLiteDB) initSchema() error {
 		CREATE TABLE IF NOT EXISTS devices (
 			id TEXT PRIMARY KEY,
 			name TEXT NOT NULL,
+			alias TEXT,
 			type TEXT,
 			integration TEXT,
 			zone_id TEXT,
@@ -190,6 +192,12 @@ func (s *SQLiteDB) runMigrations() error {
 		// SQLite doesn't have "IF NOT EXISTS" for ALTER TABLE
 	}
 
+	// Migration: Add alias column to devices if it doesn't exist
+	_, err = s.db.Exec(`ALTER TABLE devices ADD COLUMN alias TEXT`)
+	if err != nil {
+		// Ignore error if column already exists
+	}
+
 	return nil
 }
 
@@ -213,11 +221,12 @@ func (r *DeviceRepo) Get(ctx context.Context, id string) (*model.Device, error) 
 	var metadataJSON sql.NullString
 	var lastSeen sql.NullTime
 	var docsIngestedAt sql.NullTime
+	var alias sql.NullString
 
 	err := r.db.QueryRowContext(ctx,
-		`SELECT id, name, type, integration, zone_id, asset_id, enabled, last_seen, metadata, docs_ingested, docs_ingested_at, docs_status, created_at, updated_at
+		`SELECT id, name, alias, type, integration, zone_id, asset_id, enabled, last_seen, metadata, docs_ingested, docs_ingested_at, docs_status, created_at, updated_at
 		 FROM devices WHERE id = ?`, id).Scan(
-		&d.ID, &d.Name, &d.Type, &d.Integration, &d.ZoneID, &d.AssetID, &d.Enabled, &lastSeen, &metadataJSON, &d.DocsIngested, &docsIngestedAt, &d.DocsStatus, &d.CreatedAt, &d.UpdatedAt)
+		&d.ID, &d.Name, &alias, &d.Type, &d.Integration, &d.ZoneID, &d.AssetID, &d.Enabled, &lastSeen, &metadataJSON, &d.DocsIngested, &docsIngestedAt, &d.DocsStatus, &d.CreatedAt, &d.UpdatedAt)
 
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -235,14 +244,17 @@ func (r *DeviceRepo) Get(ctx context.Context, id string) (*model.Device, error) 
 	if metadataJSON.Valid {
 		json.Unmarshal([]byte(metadataJSON.String), &d.Metadata)
 	}
+	if alias.Valid {
+		d.Alias = alias.String
+	}
 
 	return &d, nil
 }
 
 func (r *DeviceRepo) List(ctx context.Context) ([]model.Device, error) {
 	rows, err := r.db.QueryContext(ctx,
-		`SELECT id, name, type, integration, zone_id, asset_id, enabled, last_seen, metadata, docs_ingested, docs_ingested_at, docs_status, created_at, updated_at
-		 FROM devices ORDER BY name`)
+		`SELECT id, name, alias, type, integration, zone_id, asset_id, enabled, last_seen, metadata, docs_ingested, docs_ingested_at, docs_status, created_at, updated_at
+		 FROM devices ORDER BY COALESCE(alias, name)`)
 	if err != nil {
 		return nil, err
 	}
@@ -254,8 +266,9 @@ func (r *DeviceRepo) List(ctx context.Context) ([]model.Device, error) {
 		var metadataJSON sql.NullString
 		var lastSeen sql.NullTime
 		var docsIngestedAt sql.NullTime
+		var alias sql.NullString
 
-		if err := rows.Scan(&d.ID, &d.Name, &d.Type, &d.Integration, &d.ZoneID, &d.AssetID, &d.Enabled, &lastSeen, &metadataJSON, &d.DocsIngested, &docsIngestedAt, &d.DocsStatus, &d.CreatedAt, &d.UpdatedAt); err != nil {
+		if err := rows.Scan(&d.ID, &d.Name, &alias, &d.Type, &d.Integration, &d.ZoneID, &d.AssetID, &d.Enabled, &lastSeen, &metadataJSON, &d.DocsIngested, &docsIngestedAt, &d.DocsStatus, &d.CreatedAt, &d.UpdatedAt); err != nil {
 			return nil, err
 		}
 
@@ -268,6 +281,9 @@ func (r *DeviceRepo) List(ctx context.Context) ([]model.Device, error) {
 		if metadataJSON.Valid {
 			json.Unmarshal([]byte(metadataJSON.String), &d.Metadata)
 		}
+		if alias.Valid {
+			d.Alias = alias.String
+		}
 
 		devices = append(devices, d)
 	}
@@ -279,11 +295,73 @@ func (r *DeviceRepo) Upsert(ctx context.Context, device *model.Device) error {
 	metadataJSON, _ := json.Marshal(device.Metadata)
 	device.UpdatedAt = time.Now()
 
+	// Use nullAlias to properly handle empty strings as NULL
+	var nullAlias sql.NullString
+	if device.Alias != "" {
+		nullAlias = sql.NullString{String: device.Alias, Valid: true}
+	}
+
 	_, err := r.db.ExecContext(ctx,
-		`INSERT OR REPLACE INTO devices (id, name, type, integration, zone_id, asset_id, enabled, last_seen, metadata, docs_ingested, docs_ingested_at, docs_status, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		device.ID, device.Name, device.Type, device.Integration, device.ZoneID, device.AssetID, device.Enabled,
+		`INSERT OR REPLACE INTO devices (id, name, alias, type, integration, zone_id, asset_id, enabled, last_seen, metadata, docs_ingested, docs_ingested_at, docs_status, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		device.ID, device.Name, nullAlias, device.Type, device.Integration, device.ZoneID, device.AssetID, device.Enabled,
 		device.LastSeen, string(metadataJSON), device.DocsIngested, device.DocsIngestedAt, device.DocsStatus, device.CreatedAt, device.UpdatedAt)
+	return err
+}
+
+// Update updates specific fields of a device
+func (r *DeviceRepo) Update(ctx context.Context, id string, updates map[string]interface{}) error {
+	if len(updates) == 0 {
+		return nil
+	}
+
+	// Build dynamic UPDATE query
+	setClauses := make([]string, 0, len(updates)+1)
+	args := make([]interface{}, 0, len(updates)+2)
+
+	// Allowed fields that can be updated
+	allowedFields := map[string]bool{
+		"alias":   true,
+		"name":    true,
+		"type":    true,
+		"zone_id": true,
+		"enabled": true,
+	}
+
+	for field, value := range updates {
+		if !allowedFields[field] {
+			continue // Skip disallowed fields
+		}
+
+		// Handle nullable string fields
+		if field == "alias" {
+			if strVal, ok := value.(string); ok {
+				if strVal == "" {
+					setClauses = append(setClauses, field+" = NULL")
+				} else {
+					setClauses = append(setClauses, field+" = ?")
+					args = append(args, strVal)
+				}
+			}
+		} else {
+			setClauses = append(setClauses, field+" = ?")
+			args = append(args, value)
+		}
+	}
+
+	if len(setClauses) == 0 {
+		return nil
+	}
+
+	// Always update updated_at
+	setClauses = append(setClauses, "updated_at = ?")
+	args = append(args, time.Now())
+
+	// Add id for WHERE clause
+	args = append(args, id)
+
+	query := fmt.Sprintf("UPDATE devices SET %s WHERE id = ?", strings.Join(setClauses, ", "))
+	_, err := r.db.ExecContext(ctx, query, args...)
 	return err
 }
 
