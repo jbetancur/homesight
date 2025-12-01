@@ -2,11 +2,11 @@ import { useEffect, useState, useCallback, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import {
   Stack, Title, Text, Card, Group, Badge, Loader, Button, Table, Paper, Tabs,
-  Grid, ActionIcon, Tooltip
+  Grid, ActionIcon, Tooltip, Progress
 } from '@mantine/core';
 import {
   ArrowLeft, FileText, Activity, Droplets, Thermometer, Info, Clock, RefreshCw,
-  AlertCircle, CheckCircle
+  AlertCircle, CheckCircle, Battery, Zap, Power, Wind, Eye
 } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import { useEventSubscription } from '../useEventSubscription';
@@ -34,6 +34,9 @@ interface Device {
   metadata: Record<string, any>;
   capabilities?: string[];
   state?: Record<string, any>;
+  readings?: Record<string, any>;
+  battery_level?: number;
+  battery_low?: boolean;
   docs_ingested: boolean;
   docs_ingested_at: string;
   docs_status: string;
@@ -66,6 +69,108 @@ function getSensorIcon(type: string) {
       return <Thermometer size={16} />;
     default:
       return <Activity size={16} />;
+  }
+}
+
+function getBatteryColor(level: number): string {
+  if (level <= 20) return 'red';
+  if (level <= 50) return 'yellow';
+  return 'green';
+}
+
+// Keys to skip in readings display (internal Z-Wave values, redundant readings)
+const HIDDEN_READING_KEYS = new Set([
+  'alarmLevel',
+  'alarmType', 
+  'Water Alarm',  // Redundant with 'water'
+  'Alarm Level',
+  'Alarm Type',
+]);
+
+// Normalize reading key for consistent display
+function normalizeReadingKey(key: string): string {
+  const normalized = key.toLowerCase().replace(/\s+/g, '_');
+  // Map variations to canonical names
+  const keyMap: Record<string, string> = {
+    'water_alarm': 'water',
+    'water_leak': 'water',
+  };
+  return keyMap[normalized] || normalized;
+}
+
+// Format sensor reading for display with icon and color
+function formatSensorReading(key: string, value: any): { icon: React.ReactNode; display: string; color?: string; label: string } | null {
+  if (value === undefined || value === null) return null;
+  
+  // Skip hidden/internal readings
+  if (HIDDEN_READING_KEYS.has(key)) return null;
+  
+  const normalizedKey = normalizeReadingKey(key);
+  
+  switch (normalizedKey) {
+    case 'temperature':
+      return { icon: <Thermometer size={20} color="#228be6" />, display: `${value}°`, label: 'Temperature' };
+    case 'humidity':
+      return { icon: <Droplets size={20} color="#228be6" />, display: `${value}%`, label: 'Humidity' };
+    case 'leak':
+    case 'water': {
+      const isLeaking = value === true || value === 'true' || value === 1 || value === 2 || value === 255;
+      return { 
+        icon: <Droplets size={20} color={isLeaking ? '#fa5252' : '#40c057'} />, 
+        display: isLeaking ? 'LEAK DETECTED!' : 'Dry',
+        color: isLeaking ? 'red' : 'green',
+        label: 'Water Status'
+      };
+    }
+    case 'motion': {
+      const hasMotion = value === true || value === 'true' || value === 1;
+      return { 
+        icon: <Eye size={20} color={hasMotion ? '#fd7e14' : '#868e96'} />, 
+        display: hasMotion ? 'Motion Detected' : 'No Motion',
+        color: hasMotion ? 'orange' : 'gray',
+        label: 'Motion'
+      };
+    }
+    case 'contact': {
+      const isOpen = value === false || value === 'false' || value === 0;
+      return { 
+        icon: <Activity size={20} color={isOpen ? '#fd7e14' : '#40c057'} />, 
+        display: isOpen ? 'Open' : 'Closed',
+        color: isOpen ? 'orange' : 'green',
+        label: 'Contact'
+      };
+    }
+    case 'tamper': {
+      const isTampered = value === true || value === 'true' || value === 1;
+      return { 
+        icon: <AlertCircle size={20} color={isTampered ? '#fa5252' : '#40c057'} />, 
+        display: isTampered ? 'TAMPER!' : 'OK',
+        color: isTampered ? 'red' : 'green',
+        label: 'Tamper'
+      };
+    }
+    case 'power':
+      return { icon: <Zap size={20} color="#fab005" />, display: `${value} W`, label: 'Power' };
+    case 'energy':
+      return { icon: <Zap size={20} color="#fab005" />, display: `${value} kWh`, label: 'Energy' };
+    case 'brightness':
+      return { icon: <Power size={20} color="#fab005" />, display: `${value}%`, label: 'Brightness' };
+    case 'on': {
+      const isOn = value === true || value === 'true' || value === 1;
+      return { 
+        icon: <Power size={20} color={isOn ? '#40c057' : '#868e96'} />, 
+        display: isOn ? 'On' : 'Off',
+        color: isOn ? 'green' : 'gray',
+        label: 'Power'
+      };
+    }
+    default:
+      // Generic display for unknown readings - use formatted key as label
+      return { 
+        icon: <Activity size={20} color="#868e96" />, 
+        display: String(value),
+        label: key.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())
+      };
   }
 }
 
@@ -395,6 +500,61 @@ export function DeviceOverviewView() {
         </Stack>
       </Card>
 
+      {/* Current Readings - Always visible at the top */}
+      {((device.readings && Object.keys(device.readings).length > 0) || device.battery_level !== undefined) && (
+        <Card withBorder p="lg">
+          <Stack gap="md">
+            <Text fw={600} size="lg">Current Readings</Text>
+            <Grid>
+              {/* Battery Status */}
+              {device.battery_level !== undefined && (
+                <Grid.Col span={{ base: 12, sm: 6, md: 4 }}>
+                  <Paper p="md" withBorder bg={device.battery_low ? 'red.0' : 'green.0'} radius="md">
+                    <Group justify="space-between">
+                      <Group gap="sm">
+                        <Battery size={24} color={device.battery_low ? '#fa5252' : '#40c057'} />
+                        <div>
+                          <Text size="xs" c="dimmed">Battery</Text>
+                          <Text fw={600} size="lg" c={getBatteryColor(device.battery_level)}>
+                            {device.battery_level}%
+                          </Text>
+                        </div>
+                      </Group>
+                      <Progress 
+                        value={device.battery_level} 
+                        size="xl" 
+                        w={60}
+                        color={getBatteryColor(device.battery_level)}
+                      />
+                    </Group>
+                  </Paper>
+                </Grid.Col>
+              )}
+              {/* Sensor Readings */}
+              {device.readings && Object.entries(device.readings).map(([key, value]) => {
+                const reading = formatSensorReading(key, value);
+                if (!reading) return null;
+                return (
+                  <Grid.Col key={key} span={{ base: 6, sm: 4, md: 3 }}>
+                    <Paper p="md" bg="gray.0" radius="md" withBorder>
+                      <Group gap="xs">
+                        {reading.icon}
+                        <div>
+                          <Text size="xs" c="dimmed">{reading.label}</Text>
+                          <Text fw={600} c={reading.color || 'dark'} size="lg">
+                            {reading.display}
+                          </Text>
+                        </div>
+                      </Group>
+                    </Paper>
+                  </Grid.Col>
+                );
+              })}
+            </Grid>
+          </Stack>
+        </Card>
+      )}
+
       {/* Device Details Grid */}
       <Tabs defaultValue="controls">
         <Tabs.List>
@@ -443,67 +603,70 @@ export function DeviceOverviewView() {
         </Tabs.Panel>
 
         <Tabs.Panel value="sensors" pt="md">
-          {sensors.length === 0 ? (
-            <Card withBorder p="xl">
-              <Stack align="center" gap="md">
-                <Activity size={48} color="#868e96" />
-                <div style={{ textAlign: 'center' }}>
-                  <Text size="lg" fw={600}>No Sensors Found</Text>
-                  <Text size="sm" c="dimmed">This device hasn't reported any sensors yet</Text>
-                </div>
-              </Stack>
-            </Card>
-          ) : (
-            <Card withBorder p={0}>
-              <Table highlightOnHover striped>
-                <Table.Thead>
-                  <Table.Tr>
-                    <Table.Th>Sensor Name</Table.Th>
-                    <Table.Th>Type</Table.Th>
-                    <Table.Th>Unit</Table.Th>
-                    <Table.Th>Created</Table.Th>
-                    <Table.Th style={{ textAlign: 'center' }}>Action</Table.Th>
-                  </Table.Tr>
-                </Table.Thead>
-                <Table.Tbody>
-                  {sensors.map((sensor) => (
-                    <Table.Tr key={sensor.id}>
-                      <Table.Td>
-                        <Group gap="xs">
-                          {getSensorIcon(sensor.type)}
-                          <Text fw={500}>{sensor.name}</Text>
-                        </Group>
-                      </Table.Td>
-                      <Table.Td>
-                        <Badge variant="light" size="sm">
-                          {sensor.type}
-                        </Badge>
-                      </Table.Td>
-                      <Table.Td>
-                        <Text size="sm">{sensor.unit}</Text>
-                      </Table.Td>
-                      <Table.Td>
-                        <Text size="sm" c="dimmed">
-                          {new Date(sensor.created_at).toLocaleDateString()}
-                        </Text>
-                      </Table.Td>
-                      <Table.Td style={{ textAlign: 'center' }}>
-                        <Button
-                          size="xs"
-                          variant="light"
-                          onClick={() =>
-                            navigate(`/devices/${deviceId}/sensors/${sensor.id}`)
-                          }
-                        >
-                          View Details
-                        </Button>
-                      </Table.Td>
-                    </Table.Tr>
-                  ))}
-                </Table.Tbody>
-              </Table>
-            </Card>
-          )}
+          <Stack gap="md">
+            {/* Sensor Details Table */}
+            {sensors.length === 0 ? (
+              <Card withBorder p="xl">
+                <Stack align="center" gap="md">
+                  <Activity size={48} color="#868e96" />
+                  <div style={{ textAlign: 'center' }}>
+                    <Text size="lg" fw={600}>No Sensor Details</Text>
+                    <Text size="sm" c="dimmed">This device hasn't reported detailed sensor metadata yet</Text>
+                  </div>
+                </Stack>
+              </Card>
+            ) : (
+              <Card withBorder p={0}>
+                  <Table highlightOnHover striped>
+                    <Table.Thead>
+                      <Table.Tr>
+                        <Table.Th>Sensor Name</Table.Th>
+                        <Table.Th>Type</Table.Th>
+                        <Table.Th>Unit</Table.Th>
+                        <Table.Th>Created</Table.Th>
+                        <Table.Th style={{ textAlign: 'center' }}>Action</Table.Th>
+                      </Table.Tr>
+                    </Table.Thead>
+                    <Table.Tbody>
+                      {sensors.map((sensor) => (
+                        <Table.Tr key={sensor.id}>
+                          <Table.Td>
+                            <Group gap="xs">
+                              {getSensorIcon(sensor.type)}
+                              <Text fw={500}>{sensor.name}</Text>
+                            </Group>
+                          </Table.Td>
+                          <Table.Td>
+                            <Badge variant="light" size="sm">
+                              {sensor.type}
+                            </Badge>
+                          </Table.Td>
+                          <Table.Td>
+                            <Text size="sm">{sensor.unit}</Text>
+                          </Table.Td>
+                          <Table.Td>
+                            <Text size="sm" c="dimmed">
+                              {new Date(sensor.created_at).toLocaleDateString()}
+                            </Text>
+                          </Table.Td>
+                          <Table.Td style={{ textAlign: 'center' }}>
+                            <Button
+                              size="xs"
+                              variant="light"
+                              onClick={() =>
+                                navigate(`/devices/${deviceId}/sensors/${sensor.id}`)
+                              }
+                            >
+                              View Details
+                            </Button>
+                          </Table.Td>
+                        </Table.Tr>
+                      ))}
+                    </Table.Tbody>
+                  </Table>
+                </Card>
+            )}
+          </Stack>
         </Tabs.Panel>
 
         {/* Incidents Tab */}
@@ -627,13 +790,13 @@ export function DeviceOverviewView() {
                 </Text>
                 <Stack gap="xs">
                   {Object.entries(device.metadata)
-                    .filter(([key]) => key !== 'manufacturer' && key !== 'model')
+                    .filter(([key]) => key !== 'manufacturer' && key !== 'model' && key !== 'battery_level' && key !== 'battery_low')
                     .map(([key, value]) => (
                       <Group key={key} justify="space-between">
                         <Text size="sm" c="dimmed">
-                          {key}
+                          {key.replace(/_/g, ' ')}
                         </Text>
-                        <Text size="sm">{value}</Text>
+                        <Text size="sm">{String(value)}</Text>
                       </Group>
                     ))}
                 </Stack>

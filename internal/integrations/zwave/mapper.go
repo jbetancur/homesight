@@ -72,6 +72,9 @@ func MapNodeToDevice(node *ZWaveNode, homeID uint32) *model.Device {
 		metadata["battery_low"] = "true"
 	}
 
+	// Extract all sensor values from node.Values during initial sync
+	extractNodeValues(node, metadata)
+
 	// Determine if device should be enabled
 	// Interview stage 7 = Complete, or node.Ready = true, or status >= 3 (Ready/Alive)
 	isEnabled := node.Ready || node.InterviewStage >= 7 || node.Status >= 3
@@ -216,6 +219,120 @@ func findBatteryLevel(node *ZWaveNode) (int, bool) {
 	}
 
 	return 0, false
+}
+
+// extractNodeValues extracts all sensor values from node.Values into metadata
+func extractNodeValues(node *ZWaveNode, metadata map[string]string) {
+	if node.Values == nil {
+		return
+	}
+
+	// Z-Wave JS sends values as an array of value objects
+	valuesArray, ok := node.Values.([]interface{})
+	if ok {
+		for _, v := range valuesArray {
+			valueObj, ok := v.(map[string]interface{})
+			if !ok {
+				continue
+			}
+
+			// Get property name and value
+			propertyName, _ := valueObj["propertyName"].(string)
+			value := valueObj["value"]
+			commandClass, _ := valueObj["commandClass"].(float64)
+
+			if propertyName == "" || value == nil {
+				continue
+			}
+
+			// Map known properties to standard metadata keys
+			propLower := strings.ToLower(propertyName)
+			ccID := int(commandClass)
+
+			// Battery level (CC 128)
+			if ccID == CC_BATTERY && propLower == "level" {
+				if floatVal, ok := value.(float64); ok {
+					metadata["battery_level"] = fmt.Sprintf("%d", int(floatVal))
+					if floatVal < 20 {
+						metadata["battery_low"] = "true"
+					}
+					log.Printf("[ZWAVE-MAPPER] Extracted battery level: %d%%", int(floatVal))
+				}
+			}
+
+			// Water Alarm (CC 113 - Notification)
+			if ccID == CC_NOTIFICATION && (propLower == "water alarm" || strings.Contains(propLower, "water")) {
+				metadata["value_water"] = fmt.Sprintf("%v", value)
+				log.Printf("[ZWAVE-MAPPER] Extracted water alarm: %v", value)
+			}
+
+			// Temperature (CC 49 - Multilevel Sensor)
+			if ccID == CC_SENSOR_MULTILEVEL && strings.Contains(propLower, "temperature") {
+				metadata["value_temperature"] = fmt.Sprintf("%v", value)
+				log.Printf("[ZWAVE-MAPPER] Extracted temperature: %v", value)
+			}
+
+			// Humidity (CC 49 - Multilevel Sensor)
+			if ccID == CC_SENSOR_MULTILEVEL && strings.Contains(propLower, "humidity") {
+				metadata["value_humidity"] = fmt.Sprintf("%v", value)
+				log.Printf("[ZWAVE-MAPPER] Extracted humidity: %v", value)
+			}
+
+			// Motion/Binary sensor (CC 48)
+			if ccID == CC_SENSOR_BINARY {
+				if strings.Contains(propLower, "motion") {
+					metadata["value_motion"] = fmt.Sprintf("%v", value)
+				} else if strings.Contains(propLower, "contact") {
+					metadata["value_contact"] = fmt.Sprintf("%v", value)
+				} else {
+					// Generic binary sensor
+					metadata[fmt.Sprintf("value_%s", strings.ReplaceAll(propLower, " ", "_"))] = fmt.Sprintf("%v", value)
+				}
+				log.Printf("[ZWAVE-MAPPER] Extracted binary sensor %s: %v", propertyName, value)
+			}
+		}
+		return
+	}
+
+	// Fallback: try as map (legacy format)
+	valuesMap, ok := node.Values.(map[string]interface{})
+	if !ok {
+		return
+	}
+
+	// Look for common sensor value patterns
+	sensorKeywords := map[string]string{
+		"temperature":  "temperature",
+		"humidity":     "humidity",
+		"leak":         "leak",
+		"water":        "water",
+		"motion":       "motion",
+		"contact":      "contact",
+		"tamper":       "tamper",
+		"power":        "power",
+		"energy":       "energy",
+		"brightness":   "brightness",
+		"level":        "level",
+		"notification": "notification",
+	}
+
+	for key, value := range valuesMap {
+		keyLower := strings.ToLower(key)
+
+		// Check if this key matches any sensor keywords
+		for keyword, metaKey := range sensorKeywords {
+			if strings.Contains(keyLower, keyword) {
+				// Don't overwrite battery_level which is handled separately
+				if metaKey == "level" && strings.Contains(keyLower, "battery") {
+					continue
+				}
+				// Store with value_ prefix
+				metadata[fmt.Sprintf("value_%s", metaKey)] = fmt.Sprintf("%v", value)
+				log.Printf("[ZWAVE-MAPPER] Extracted value from node: %s = %v", key, value)
+				break
+			}
+		}
+	}
 }
 
 // isLowBattery checks if battery is low

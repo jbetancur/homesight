@@ -3,11 +3,12 @@ import { useEffect, useState, useRef, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   Table, Badge, Loader, Stack, Title, Text, Card, Group, Paper, Button, Modal,
-  ActionIcon, Tooltip, ScrollArea, TextInput, Select, MultiSelect, Grid
+  ActionIcon, Tooltip, ScrollArea, TextInput, Select, MultiSelect, Grid, Progress
 } from '@mantine/core';
 import {
   Wifi, CheckCircle, Activity, Trash2, RefreshCw, FileText, Search,
-  Filter, Grid3x3, List, Power, Lock, Lightbulb, Thermometer, Home
+  Filter, Grid3x3, List, Power, Lock, Lightbulb, Thermometer, Home, Battery,
+  Droplets, Wind, Zap
 } from 'lucide-react';
 import { useEventSubscription } from '../useEventSubscription';
 import { API_BASE_WITH_PATHS } from '../apiConfig';
@@ -40,6 +41,115 @@ function getDeviceIcon(type: string, size: number = 20) {
 
   const Icon = iconMap[type.toLowerCase()] || Activity;
   return <Icon size={size} />;
+}
+
+function getBatteryColor(level: number): string {
+  if (level <= 20) return 'red';
+  if (level <= 50) return 'yellow';
+  return 'green';
+}
+
+function BatteryIndicator({ level }: { level: number | undefined }) {
+  if (level === undefined || level === null) return null;
+  
+  const color = getBatteryColor(level);
+  return (
+    <Tooltip label={`Battery: ${level}%`}>
+      <Group gap={4}>
+        <Battery size={14} color={color === 'red' ? '#fa5252' : color === 'yellow' ? '#fab005' : '#40c057'} />
+        <Text size="xs" c={color} fw={500}>{level}%</Text>
+      </Group>
+    </Tooltip>
+  );
+}
+
+// Format a sensor reading value for display
+function formatReading(key: string, value: any): { icon: React.ReactNode; display: string; color?: string } | null {
+  if (value === undefined || value === null) return null;
+  
+  switch (key) {
+    case 'temperature':
+      return { icon: <Thermometer size={12} />, display: `${value}°` };
+    case 'humidity':
+      return { icon: <Droplets size={12} />, display: `${value}%` };
+    case 'leak':
+    case 'water':
+      const isLeaking = value === true || value === 'true' || value === 1;
+      return { 
+        icon: <Droplets size={12} />, 
+        display: isLeaking ? 'LEAK!' : 'Dry',
+        color: isLeaking ? 'red' : 'green'
+      };
+    case 'motion':
+      const hasMotion = value === true || value === 'true' || value === 1;
+      return { 
+        icon: <Activity size={12} />, 
+        display: hasMotion ? 'Motion' : 'Clear',
+        color: hasMotion ? 'orange' : 'gray'
+      };
+    case 'contact':
+      const isOpen = value === false || value === 'false' || value === 0;
+      return { 
+        icon: <Activity size={12} />, 
+        display: isOpen ? 'Open' : 'Closed',
+        color: isOpen ? 'orange' : 'green'
+      };
+    case 'power':
+      return { icon: <Zap size={12} />, display: `${value}W` };
+    case 'energy':
+      return { icon: <Zap size={12} />, display: `${value}kWh` };
+    case 'brightness':
+      return { icon: <Lightbulb size={12} />, display: `${value}%` };
+    case 'on':
+      const isOn = value === true || value === 'true' || value === 1;
+      return { 
+        icon: <Power size={12} />, 
+        display: isOn ? 'On' : 'Off',
+        color: isOn ? 'green' : 'gray'
+      };
+    default:
+      return null;
+  }
+}
+
+// Compact sensor readings display for cards and table
+function SensorReadings({ readings, compact = false }: { readings?: Record<string, any>; compact?: boolean }) {
+  if (!readings || Object.keys(readings).length === 0) return null;
+
+  // Priority order for display
+  const priorityKeys = ['temperature', 'humidity', 'leak', 'motion', 'contact', 'power', 'on', 'brightness'];
+  const maxDisplay = compact ? 2 : 3;
+  
+  const displayReadings: Array<{ key: string; formatted: NonNullable<ReturnType<typeof formatReading>> }> = [];
+  
+  for (const key of priorityKeys) {
+    if (displayReadings.length >= maxDisplay) break;
+    if (readings[key] !== undefined) {
+      const formatted = formatReading(key, readings[key]);
+      if (formatted) {
+        displayReadings.push({ key, formatted });
+      }
+    }
+  }
+
+  if (displayReadings.length === 0) return null;
+
+  return (
+    <Group gap={compact ? 6 : 8}>
+      {displayReadings.map(({ key, formatted }) => (
+        <Tooltip key={key} label={key.charAt(0).toUpperCase() + key.slice(1)}>
+          <Badge 
+            variant="light" 
+            color={formatted.color || 'blue'} 
+            size={compact ? 'xs' : 'sm'}
+            leftSection={formatted.icon}
+          >
+            {formatted.display}
+          </Badge>
+        </Tooltip>
+      ))}
+    </Group>
+  );
 }
 
 export function DevicesView() {
@@ -394,8 +504,8 @@ export function DevicesView() {
                   <Table.Th>Name</Table.Th>
                   <Table.Th>Type</Table.Th>
                   <Table.Th>Integration</Table.Th>
-                  <Table.Th>Manufacturer</Table.Th>
-                  <Table.Th>Model</Table.Th>
+                  <Table.Th>Readings</Table.Th>
+                  <Table.Th>Battery</Table.Th>
                   <Table.Th>Status</Table.Th>
                   <Table.Th>Documentation</Table.Th>
                   <Table.Th style={{ textAlign: 'center' }}>Actions</Table.Th>
@@ -418,8 +528,12 @@ export function DevicesView() {
                       <Table.Td>
                         <Badge variant="outline">{device.integration}</Badge>
                       </Table.Td>
-                      <Table.Td>{device.metadata?.manufacturer || '-'}</Table.Td>
-                      <Table.Td>{device.metadata?.model || '-'}</Table.Td>
+                      <Table.Td>
+                        <SensorReadings readings={device.readings} />
+                      </Table.Td>
+                      <Table.Td>
+                        <BatteryIndicator level={device.battery_level} />
+                      </Table.Td>
                       <Table.Td>
                         <Badge color={status.color}>{status.label}</Badge>
                       </Table.Td>
@@ -494,12 +608,21 @@ export function DevicesView() {
                   <Stack gap="sm">
                     <Group justify="space-between">
                       {getDeviceIcon(device.type, 24)}
-                      <Badge color={status.color} size="sm">{status.label}</Badge>
+                      <Group gap="xs">
+                        {device.battery_level !== undefined && (
+                          <BatteryIndicator level={device.battery_level} />
+                        )}
+                        <Badge color={status.color} size="sm">{status.label}</Badge>
+                      </Group>
                     </Group>
                     <div>
                       <Text fw={600} lineClamp={1}>{device.name}</Text>
                       <Text size="xs" c="dimmed" lineClamp={1}>{device.metadata?.manufacturer || device.type}</Text>
                     </div>
+                    {/* Sensor readings */}
+                    {device.readings && Object.keys(device.readings).length > 0 && (
+                      <SensorReadings readings={device.readings} compact />
+                    )}
                     <Group gap="xs">
                       <Badge variant="light" color="blue" size="xs">{device.type}</Badge>
                       <Badge variant="outline" size="xs">{device.integration}</Badge>

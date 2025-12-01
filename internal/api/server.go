@@ -9,6 +9,8 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -456,7 +458,57 @@ func (s *Server) enrichDeviceWithState(ctx context.Context, device model.Device)
 		"trend":  nil,
 	}
 
-	// Get latest sensor values
+	// Extract battery level and sensor readings from metadata
+	if device.Metadata != nil {
+		// Battery level
+		if batteryStr, ok := device.Metadata["battery_level"]; ok {
+			if battery, err := strconv.Atoi(batteryStr); err == nil {
+				enriched["battery_level"] = battery
+				enriched["battery_low"] = battery < 20
+			}
+		}
+
+		// Extract sensor readings from metadata
+		// Z-Wave stores as: value_<property> (e.g., value_temperature, value_humidity)
+		// MQTT stores as: state_<key> (e.g., state_temperature, state_leak)
+		readings := make(map[string]interface{})
+
+		for key, val := range device.Metadata {
+			// Handle Z-Wave value_ prefix
+			if strings.HasPrefix(key, "value_") {
+				readingKey := strings.TrimPrefix(key, "value_")
+				// Skip internal properties
+				if readingKey == "level" || readingKey == "idle" {
+					continue
+				}
+				readings[readingKey] = parseReadingValue(val)
+			}
+			// Handle MQTT state_ prefix
+			if strings.HasPrefix(key, "state_") {
+				readingKey := strings.TrimPrefix(key, "state_")
+				readings[readingKey] = parseReadingValue(val)
+			}
+			// Handle MQTT attr_ prefix
+			if strings.HasPrefix(key, "attr_") {
+				readingKey := strings.TrimPrefix(key, "attr_")
+				readings[readingKey] = parseReadingValue(val)
+			}
+		}
+
+		// Also check for common direct metadata keys
+		commonReadings := []string{"temperature", "humidity", "leak", "motion", "contact", "tamper", "power", "energy", "brightness", "on"}
+		for _, key := range commonReadings {
+			if val, ok := device.Metadata[key]; ok {
+				readings[key] = parseReadingValue(val)
+			}
+		}
+
+		if len(readings) > 0 {
+			enriched["readings"] = readings
+		}
+	}
+
+	// Get latest sensor values from sensor repository (if any)
 	sensors, err := s.sensorRepo.ListByDevice(ctx, device.ID)
 	if err == nil && len(sensors) > 0 {
 		// Use first sensor's value (most devices have one primary sensor)
@@ -508,6 +560,53 @@ func (s *Server) enrichDeviceWithState(ctx context.Context, device model.Device)
 	}
 
 	return enriched
+}
+
+// parseReadingValue attempts to parse a string value into an appropriate type
+func parseReadingValue(val string) interface{} {
+	// Try parsing as float
+	if f, err := strconv.ParseFloat(val, 64); err == nil {
+		// Round to 1 decimal place for display
+		return float64(int(f*10)) / 10
+	}
+	// Try parsing as bool
+	if val == "true" {
+		return true
+	}
+	if val == "false" {
+		return false
+	}
+	// Return as string
+	return val
+}
+
+// enrichEventData enriches device events with battery_level, readings, etc.
+// This ensures SSE events contain the same enriched data as the REST API
+func (s *Server) enrichEventData(ctx context.Context, event Event) Event {
+	// Only enrich device-related events
+	if event.Type != DeviceAdded && event.Type != DeviceUpdated {
+		return event
+	}
+
+	// Try to extract device from event data
+	var device *model.Device
+	switch d := event.Data.(type) {
+	case model.Device:
+		device = &d
+	case *model.Device:
+		device = d
+	default:
+		// Not a device type we can enrich
+		return event
+	}
+
+	// Enrich the device data
+	enriched := s.enrichDeviceWithState(ctx, *device)
+
+	return Event{
+		Type: event.Type,
+		Data: enriched,
+	}
 }
 
 // listDevices returns all devices
@@ -1004,7 +1103,9 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 		case <-r.Context().Done():
 			return
 		case event := <-ch:
-			data, _ := json.Marshal(event)
+			// Enrich device events with battery_level, readings, etc.
+			enrichedEvent := s.enrichEventData(r.Context(), event)
+			data, _ := json.Marshal(enrichedEvent)
 			fmt.Fprintf(w, "data: %s\n\n", data)
 			if f, ok := w.(http.Flusher); ok {
 				f.Flush()

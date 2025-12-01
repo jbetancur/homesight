@@ -35,6 +35,8 @@ import {
   Sunrise,
   Sunset,
   Settings,
+  Battery,
+  BatteryLow,
 } from 'lucide-react';
 import { API_BASE } from '../apiConfig';
 import { useEventSubscription } from '../useEventSubscription';
@@ -51,6 +53,8 @@ interface Device {
   active: boolean;
   last_updated: string;
   trend?: 'up' | 'down' | 'stable';
+  battery_level?: number;
+  metadata?: Record<string, any>;
 }
 
 interface Room {
@@ -256,6 +260,11 @@ export default function HSILRoomView() {
             attributes: {},
           });
         }
+        // Extract battery level from metadata
+        const batteryLevel = device.metadata?.battery_level 
+          ? parseInt(device.metadata.battery_level, 10) 
+          : undefined;
+        
         roomMap.get(zoneId)!.devices.push({
           id: device.id,
           name: device.name,
@@ -268,6 +277,8 @@ export default function HSILRoomView() {
           active: device.active || false,
           last_updated: device.last_seen || device.last_updated,
           trend: device.trend,
+          battery_level: batteryLevel,
+          metadata: device.metadata,
         });
       });
 
@@ -364,7 +375,7 @@ export default function HSILRoomView() {
               </ThemeIcon>
               <div>
                 <Text size="xl" fw={700} c="white">
-                  HomeSight Intelligence Layer
+                  Home Intelligence Layer
                 </Text>
                 <Text size="sm" c="rgba(255,255,255,0.8)">
                   AI-Powered Home Automation & Learning System
@@ -583,6 +594,18 @@ export default function HSILRoomView() {
                               </Text>
                             </Group>
                             <Group gap="xs">
+                              {device.battery_level !== undefined && (
+                                <Group gap={2}>
+                                  {device.battery_level < 20 ? (
+                                    <BatteryLow size={14} color="var(--mantine-color-red-6)" />
+                                  ) : (
+                                    <Battery size={14} color={device.battery_level < 40 ? "var(--mantine-color-yellow-6)" : "var(--mantine-color-green-6)"} />
+                                  )}
+                                  <Text size="xs" c={device.battery_level < 20 ? "red" : device.battery_level < 40 ? "yellow" : "dimmed"}>
+                                    {device.battery_level}%
+                                  </Text>
+                                </Group>
+                              )}
                               {device.value !== null && device.value !== undefined && (
                                 <Text size="sm" fw={600}>
                                   {typeof device.value === 'boolean'

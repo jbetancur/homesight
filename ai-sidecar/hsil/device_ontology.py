@@ -400,14 +400,35 @@ class DeviceOntology:
         summary["rooms_with_temperature"] = rooms_with_temp
         summary["rooms_with_leak_detection"] = rooms_with_leak
         
+        # Low battery device alerts
+        low_battery_devices = []
+        for device in self.devices.values():
+            if device.metadata and device.metadata.get("battery_level"):
+                try:
+                    battery = int(device.metadata.get("battery_level"))
+                    if battery < 20:
+                        low_battery_devices.append(f"{device.name} ({battery}%)")
+                except (ValueError, TypeError):
+                    pass
+        if low_battery_devices:
+            summary["low_battery_alerts"] = low_battery_devices
+        
         # Zone details with attributes
         summary["zone_details"] = {}
         for zone_id, zone in self.zones.items():
-            # Get devices with more detail (name, type)
+            # Get devices with more detail (name, type, battery, readings)
             zone_devices = self.devices_by_zone.get(zone_id, [])
             device_list = []
             for d in zone_devices:
                 device_info = f"{d.name} ({d.type})"
+                # Include sensor readings if available
+                readings = self._extract_sensor_readings(d.metadata)
+                if readings:
+                    device_info += f" [{readings}]"
+                # Include battery level if available
+                elif d.metadata and d.metadata.get("battery_level"):
+                    battery = d.metadata.get("battery_level")
+                    device_info += f" [Battery: {battery}%]"
                 device_list.append(device_info)
             
             zone_info = {
@@ -529,3 +550,134 @@ class DeviceOntology:
             details.append(f"Tags: {', '.join(attrs.tags)}")
         
         return " | ".join(details)
+
+    # ==================== Battery Methods ====================
+    
+    def get_low_battery_devices(self, threshold: int = 20) -> List[Device]:
+        """Get devices with low battery (below threshold percentage)"""
+        low_battery = []
+        for device in self.devices.values():
+            if device.metadata and device.metadata.get("battery_level"):
+                try:
+                    battery = int(device.metadata.get("battery_level"))
+                    if battery < threshold:
+                        low_battery.append(device)
+                except (ValueError, TypeError):
+                    pass
+        return low_battery
+    
+    def get_device_battery_summary(self) -> Dict[str, Any]:
+        """Get summary of battery-powered devices"""
+        battery_devices = []
+        for device in self.devices.values():
+            if device.metadata and device.metadata.get("battery_level"):
+                try:
+                    battery = int(device.metadata.get("battery_level"))
+                    battery_devices.append({
+                        "device_id": device.device_id,
+                        "name": device.name,
+                        "type": device.type,
+                        "location": device.location,
+                        "battery_level": battery
+                    })
+                except (ValueError, TypeError):
+                    pass
+        
+        # Sort by battery level (lowest first)
+        battery_devices.sort(key=lambda d: d["battery_level"])
+        
+        low_count = sum(1 for d in battery_devices if d["battery_level"] < 20)
+        
+        return {
+            "total_battery_devices": len(battery_devices),
+            "low_battery_count": low_count,
+            "devices": battery_devices
+        }
+
+    # ==================== Sensor Reading Methods ====================
+    
+    def _extract_sensor_readings(self, metadata: Optional[Dict[str, Any]]) -> str:
+        """Extract sensor readings from device metadata and format as string"""
+        if not metadata:
+            return ""
+        
+        readings = []
+        
+        # Check for Z-Wave style values (value_<property>)
+        # Check for MQTT style values (state_<property>)
+        # Check for direct properties
+        reading_keys = {
+            'temperature': ['value_temperature', 'state_temperature', 'temperature'],
+            'humidity': ['value_humidity', 'state_humidity', 'humidity'],
+            'leak': ['value_leak', 'state_leak', 'leak', 'value_water', 'state_water'],
+            'motion': ['value_motion', 'state_motion', 'motion'],
+            'contact': ['value_contact', 'state_contact', 'contact'],
+            'power': ['value_power', 'state_power', 'power'],
+            'energy': ['value_energy', 'state_energy', 'energy'],
+            'brightness': ['value_brightness', 'state_brightness', 'brightness', 'value_level'],
+        }
+        
+        for reading_type, keys in reading_keys.items():
+            for key in keys:
+                if key in metadata:
+                    value = metadata[key]
+                    formatted = self._format_reading(reading_type, value)
+                    if formatted:
+                        readings.append(formatted)
+                    break  # Only use first match for each type
+        
+        # Always include battery if available
+        if metadata.get('battery_level'):
+            readings.append(f"Battery: {metadata['battery_level']}%")
+        
+        return ", ".join(readings) if readings else ""
+    
+    def _format_reading(self, reading_type: str, value: Any) -> Optional[str]:
+        """Format a single sensor reading for display"""
+        try:
+            if reading_type == 'temperature':
+                return f"Temp: {float(value):.1f}°"
+            elif reading_type == 'humidity':
+                return f"Humidity: {float(value):.0f}%"
+            elif reading_type == 'leak':
+                is_leak = str(value).lower() in ('true', '1', 'yes', 'wet')
+                return "⚠️ LEAK DETECTED" if is_leak else "Dry"
+            elif reading_type == 'motion':
+                has_motion = str(value).lower() in ('true', '1', 'yes')
+                return "Motion detected" if has_motion else None  # Only show if motion
+            elif reading_type == 'contact':
+                is_open = str(value).lower() in ('false', '0', 'open')
+                return "Open" if is_open else "Closed"
+            elif reading_type == 'power':
+                return f"Power: {float(value):.1f}W"
+            elif reading_type == 'energy':
+                return f"Energy: {float(value):.2f}kWh"
+            elif reading_type == 'brightness':
+                return f"Brightness: {int(float(value))}%"
+            else:
+                return f"{reading_type}: {value}"
+        except (ValueError, TypeError):
+            return None
+    
+    def get_device_readings(self, device_id: str) -> Dict[str, Any]:
+        """Get current sensor readings for a specific device"""
+        device = self.devices.get(device_id)
+        if not device or not device.metadata:
+            return {}
+        
+        readings = {}
+        reading_keys = ['temperature', 'humidity', 'leak', 'motion', 'contact', 
+                       'power', 'energy', 'brightness', 'battery_level']
+        
+        for key in reading_keys:
+            # Check direct key
+            if key in device.metadata:
+                readings[key] = device.metadata[key]
+            # Check value_ prefix (Z-Wave)
+            elif f"value_{key}" in device.metadata:
+                readings[key] = device.metadata[f"value_{key}"]
+            # Check state_ prefix (MQTT)
+            elif f"state_{key}" in device.metadata:
+                readings[key] = device.metadata[f"state_{key}"]
+        
+        return readings

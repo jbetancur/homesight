@@ -161,8 +161,8 @@ func (s *Service) handleValueUpdated(event Event) {
 	log.Printf("[ZWAVE] Node %d value updated: %s (CC %d) = %v",
 		nodeID, property, int(commandClass), newValue)
 
-	// Update device state in database
-	s.updateDeviceState(nodeID, property, newValue, propertyName)
+	// Update device state in database (pass command class for context)
+	s.updateDeviceState(nodeID, int(commandClass), property, newValue, propertyName)
 
 	// Emit device event
 	deviceID := fmt.Sprintf("zwave-%d", nodeID)

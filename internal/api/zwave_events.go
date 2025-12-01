@@ -158,6 +158,21 @@ func (s *Server) syncZWaveNode(node *zwave.ZWaveNode) {
 		device.ZoneID = existing.ZoneID
 		device.AssetID = existing.AssetID
 		device.CreatedAt = existing.CreatedAt
+
+		// Preserve dynamic metadata entries (value_*, battery updates from events)
+		// that aren't set by MapNodeToDevice
+		if existing.Metadata != nil {
+			for key, val := range existing.Metadata {
+				// Preserve value_*, name_*, and battery-related entries
+				if strings.HasPrefix(key, "value_") || strings.HasPrefix(key, "name_") ||
+					key == "battery_level" || key == "battery_low" {
+					// Only preserve if not already set by MapNodeToDevice
+					if _, exists := device.Metadata[key]; !exists {
+						device.Metadata[key] = val
+					}
+				}
+			}
+		}
 	}
 
 	device.LastSeen = time.Now()
@@ -252,6 +267,20 @@ func (s *Server) handleZWaveNodeReady(event zwave.Event) {
 		device.ZoneID = existingDevice.ZoneID
 		device.AssetID = existingDevice.AssetID
 		device.CreatedAt = existingDevice.CreatedAt
+
+		// Preserve dynamic metadata entries (value_*, battery updates from events)
+		if existingDevice.Metadata != nil {
+			for key, val := range existingDevice.Metadata {
+				// Preserve value_*, name_*, and battery-related entries
+				if strings.HasPrefix(key, "value_") || strings.HasPrefix(key, "name_") ||
+					key == "battery_level" || key == "battery_low" {
+					// Only preserve if not already set by MapNodeToDevice
+					if _, exists := device.Metadata[key]; !exists {
+						device.Metadata[key] = val
+					}
+				}
+			}
+		}
 
 		// Update in database
 		if err := s.deviceRepo.Upsert(context.Background(), device); err != nil {
@@ -350,6 +379,7 @@ func (s *Server) handleZWaveValueUpdated(event zwave.Event) {
 	commandClass := int(args["commandClass"].(float64))
 	property, _ := args["property"].(string)
 	newValue := args["newValue"]
+	propertyName, _ := args["propertyName"].(string)
 
 	// Use new device ID format (matches service.go)
 	deviceID := fmt.Sprintf("zwave-%d", nodeID)
@@ -361,16 +391,44 @@ func (s *Server) handleZWaveValueUpdated(event zwave.Event) {
 		return
 	}
 
-	// Update device metadata based on value change
-	updated := false
+	// Ensure metadata map exists
+	if device.Metadata == nil {
+		device.Metadata = make(map[string]string)
+	}
 
+	// Store ALL values in metadata with value_ prefix for UI consumption
+	device.Metadata[fmt.Sprintf("value_%s", property)] = fmt.Sprintf("%v", newValue)
+	if propertyName != "" {
+		device.Metadata[fmt.Sprintf("name_%s", property)] = propertyName
+	}
+
+	// Normalize alarm property names to standard reading keys for UI display
+	// "Water Alarm" -> "water", "Heat Alarm" -> "heat", "Smoke Alarm" -> "smoke", etc.
+	propLower := strings.ToLower(property)
+	if strings.HasSuffix(propLower, " alarm") || strings.HasSuffix(propLower, "_alarm") {
+		// Extract the sensor type from the alarm name
+		sensorType := strings.TrimSuffix(strings.TrimSuffix(propLower, " alarm"), "_alarm")
+		sensorType = strings.TrimSpace(sensorType)
+		if sensorType != "" {
+			device.Metadata[fmt.Sprintf("value_%s", sensorType)] = fmt.Sprintf("%v", newValue)
+			log.Printf("[ZWAVE] Normalized alarm: %s -> value_%s = %v", property, sensorType, newValue)
+		}
+	}
+
+	// Log the value update
+	log.Printf("[ZWAVE] Value updated for %s: %s (CC %d) = %v", device.Name, property, commandClass, newValue)
+
+	// Handle specific command class updates
 	switch commandClass {
 	case zwave.CC_BATTERY:
 		if property == "level" {
 			if level, ok := newValue.(float64); ok {
 				device.Metadata["battery_level"] = fmt.Sprintf("%d", int(level))
-				device.Metadata["battery_low"] = fmt.Sprintf("%t", level < 20)
-				updated = true
+				if level < 20 {
+					device.Metadata["battery_low"] = "true"
+				} else {
+					delete(device.Metadata, "battery_low")
+				}
 
 				// Create low battery incident if needed
 				if level < 20 {
@@ -407,20 +465,19 @@ func (s *Server) handleZWaveValueUpdated(event zwave.Event) {
 
 	case zwave.CC_SENSOR_MULTILEVEL:
 		// Multilevel sensor (temperature, humidity, etc.)
-		log.Printf("[ZWAVE] Sensor %s value: %v", device.Name, newValue)
+		log.Printf("[ZWAVE] Sensor %s/%s value: %v", device.Name, property, newValue)
 	}
 
-	if updated {
-		device.LastSeen = time.Now()
-		device.UpdatedAt = time.Now()
-		s.deviceRepo.Upsert(context.Background(), device)
+	// Always update timestamps and save
+	device.LastSeen = time.Now()
+	device.UpdatedAt = time.Now()
+	s.deviceRepo.Upsert(context.Background(), device)
 
-		// Publish device updated event
-		s.eventBus.Publish(Event{
-			Type: DeviceUpdated,
-			Data: device,
-		})
-	}
+	// Publish device updated event
+	s.eventBus.Publish(Event{
+		Type: DeviceUpdated,
+		Data: device,
+	})
 }
 
 // handleZWaveNotification handles Z-Wave notification events (alarms)

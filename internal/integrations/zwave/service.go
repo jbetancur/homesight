@@ -14,11 +14,11 @@ import (
 
 // Service manages Z-Wave integration lifecycle
 type Service struct {
-	ctx        context.Context
-	cancel     context.CancelFunc
-	client     *Client
-	deviceRepo db.DeviceRepository
-	eventBus   events.EventBus
+	ctx         context.Context
+	cancel      context.CancelFunc
+	client      *Client
+	deviceRepo  db.DeviceRepository
+	eventBus    events.EventBus
 	incidentSvc incidents.IncidentService
 }
 
@@ -179,7 +179,7 @@ func (s *Service) publishDeviceEvent(deviceID string, property string, value int
 }
 
 // updateDeviceState updates device state in the database
-func (s *Service) updateDeviceState(nodeID int, property string, value interface{}, propertyName string) {
+func (s *Service) updateDeviceState(nodeID int, commandClass int, property string, value interface{}, propertyName string) {
 	deviceID := fmt.Sprintf("zwave-%d", nodeID)
 
 	// Get device from database
@@ -202,6 +202,19 @@ func (s *Service) updateDeviceState(nodeID int, property string, value interface
 	device.Metadata[fmt.Sprintf("value_%s", property)] = fmt.Sprintf("%v", value)
 	if propertyName != "" {
 		device.Metadata[fmt.Sprintf("name_%s", property)] = propertyName
+	}
+
+	// Special handling for battery level (CC_BATTERY = 0x80 = 128)
+	if commandClass == CC_BATTERY && property == "level" {
+		if floatVal, ok := value.(float64); ok {
+			device.Metadata["battery_level"] = fmt.Sprintf("%d", int(floatVal))
+			if floatVal < 20 {
+				device.Metadata["battery_low"] = "true"
+			} else {
+				delete(device.Metadata, "battery_low")
+			}
+			log.Printf("[ZWAVE] Updated battery level for device %s: %d%%", deviceID, int(floatVal))
+		}
 	}
 
 	// Update timestamps - this marks the device as "online" in the UI
