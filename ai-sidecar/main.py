@@ -239,7 +239,10 @@ async def lifespan(app: FastAPI):
                 db_path="/var/lib/homesight/hsil_memory.db"
             )
 
-            logger.info("✅ HSIL initialized successfully")
+            # Start HSIL background services (weather sync, device ontology)
+            await hsil_service.start()
+
+            logger.info("✅ HSIL initialized and started successfully")
         except Exception as e:
             logger.error(f"Failed to initialize HSIL: {e}")
             logger.warning("Continuing without HSIL...")
@@ -303,6 +306,11 @@ async def lifespan(app: FastAPI):
 
     # Shutdown
     logger.info("Shutting down services...")
+
+    # Shutdown HSIL services
+    if hsil_service:
+        logger.info("Stopping HSIL background services...")
+        await hsil_service.stop()
 
     # Shutdown MQTT service
     shutdown_mqtt_service()

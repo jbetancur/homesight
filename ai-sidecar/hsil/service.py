@@ -26,13 +26,14 @@ from .types import (
 from .event_ingestion import EventIngestionService
 from .feature_extraction import FeatureExtractionService
 from .memory import HomeMemoryService
-from .behavior_model import BehaviorModelService
 from .policy_engine import PolicyEngineService
 from .action_dispatcher import ActionDispatcherService
 from .conversational_agent import ConversationalAgentService
-from .adaptive_learning import AdaptiveLearningService
 from .feedback_learning import FeedbackLearningService
 from .weather_service import WeatherService
+from .weather_sync import WeatherSyncService
+from .hsil_ml_river import HSILRiverLearningEngine
+from .river_feedback_adapter import RiverFeedbackAdapter
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +67,13 @@ class HSILService:
         # Initialize all sub-services
         logger.info("Initializing HSIL services...")
 
+        # Weather & Environmental (initialize first)
+        self.weather_service = WeatherService()
+        self.weather_sync = WeatherSyncService(
+            weather_service=self.weather_service,
+            refresh_interval_minutes=90
+        )
+
         # Core data processing
         self.event_ingestion = EventIngestionService(db_path=db_path)
         self.feature_extraction = FeatureExtractionService()
@@ -75,11 +83,14 @@ class HSILService:
             db_path=db_path,
             chroma_client=chroma_client
         )
-        self.adaptive_learning = AdaptiveLearningService(db_path=db_path)
+        self.learning = HSILRiverLearningEngine(
+            db_path=db_path,
+            weather_service=self.weather_service
+        )
+        self.river_feedback = RiverFeedbackAdapter(learning_engine=self.learning)
         self.feedback_learning = FeedbackLearningService(db_path=db_path)
 
         # Intelligence
-        self.behavior_model = BehaviorModelService()
         self.policy_engine = PolicyEngineService()
 
         # Output
@@ -87,20 +98,38 @@ class HSILService:
             mqtt_client=mqtt_client
         )
 
-        # Weather & Environmental
-        self.weather_service = WeatherService()
-
         # Conversational interface
         self.conversational_agent = ConversationalAgentService(
             llm_provider=llm_provider,
             memory_service=self.memory,
-            adaptive_learning=self.adaptive_learning,
             feedback_learning=self.feedback_learning,
             policy_engine=self.policy_engine,
-            weather_service=self.weather_service
+            weather_service=self.weather_service,
+            backend_url=backend_url
         )
 
         logger.info("✅ HSIL services initialized successfully")
+
+    async def start(self):
+        """Start background services"""
+        logger.info("Starting HSIL background services...")
+
+        # Start weather sync service
+        await self.weather_sync.start()
+
+        # Initialize conversational agent's device ontology
+        await self.conversational_agent.initialize()
+
+        logger.info("✅ HSIL background services started")
+
+    async def stop(self):
+        """Stop background services"""
+        logger.info("Stopping HSIL background services...")
+
+        # Stop weather sync
+        await self.weather_sync.stop()
+
+        logger.info("✅ HSIL background services stopped")
 
     # ==================== EVENT PROCESSING ====================
 
@@ -143,81 +172,32 @@ class HSILService:
             # 2. Extract features
             features = await self.feature_extraction.extract_features(context)
 
-            # 3. Learn from sensor data
-            await self.adaptive_learning.learn_from_sensor_data(context)
+            # 3. Get cached environmental context (no blocking API call)
+            env = self.weather_service.cached_context
 
-            # 4. Check for anomalies and make predictions
+            # 4. Learn from sensor data (River ML engine)
+            await self.learning.learn_from_sensor_data(context, env)
+
+            # 5. Check for anomalies using River ML
             predictions = []
             actions_taken = []
 
             # Check if anomalous
             if isinstance(value, (int, float)):
-                is_anomalous, z_score = await self.adaptive_learning.is_anomalous(
+                is_anomalous, anomaly_score = await self.learning.is_anomalous(
                     device_id=device_id,
-                    metric_name=event_type,
-                    value=float(value),
-                    stddev_threshold=3.0
+                    metric=event_type,
+                    value=float(value)
                 )
 
                 if is_anomalous:
                     logger.warning(
                         f"Anomaly detected: {device_id}/{event_type} = {value} "
-                        f"(z-score: {z_score:.2f})"
+                        f"(anomaly_score: {anomaly_score:.2f})"
                     )
 
-            # Make predictions based on event type
-            if event_type in ["temperature", "temp"]:
-                # Get current conditions
-                device_context = await self.event_ingestion.get_device_context(device_id)
-                temp = float(value)
-                humidity = 50.0  # Default, get from context if available
-
-                # Predict comfort
-                comfort_prediction = await self.behavior_model.predict_comfort(
-                    temperature=temp,
-                    humidity=humidity,
-                    location=location
-                )
-                predictions.append(comfort_prediction)
-
-                # Evaluate if action needed
-                policy_decision = await self.policy_engine.evaluate_prediction(
-                    prediction=comfort_prediction,
-                    context={"temperature": temp, "location": location}
-                )
-
-                if policy_decision.action:
-                    # Dispatch action
-                    success = await self.action_dispatcher.dispatch(policy_decision.action)
-                    if success:
-                        actions_taken.append({
-                            "action": policy_decision.action.model_dump(mode='json'),
-                            "reasoning": policy_decision.reasoning
-                        })
-
-            elif event_type in ["leak", "water_leak"]:
-                # Predict water safety
-                leak_detected = bool(value)
-                water_prediction = await self.behavior_model.predict_water_safety(
-                    leak_detected=leak_detected,
-                    anomaly_score=context.anomaly_score or 0.0,
-                    location=location
-                )
-                predictions.append(water_prediction)
-
-                # Evaluate if action needed
-                policy_decision = await self.policy_engine.evaluate_prediction(
-                    prediction=water_prediction,
-                    context={"leak_detected": leak_detected, "location": location}
-                )
-
-                if policy_decision.action:
-                    success = await self.action_dispatcher.dispatch(policy_decision.action)
-                    if success:
-                        actions_taken.append({
-                            "action": policy_decision.action.model_dump(mode='json'),
-                            "reasoning": policy_decision.reasoning
-                        })
+            # River ML handles predictions via learn_from_sensor_data
+            # Policy engine can still trigger actions based on thresholds
 
             return {
                 "status": "processed",
@@ -267,12 +247,15 @@ class HSILService:
         if response.action:
             await self.action_dispatcher.dispatch(response.action)
 
-            # Learn from this user action
-            # Extract intent from message
-            await self.adaptive_learning.learn_from_user_action(
+            # Get environmental context
+            env = await self.weather_service.get_environmental_context()
+
+            # Learn from this user action (River ML)
+            await self.river_feedback.learn_from_user_feedback(
                 user_intent=message,
                 location="home",  # TODO: Extract from context
-                action_taken=response.action
+                action_taken=response.action,
+                env=env
             )
 
         return response
@@ -384,28 +367,37 @@ class HSILService:
 
     async def get_stats(self) -> Dict[str, Any]:
         """Get HSIL statistics"""
-        adaptive_stats = await self.adaptive_learning.get_stats()
         feedback_stats = await self.feedback_learning.get_stats()
+        river_stats = await self.learning.get_stats()
 
         return {
-            "hsil_version": "1.0.0",
-            "adaptive_learning": adaptive_stats,
+            "hsil_version": "2.0.0-river",
             "feedback_learning": feedback_stats,
+            "river_ml": river_stats,
             "timestamp": datetime.now().isoformat()
         }
 
     async def get_learned_preferences(self) -> Dict[str, Any]:
         """Get all learned preferences"""
-        comfort_prefs = {}
+        # Get River ML comfort preferences for all known locations
+        # (River learns these automatically from sensor data)
+        river_comfort = {}
 
-        # Get all locations with learned preferences
-        for location, prefs in self.adaptive_learning.comfort_preferences.items():
-            comfort_prefs[location] = prefs
+        # Get locations from baseline models
+        for device_id in self.learning.baseline_models.keys():
+            # Extract location from device context if available
+            # For now, use device_id as location proxy
+            location = device_id.split("_")[0] if "_" in device_id else device_id
+
+            if location not in river_comfort:
+                river_pref = await self.learning.get_comfort_preference(location)
+                if river_pref:
+                    river_comfort[location] = river_pref
 
         user_prefs = await self.feedback_learning.get_all_preferences(min_confidence=0.6)
 
         return {
-            "comfort_preferences": comfort_prefs,
+            "river_comfort_preferences": river_comfort,
             "user_preferences": user_prefs,
             "timestamp": datetime.now().isoformat()
         }

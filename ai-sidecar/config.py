@@ -139,6 +139,8 @@ class Config(BaseModel):
             llm_section = ai_config.get('llm', {})
             if 'provider' in llm_section:
                 llm_config_data['provider'] = llm_section['provider']
+            if 'chat_mode' in llm_section:
+                llm_config_data['chat_mode'] = llm_section['chat_mode']
 
             # Local settings
             local_section = llm_section.get('local', {})

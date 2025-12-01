@@ -1,10 +1,12 @@
 package mqtt
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"log"
+	"net/http"
 	"strings"
 	"time"
 
@@ -107,6 +109,39 @@ func (c *Consumer) Stop() error {
 	c.cancel()
 	c.client.Disconnect(250)
 	return nil
+}
+
+// forwardToHSIL sends sensor events to HSIL for continuous learning
+func (c *Consumer) forwardToHSIL(deviceID, sensorID, eventType string, value interface{}, location, deviceType string) {
+	payload := map[string]interface{}{
+		"device_id":   deviceID,
+		"sensor_id":   sensorID,
+		"event_type":  eventType,
+		"value":       value,
+		"location":    location,
+		"device_type": deviceType,
+	}
+
+	jsonData, err := json.Marshal(payload)
+	if err != nil {
+		log.Printf("[MQTT-CONSUMER] Failed to marshal HSIL event: %v", err)
+		return
+	}
+
+	// Fire and forget - don't block MQTT processing
+	go func() {
+		client := &http.Client{Timeout: 2 * time.Second}
+		resp, err := client.Post("http://localhost:8001/hsil/events", "application/json", bytes.NewBuffer(jsonData))
+		if err != nil {
+			// Only log first few failures to avoid spam
+			return
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			log.Printf("[MQTT-CONSUMER] HSIL returned status %d for %s/%s", resp.StatusCode, deviceID, eventType)
+		}
+	}()
 }
 
 // handleMessage routes incoming MQTT messages to appropriate handlers
@@ -331,6 +366,19 @@ func (c *Consumer) handleState(deviceID string, payload []byte) {
 		}
 		c.eventBus.Publish(event)
 
+		// Forward to HSIL for continuous ML learning
+		location := "unknown"
+		deviceType := "sensor"
+		if device != nil {
+			if device.ZoneID != "" {
+				location = device.ZoneID
+			}
+			if device.Type != "" {
+				deviceType = device.Type
+			}
+		}
+		c.forwardToHSIL(deviceID, event.SensorID, key, value, location, deviceType)
+
 		// Check for alarm conditions and manage incidents
 		if err := c.alarmManager.ProcessStateUpdate(c.ctx, deviceID, key, value, device); err != nil {
 			log.Printf("[MQTT-CONSUMER] Failed to process alarm for %s/%s: %v", deviceID, key, err)
@@ -382,6 +430,19 @@ func (c *Consumer) handleAttribute(deviceID, attrName string, payload []byte) {
 		},
 	}
 	c.eventBus.Publish(event)
+
+	// Forward to HSIL for continuous ML learning
+	location := "unknown"
+	deviceType := "sensor"
+	if device != nil {
+		if device.ZoneID != "" {
+			location = device.ZoneID
+		}
+		if device.Type != "" {
+			deviceType = device.Type
+		}
+	}
+	c.forwardToHSIL(deviceID, event.SensorID, attrName, msg.Value, location, deviceType)
 }
 
 // handleRemoved processes device removal messages

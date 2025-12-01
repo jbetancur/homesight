@@ -102,7 +102,10 @@ class LLMProvider:
         self.config = config
         self.openai_client = None
         self.local_llm = None
-        self.chat_mode = getattr(config, 'chat_mode', 'cloud')  # Config-driven
+        self.chat_mode = getattr(config, 'chat_mode', 'local')  # Config-driven
+
+        # Thread safety: llama.cpp is NOT thread-safe
+        self._llama_lock = asyncio.Lock()
 
         # Initialize circuit breaker for OpenAI API
         self.circuit_breaker = CircuitBreaker(
@@ -371,43 +374,54 @@ class LLMProvider:
         temperature: float,
         max_tokens: int
     ) -> str:
-        """Chat using local Llama model"""
+        """Chat using local Llama model (crash-safe)."""
+
         start_time = time.time()
         status = "error"
-        model_name = "llama-3.2-3b"  # Default model name
+        model_name = "llama-local"
+
+        # Disable fork/thread crashes
+        os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
         try:
-            # Format messages for Llama 3.2 Instruct
-            formatted_prompt = "<|begin_of_text|>"
+            # Do NOT manually insert BOS token
+            formatted_prompt = ""
 
+            # Build safe instruct prompt
             for msg in messages:
                 role = msg["role"]
-                # Sanitize message content to avoid embedding Llama special tokens
-                # If earlier generations or stored messages include markers like
-                # "<|begin_of_text|>" or header tokens, strip them to avoid
-                # duplicate leading tokens that reduce response quality.
                 content = msg["content"]
-                if isinstance(content, str):
-                    for token in ["<|begin_of_text|>", "<|start_header_id|>", "<|end_header_id|>", "<|eot_id|>", "<|end_of_text|>"]:
-                        content = content.replace(token, "")
+
+                # Strip unsafe special tokens
+                for t in [
+                    "<|begin_of_text|>",
+                    "<|start_header_id|>",
+                    "<|end_header_id|>",
+                    "<|eot_id|>",
+                    "<|end_of_text|>"
+                ]:
+                    content = content.replace(t, "")
 
                 if role == "system":
-                    formatted_prompt += f"<|start_header_id|>system<|end_header_id|>\n\n{content}<|eot_id|>"
+                    formatted_prompt += f"<|start_header_id|>system<|end_header_id|>\n{content}<|eot_id|>"
                 elif role == "user":
-                    formatted_prompt += f"<|start_header_id|>user<|end_header_id|>\n\n{content}<|eot_id|>"
+                    formatted_prompt += f"<|start_header_id|>user<|end_header_id|>\n{content}<|eot_id|>"
                 elif role == "assistant":
-                    formatted_prompt += f"<|start_header_id|>assistant<|end_header_id|>\n\n{content}<|eot_id|>"
+                    formatted_prompt += f"<|start_header_id|>assistant<|end_header_id|>\n{content}<|eot_id|>"
 
-            # Add assistant header for response
-            formatted_prompt += "<|start_header_id|>assistant<|end_header_id|>\n\n"
+            # Add assistant header for generation
+            formatted_prompt += "<|start_header_id|>assistant<|end_header_id|>\n"
 
-            # Track input tokens (approximate based on prompt length)
-            input_token_count = len(formatted_prompt) // 4  # Rough estimate: 4 chars per token
-            llm_input_tokens.labels(
-                model=model_name,
-                provider="local"
-            ).inc(input_token_count)
+            # TRUNCATE PROMPT to avoid ggml crashes
+            if len(formatted_prompt) > 8000:
+                logger.warning("Local prompt exceeded 8000 chars, truncating tail to fit context.")
+                formatted_prompt = formatted_prompt[-8000:]
 
+            # Estimate tokens for metrics
+            input_token_count = len(formatted_prompt) // 4
+            llm_input_tokens.labels(model=model_name, provider="local").inc(input_token_count)
+
+            # Run llama-cpp safely
             response = self.local_llm(
                 formatted_prompt,
                 max_tokens=max_tokens,
@@ -418,29 +432,17 @@ class LLMProvider:
 
             response_text = response['choices'][0]['text'].strip()
 
-            # Track output tokens (approximate based on response length)
+            # Output metrics
             output_token_count = len(response_text) // 4
-            llm_output_tokens.labels(
-                model=model_name,
-                provider="local"
-            ).inc(output_token_count)
+            llm_output_tokens.labels(model=model_name, provider="local").inc(output_token_count)
 
             status = "success"
             return response_text
 
         finally:
-            # Track inference metrics
             duration = time.time() - start_time
-            llm_inference_duration.labels(
-                model=model_name,
-                provider="local"
-            ).observe(duration)
-
-            llm_inferences.labels(
-                model=model_name,
-                provider="local",
-                status=status
-            ).inc()
+            llm_inference_duration.labels(model=model_name, provider="local").observe(duration)
+            llm_inferences.labels(model=model_name, provider="local", status=status).inc()
 
     async def chat_async(
         self,

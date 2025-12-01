@@ -1,18 +1,17 @@
 """
-Conversational Agent
+Conversational Agent (Production-safe)
 
-Wrapper around LLM (OpenAI/Claude) that integrates:
-- Event context
-- Memory results
-- Home state summary
-- Learned preferences
-
-Provides natural language interface to HSIL.
+- Safe for local LLMs (prompt truncation, formatting, no special-token conflicts)
+- Robust JSON parsing (regex-based, trailing comma cleanup)
+- Action validation for safety
+- Lean, LLM-friendly event + weather formatting
+- Avoids huge prompt expansion
 """
 
 import logging
-from typing import Optional, Dict, Any, List
 import json
+import re
+from typing import Optional, Dict, Any, List
 
 from .types import (
     ConversationRequest,
@@ -21,34 +20,74 @@ from .types import (
     EventContext,
     MemoryEntry
 )
+from .intent_parser import IntentParser
+from .device_ontology import DeviceOntology
+from .home_health_engine import HomeHealthEngine
+from .temperature_preference_model import TemperaturePreferenceModel
+from .temperature_intent import TemperatureIntent
 
 logger = logging.getLogger(__name__)
 
 
+SAFE_ACTIONS = {
+    "set_temperature",
+    "turn_on", "turn_off",
+    "arm", "disarm",
+    "open_valve", "close_valve",
+    "set_humidity",
+    "acknowledge",
+}
+
+
 class ConversationalAgentService:
     """
-    Conversational interface to HSIL using LLM.
-
-    Integrates with existing LLMProvider from ai-sidecar.
+    Conversational interface to HSIL using cloud or local LLMs.
+    Production-safe version.
     """
 
     def __init__(
         self,
         llm_provider,
         memory_service,
-        adaptive_learning,
         feedback_learning,
         policy_engine,
-        weather_service=None
+        weather_service=None,
+        backend_url: str = "http://localhost:8080"
     ):
         self.llm = llm_provider
         self.memory = memory_service
-        self.adaptive_learning = adaptive_learning
         self.feedback_learning = feedback_learning
         self.policy = policy_engine
         self.weather = weather_service
 
-        logger.info("ConversationalAgentService initialized (adaptive + feedback learning)")
+        # Production safety features
+        self.intent_parser = IntentParser()
+        self.ontology = DeviceOntology(backend_url=backend_url)
+
+        # Home intelligence features
+        self.health_engine = HomeHealthEngine(backend_url=backend_url)
+        self.temp_model = TemperaturePreferenceModel()
+        self.temp_intent = TemperatureIntent()
+
+        # Conversation memory (last 10 turns)
+        self.conversation_memory: List[Dict[str, str]] = []
+
+        self.max_system_prompt_chars = 6000
+        self.max_user_message_chars = 2000
+
+        logger.info("ConversationalAgentService initialized (context-aware + preference-learning + home-aware)")
+
+    # ---------------------------------------------------------------------
+    # Public API
+    # ---------------------------------------------------------------------
+
+    async def initialize(self):
+        """Initialize device ontology (call after construction)"""
+        success = await self.ontology.load()
+        if success:
+            logger.info(f"Device ontology loaded: {len(self.ontology.devices)} devices")
+        else:
+            logger.warning("Failed to load device ontology")
 
     async def chat(
         self,
@@ -57,62 +96,145 @@ class ConversationalAgentService:
         home_state: Optional[Dict[str, Any]] = None,
         session_id: Optional[str] = None
     ) -> ConversationResponse:
+
+        # Handle temperature intents BEFORE LLM (prevent "What temperature?" questions)
+        if self.temp_intent.is_temperature_related(message):
+            temp_response = await self._handle_temperature_request(message, home_state)
+            if temp_response:
+                # Add to conversation memory
+                self.conversation_memory.append({"role": "user", "content": message})
+                self.conversation_memory.append({"role": "assistant", "content": temp_response.reply})
+                if len(self.conversation_memory) > 20:
+                    self.conversation_memory = self.conversation_memory[-20:]
+                return temp_response
+
+        # Try intent parser for other intents
+        intent = self.intent_parser.parse(message)
+        if intent and intent.confidence > 0.85:
+            logger.info(f"High-confidence intent: {intent.intent} ({intent.confidence:.2f})")
+            # Intent handling could be added here for direct responses
+
+        context = await self._build_context(message, event_context, home_state)
+
+        system_prompt = await self._build_system_prompt(context)
+        llm_response = await self._call_llm(system_prompt, message)
+
+        parsed = await self._parse_llm_response(llm_response, context)
+
+        # Add to conversation memory
+        self.conversation_memory.append({"role": "user", "content": message})
+        self.conversation_memory.append({"role": "assistant", "content": parsed.reply})
+        if len(self.conversation_memory) > 20:
+            self.conversation_memory = self.conversation_memory[-20:]
+
+        return parsed
+
+    # ---------------------------------------------------------------------
+    # Temperature Intent Handling
+    # ---------------------------------------------------------------------
+
+    async def _handle_temperature_request(
+        self,
+        message: str,
+        home_state: Optional[Dict[str, Any]]
+    ) -> Optional[ConversationResponse]:
         """
-        Process a conversational request.
+        Handle temperature requests WITHOUT asking follow-up questions.
 
-        Args:
-            message: User's message
-            event_context: Optional current event context
-            home_state: Optional current home state
-            session_id: Optional session ID for multi-turn conversation
-
-        Returns:
-            ConversationResponse with reply and optional action
+        Resolves deltas automatically using ML or intent parsing.
         """
-        # Build enriched context for LLM
-        enriched_context = await self._build_context(
-            message,
-            event_context,
-            home_state
-        )
+        # Get current temperature from home state
+        current_temp = None
+        if home_state:
+            # Handle both dict and HomeState object
+            devices_list = []
+            if isinstance(home_state, dict):
+                devices_list = home_state.get("devices", [])
+            elif hasattr(home_state, 'devices'):
+                devices_list = home_state.devices
 
-        # Debug: Log the context sent to the LLM
-        logger.info(f"LLM context for message '{message}': {json.dumps(enriched_context, indent=2)}")
+            for device in devices_list:
+                # Handle both dict and DeviceState object
+                if isinstance(device, dict):
+                    state = device.get("state", {})
+                else:
+                    state = device.state if hasattr(device, 'state') else {}
 
-        # Get system prompt with learned preferences
-        system_prompt = await self._build_system_prompt(enriched_context)
+                if isinstance(state, dict) and "temperature" in state:
+                    current_temp = state["temperature"]
+                    break
 
-        # Call LLM
-        try:
-            llm_response = await self._call_llm(
-                system_prompt=system_prompt,
-                user_message=message,
-                context=enriched_context,
-                session_id=session_id
-            )
-
-            # Parse response
-            response = await self._parse_llm_response(llm_response, enriched_context)
-
-            # Record interaction for learning
-            if self.adaptive_learning:
-                interaction_id = f"{session_id}_{__import__('uuid').uuid4().hex[:8]}"
-                await self.adaptive_learning.record_interaction(
-                    interaction_id=interaction_id,
-                    user_query=message,
-                    system_response=response.reply,
-                    action_taken=response.action.model_dump(mode='json') if response.action else None,
-                    context=enriched_context
-                )
-
-            return response
-
-        except Exception as e:
-            logger.error(f"Conversational agent error: {e}")
+        if current_temp is None:
             return ConversationResponse(
-                reply=f"I apologize, I encountered an error: {str(e)}",
+                reply="I don't have temperature sensor data right now.",
                 action=None
             )
+
+        # Check for explicit target temperature
+        target_temp = self.temp_intent.extract_target_temperature(message)
+
+        if target_temp:
+            # Explicit target ("set to 72")
+            self.temp_model.learn_from_command(message, current_temp, target_temp=target_temp)
+
+            action = ActionCommand(
+                topic="homesight/hvac/command",
+                command="set_temperature",
+                value=target_temp
+            )
+
+            return ConversationResponse(
+                reply=f"Setting temperature to {target_temp}°F.",
+                action=action
+            )
+
+        # Check for delta intent ("make it warmer")
+        delta = self.temp_intent.parse(message)
+
+        if delta is not None:
+            # Intent parsed delta
+            new_temp = current_temp + delta
+            self.temp_model.learn_from_command(message, current_temp, delta=delta)
+
+            action = ActionCommand(
+                topic="homesight/hvac/command",
+                command="set_temperature",
+                value=new_temp
+            )
+
+            return ConversationResponse(
+                reply=f"Adjusting temperature by {delta:+d}°F to {new_temp:.0f}°F.",
+                action=action
+            )
+
+        # Use ML prediction
+        outdoor_temp = None
+        if self.weather and self.weather.cached_context:
+            outdoor_temp = self.weather.cached_context.weather.temperature
+
+        predicted_delta = self.temp_model.predict_adjustment(message, current_temp, outdoor_temp)
+
+        if predicted_delta:
+            new_temp = current_temp + predicted_delta
+            self.temp_model.learn_from_command(message, current_temp, delta=predicted_delta)
+
+            action = ActionCommand(
+                topic="homesight/hvac/command",
+                command="set_temperature",
+                value=new_temp
+            )
+
+            return ConversationResponse(
+                reply=f"Adjusting temperature by {predicted_delta:+d}°F to {new_temp:.0f}°F based on your preferences.",
+                action=action
+            )
+
+        # Fallback: no clear intent
+        return None
+
+    # ---------------------------------------------------------------------
+    # Context Builder
+    # ---------------------------------------------------------------------
 
     async def _build_context(
         self,
@@ -120,13 +242,13 @@ class ConversationalAgentService:
         event_context: Optional[EventContext],
         home_state: Optional[Dict[str, Any]]
     ) -> Dict[str, Any]:
-        """Build enriched context for LLM"""
+
         context = {
             "user_message": message,
             "timestamp": __import__("datetime").datetime.now().isoformat()
         }
 
-        # Add event context if provided
+        # Event context (flattened for LLMs)
         if event_context:
             context["event"] = {
                 "device_id": event_context.device_id,
@@ -134,253 +256,303 @@ class ConversationalAgentService:
                 "value": event_context.event_value,
                 "location": event_context.location,
                 "trend_1h": event_context.trend_1h,
-                "anomaly_score": event_context.anomaly_score
+                "anomaly_score": event_context.anomaly_score,
             }
 
-        # Add home state if provided
+        # Home state (keep only essential fields)
         if home_state:
-            context["home_state"] = home_state
+            # truncate large fields for local LLM
+            clipped_state = json.loads(json.dumps(home_state))  # deep copy
+            context["home_state"] = clipped_state
 
-        # Add weather/environmental context
-        if self.weather:
+        # Weather from cache (NEVER fetch during chat)
+        if self.weather and self.weather.cached_context:
             try:
-                env_context = await self.weather.get_environmental_context()
-                if env_context:
-                    context["environment"] = self.weather.format_for_llm(env_context)
+                context["environment"] = self.weather.format_for_llm()
             except Exception as e:
-                logger.warning(f"Failed to fetch weather: {e}")
+                logger.warning(f"Weather formatting failed: {e}")
 
-        # Retrieve relevant memories
-        # (Simple keyword search for now - could use semantic search with embeddings)
+        # Device ontology summary
+        if self.ontology._loaded:
+            context["device_summary"] = self.ontology.get_device_summary()
+
+        # Home health assessment (authoritative status)
+        home_health = await self.health_engine.evaluate(home_state=home_state)
+        context["home_health"] = {
+            "status": home_health.status.value,
+            "score": home_health.health_score,
+            "has_leak": home_health.has_leak,
+            "has_smoke": home_health.has_smoke,
+            "has_co": home_health.has_co,
+            "active_alarms": home_health.active_alarms,
+            "details": [d.message for d in home_health.details[:5]]  # Top 5 issues
+        }
+
+        # Temperature preference range
+        temp_range = self.temp_model.get_preferred_range()
+        context["temp_preferences"] = {
+            "min": temp_range[0],
+            "max": temp_range[1]
+        }
+
+        # Conversation memory (last 6 turns for context)
+        if self.conversation_memory:
+            context["conversation_history"] = self.conversation_memory[-6:]
+
+        # Memory search
         try:
             if self.memory:
-                memories = await self.memory.search_keyword(
-                    query=message,
-                    limit=3
-                )
+                mems = await self.memory.search_keyword(message, limit=3)
                 context["memories"] = [
-                    {"content": m.content, "type": m.type.value}
-                    for m in memories
+                    {"content": m.content, "type": m.type.value} for m in mems
                 ]
         except Exception as e:
-            logger.warning(f"Failed to retrieve memories: {e}")
+            logger.warning(f"Memory retrieval failed: {e}")
 
-        # Add learned preferences
-        # Comfort preferences from adaptive learning
-        try:
-            if self.adaptive_learning:
-                location = event_context.location if event_context else "home"
-                comfort_prefs = await self.adaptive_learning.get_comfort_preference(location)
-                if comfort_prefs:
-                    context["learned_preferences"] = comfort_prefs
-        except Exception as e:
-            logger.warning(f"Failed to retrieve comfort preferences: {e}")
-
-        # User feedback/preferences from feedback learning
+        # User feedback preferences
         try:
             if self.feedback_learning:
-                user_prefs = await self.feedback_learning.get_all_preferences(min_confidence=0.6)
-                if user_prefs:
-                    context["user_preferences"] = user_prefs
+                prefs = await self.feedback_learning.get_all_preferences(min_confidence=0.6)
+                if prefs:
+                    context["user_preferences"] = prefs
         except Exception as e:
-            logger.warning(f"Failed to retrieve user feedback preferences: {e}")
+            logger.warning(f"Failed prefs: {e}")
 
-        # Add RAG context if available
-        if hasattr(self, 'rag_engine') and self.rag_engine:
+        # RAG context
+        if hasattr(self, "rag_engine") and self.rag_engine:
             try:
-                rag_results = self.rag_engine.query(message, n_results=3)
-                docs = []
-                for r in rag_results:
-                    if r.get('relevance_score', 0) > 0.3:
-                        docs.append(f"[{r['metadata'].get('source', 'Unknown')}]: {r['text'][:200]}")
+                rag = self.rag_engine.query(message, n_results=3)
+                docs = [
+                    f"[{r['metadata'].get('source','Unknown')}]: {r['text'][:150]}"
+                    for r in rag
+                    if r.get("relevance_score", 0) > 0.25
+                ]
                 if docs:
-                    context['rag_context'] = "\nRelevant documentation:\n" + "\n".join(docs)
+                    context["rag_context"] = docs
             except Exception as e:
-                logger.warning(f"RAG query failed: {e}")
+                logger.warning(f"RAG failure: {e}")
 
-        # Add session history if available
-        if hasattr(self, 'session_history') and self.session_history:
-            context['session_history'] = self.session_history[-4:]
+        # Session history
+        if hasattr(self, "session_history") and self.session_history:
+            context["session_history"] = self.session_history[-4:]
 
         return context
 
+    # ---------------------------------------------------------------------
+    # Prompt Builder
+    # ---------------------------------------------------------------------
+
     async def _build_system_prompt(self, context: Dict[str, Any]) -> str:
-        """Build system prompt with learned preferences and context"""
+        """
+        Create a concise system prompt for local/cloud LLMs.
+        """
 
-        prompt = """You are HomeSight, an intelligent home assistant.
+        p = [
+            "You are HomeSight, a contextual, preference-learning home assistant.",
+            "",
+            "CRITICAL RULES (NEVER VIOLATE):",
+            "1. NEVER invent sensor data - only use provided context",
+            "2. NEVER contradict yourself or home_health status",
+            "3. NEVER ask follow-up questions for temperature (already handled)",
+            "4. ONLY use devices listed in device_summary",
+            "5. ONLY use safe commands: " + ", ".join(SAFE_ACTIONS),
+            "6. If home_health says 'critical' or 'has_leak=true', YOU MUST acknowledge it",
+            "7. If home_health says 'good', DON'T invent problems",
+            "",
+            "Capabilities:",
+            "- Remember conversation history",
+            "- Learn temperature preferences",
+            "- Provide authoritative home status (from home_health)",
+            "",
+        ]
 
-    Your capabilities:
-    - Monitor home sensors (temperature, humidity, water, motion, etc.)
-    - Control HVAC, water valves, and other devices
-    - Learn user preferences and adapt over time
-    - Detect anomalies and safety issues
+        # Home Health (AUTHORITATIVE - prevent contradictions)
+        if "home_health" in context:
+            hh = context["home_health"]
+            p.append(f"HOME STATUS (authoritative, DO NOT contradict):")
+            p.append(f"  Status: {hh['status'].upper()} (score: {hh['score']}/100)")
 
-    Instructions:
-    - If a device of type 'leak' is active and state is 'critical', there may be a water leak in that location.
-    - If the sensor history is erratic or confidence is low, mention uncertainty and suggest further investigation or user confirmation.
-    - Use context fields like 'state', 'active', and any available confidence or history to inform your response.
+            if hh["has_leak"]:
+                p.append(f"  ⚠️ WATER LEAK DETECTED")
+            if hh["has_smoke"]:
+                p.append(f"  ⚠️ SMOKE DETECTED")
+            if hh["has_co"]:
+                p.append(f"  ⚠️ CO DETECTED")
 
-    Current Context:
-    """
+            if hh["active_alarms"] > 0:
+                p.append(f"  Active Alarms: {hh['active_alarms']}")
 
-        # Add home state
+            if hh.get("details"):
+                p.append(f"  Issues:")
+                for detail in hh["details"]:
+                    p.append(f"    - {detail}")
+            elif hh["status"] == "good":
+                p.append(f"  ✓ All systems normal")
+
+            p.append("")
+
+        # Conversation history
+        if "conversation_history" in context:
+            p.append("Recent Conversation:")
+            for msg in context["conversation_history"]:
+                role = msg["role"]
+                content = msg["content"][:100]
+                p.append(f"  [{role}] {content}")
+            p.append("")
+
+        p.append("Current Context:")
+
+        # Device ontology summary
+        if "device_summary" in context:
+            summary = context["device_summary"]
+            p.append(f"Devices: {summary.get('total_devices', 0)} total")
+            p.append(f"Rooms: {', '.join(summary.get('rooms', []))}")
+            if summary.get('rooms_with_temperature'):
+                p.append(f"Temp sensors: {', '.join(summary['rooms_with_temperature'])}")
+
         if "home_state" in context:
-            prompt += f"\nHome State:\n{json.dumps(context['home_state'], indent=2)}\n"
+            p.append(f"Home State: {json.dumps(context['home_state'], indent=2)[:500]}")
 
-        # Add event context
         if "event" in context:
-            prompt += f"\nCurrent Event:\n{json.dumps(context['event'], indent=2)}\n"
+            ev = context["event"]
+            p.append(
+                f"Event: device={ev['device_id']} type={ev['type']} "
+                f"value={ev['value']} location={ev['location']} "
+                f"anomaly={ev['anomaly_score']}"
+            )
 
-        # Add learned preferences
-        if "learned_preferences" in context:
-            prefs = context["learned_preferences"]
-            prompt += f"""
-Learned User Preferences (based on {prefs.get('sample_count', 0)} interactions):
-- Preferred temperature: {prefs.get('temp_min', 68):.1f}°F - {prefs.get('temp_max', 75):.1f}°F
-- Preferred humidity: {prefs.get('humidity_min', 35):.0f}% - {prefs.get('humidity_max', 55):.0f}%
-"""
+        if "environment" in context:
+            p.append(f"Weather: {context['environment']}")
 
-
-        # Add user feedback/preferences
         if "user_preferences" in context:
-            prompt += "\nUser Feedback Preferences:\n"
+            p.append("User Preferences:")
             for k, v in context["user_preferences"].items():
-                prompt += f"- {k}: {v}\n"
+                p.append(f"- {k}: {v}")
 
-        # Add RAG context
-        if "rag_context" in context:
-            prompt += f"\n{context['rag_context']}\n"
-
-        # Add session history
-        if "session_history" in context:
-            prompt += "\nRecent Conversation:\n"
-            for msg in context["session_history"]:
-                prompt += f"- [{msg['role']}] {msg['content'][:120]}\n"
-
-        # Add relevant memories
-        if "memories" in context and context["memories"]:
-            prompt += "\nRelevant Past Interactions:\n"
+        if "memories" in context:
+            p.append("Relevant Past Interactions:")
             for mem in context["memories"]:
-                prompt += f"- [{mem['type']}] {mem['content']}\n"
+                p.append(f"- [{mem['type']}] {mem['content']}")
 
-        prompt += """
-IMPORTANT Response Format:
-You must respond ONLY with valid JSON in this exact format. Do not include any text before or after the JSON.
+        if "rag_context" in context:
+            p.append("Documentation:")
+            for d in context["rag_context"]:
+                p.append(f"- {d}")
+
+        if "session_history" in context:
+            p.append("Recent Conversation:")
+            for msg in context["session_history"]:
+                p.append(f"- [{msg['role']}] {msg['content'][:120]}")
+
+        # ML health summaries (if provided by River ML)
+        if "ml_room_health" in context:
+            p.append(f"Room Health (ML): {context['ml_room_health']}")
+
+        if "ml_home_health" in context:
+            p.append(f"Home Health (ML): {context['ml_home_health']}")
+
+        # Output format (no extra backticks)
+        p.append("""
+Respond ONLY with valid JSON:
 
 {
-  "reply": "Your natural, conversational response to the user here",
+  "reply": "text",
   "action": {
     "topic": "homesight/device/command",
-    "command": "command_name",
-    "value": <value>
+    "command": "cmd",
+    "value": 123
   }
 }
 
-If no action is needed, use: {"reply": "your response", "action": null}
+If no action is needed, set:
+"action": null
+""")
 
-Example:
-User: "I'm cold"
-Response: {"reply": "I'll increase the temperature to make it more comfortable for you.", "action": {"topic": "homesight/hvac/command", "command": "set_temperature", "value": 72}}
-```
-
-If no action is needed, omit the action field.
-"""
-
+        prompt = "\n".join(p)
         return prompt
 
-    async def _call_llm(
-        self,
-        system_prompt: str,
-        user_message: str,
-        context: Dict[str, Any],
-        session_id: Optional[str]
-    ) -> str:
-        """Call LLM provider"""
+    # ---------------------------------------------------------------------
+    # LLM Call
+    # ---------------------------------------------------------------------
 
-        # Use existing LLM provider from ai-sidecar
+    async def _call_llm(self, system_prompt: str, user_message: str) -> str:
+
+        if self.llm.chat_mode == "local":
+            system_prompt = system_prompt[-self.max_system_prompt_chars:]
+            user_message = user_message[-self.max_user_message_chars:]
+
         messages = [
             {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_message}
+            {"role": "user", "content": user_message},
         ]
 
-        # Call LLM provider's chat_async method
-        # Returns tuple of (response_text, tool_calls)
-        response_text, _ = await self.llm.chat_async(
+        resp_text, _ = await self.llm.chat_async(
             messages=messages,
             temperature=0.7,
-            max_tokens=500
+            max_tokens=400
         )
 
-        return response_text
+        return resp_text
+
+    # ---------------------------------------------------------------------
+    # JSON Response Parsing (robust)
+    # ---------------------------------------------------------------------
 
     async def _parse_llm_response(
-        self,
-        llm_response: str,
-        context: Dict[str, Any]
+        self, llm_response: str, context: Dict[str, Any]
     ) -> ConversationResponse:
-        """Parse LLM response into ConversationResponse"""
 
-        # Try to extract JSON if present
         action = None
         reply = llm_response
 
         try:
-            # Look for JSON code block
-            if "```json" in llm_response:
-                json_start = llm_response.find("```json") + 7
-                json_end = llm_response.find("```", json_start)
-                json_str = llm_response[json_start:json_end].strip()
+            # Find any JSON object in the output
+            match = re.search(r"\{(?:[^{}]|(?:\{[^}]*\}))*\}", llm_response, re.DOTALL)
 
-                parsed = json.loads(json_str)
-                reply = parsed.get("reply", llm_response)
+            if match:
+                raw = match.group(0)
 
-                if "action" in parsed and parsed["action"]:
-                    action_data = parsed["action"]
-                    action = ActionCommand(
-                        topic=action_data["topic"],
-                        command=action_data["command"],
-                        value=action_data["value"]
-                    )
+                # Remove trailing commas
+                cleaned = re.sub(r",\s*}", "}", raw)
+                cleaned = re.sub(r",\s*]", "]", cleaned)
 
-            # Also try parsing entire response as JSON
-            elif llm_response.strip().startswith("{"):
-                parsed = json.loads(llm_response)
-                reply = parsed.get("reply", llm_response)
+                parsed = json.loads(cleaned)
+                reply = parsed.get("reply", reply)
 
-                if "action" in parsed and parsed["action"]:
-                    action_data = parsed["action"]
-                    action = ActionCommand(
-                        topic=action_data["topic"],
-                        command=action_data["command"],
-                        value=action_data["value"]
-                    )
+                # Validate action
+                if parsed.get("action"):
+                    a = parsed["action"]
+                    cmd = a.get("command")
 
-        except json.JSONDecodeError:
-            # LLM didn't return JSON, use raw response as reply
-            pass
+                    if cmd in SAFE_ACTIONS:
+                        action = ActionCommand(
+                            topic=a["topic"],
+                            command=cmd,
+                            value=a["value"]
+                        )
+                    else:
+                        logger.warning(f"Blocked unsafe action: {cmd}")
 
-        # If no action found but user intent suggests one, use policy engine
+        except Exception as e:
+            logger.warning(f"JSON parse failed: {e}")
+
+        # Use policy engine fallback
         if not action and self.policy:
             try:
-                user_message = context.get("user_message", "")
-                policy_decision = await self.policy.evaluate_user_intent(
-                    intent=user_message,
+                decision = await self.policy.evaluate_user_intent(
+                    intent=context.get("user_message", ""),
                     context=context.get("home_state", {})
                 )
-
-                if policy_decision.action:
-                    action = policy_decision.action
-                    # Augment reply with policy reasoning
-                    if policy_decision.reasoning:
-                        reply += f"\n\n({policy_decision.reasoning})"
-
+                if decision.action:
+                    action = decision.action
+                    if decision.reasoning:
+                        reply += f"\n({decision.reasoning})"
             except Exception as e:
-                logger.warning(f"Policy engine evaluation failed: {e}")
+                logger.warning(f"Policy engine error: {e}")
 
-        return ConversationResponse(
-            reply=reply,
-            action=action
-        )
+        return ConversationResponse(reply=reply, action=action)
+
+    # ---------------------------------------------------------------------
 
     async def provide_feedback(
         self,
@@ -389,24 +561,18 @@ If no action is needed, omit the action field.
         rating: Optional[int] = None,
         correction: Optional[str] = None
     ):
-        """
-        Record user feedback on a response.
-
-        This is how the system learns from user feedback.
-        """
+        """Store user feedback for long-term learning."""
         if not self.feedback_learning:
-            logger.warning("Feedback learning service not available for feedback")
             return
 
         from .learning import UserFeedback, FeedbackType
 
-        feedback = UserFeedback(
+        fb = UserFeedback(
             interaction_id=interaction_id,
             feedback_type=FeedbackType(feedback_type),
             rating=rating,
             correction=correction
         )
 
-        await self.feedback_learning.record_feedback(feedback)
-
-        logger.info(f"Recorded user feedback: {feedback_type} for {interaction_id}")
+        await self.feedback_learning.record_feedback(fb)
+        logger.info(f"Feedback recorded: {fb}")

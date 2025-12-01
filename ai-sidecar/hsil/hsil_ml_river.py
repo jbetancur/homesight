@@ -1,0 +1,696 @@
+"""
+HSIL River ML Engine
+
+Production-grade online learning using River (https://riverml.xyz/).
+No LLMs or neural nets. Fully local, incremental models.
+
+Models:
+- ComfortModel: Predict preferred indoor conditions based on time, weather, and patterns
+- AnomalyModel: Detect outliers per-device using HalfSpaceTrees
+- RoutineModel: Cluster events by time-of-day, location, weather conditions
+- OccupancyModel: Predict if area is occupied from sensor mix + weather
+- BaselineModel: Running mean/variance baselines per sensor metric
+"""
+
+import logging
+import sqlite3
+import json
+import pickle
+import math
+from typing import Optional, Dict, Any, Tuple
+from datetime import datetime
+from collections import defaultdict
+
+from river import linear_model, anomaly, cluster, stats, optim
+
+from .types import EventContext, BehaviorPrediction, BehaviorPredictionType
+from .weather_service import EnvironmentalContext
+
+logger = logging.getLogger(__name__)
+
+
+class HSILRiverLearningEngine:
+    """
+    River-based online learning engine for HSIL.
+    All models update incrementally on each event.
+    """
+
+    def __init__(
+        self,
+        db_path: str = "/var/lib/homesight/hsil_memory.db",
+        weather_service=None
+    ):
+        self.db_path = db_path
+        self.weather_service = weather_service
+
+        # Weather context cache
+        self._env_context: Optional[EnvironmentalContext] = None
+
+        # Initialize models
+        self._init_models()
+
+        # Initialize database
+        self._init_db()
+
+        # Load persisted models
+        self._load_models()
+
+        logger.info("HSILRiverLearningEngine initialized with River models")
+
+    def _init_models(self):
+        """Initialize all River models"""
+
+        # Comfort model: Linear regression for preferred conditions
+        # Features: temp, humidity, hour_sin, hour_cos, dow_sin, dow_cos,
+        #           external_temp, feels_like, wind_speed, aqi, sun_elevation
+        self.comfort_model = linear_model.LinearRegression(
+            optimizer=optim.SGD(lr=0.01)
+        )
+
+        # Anomaly models: One HalfSpaceTrees per device
+        # Per-device anomaly detection
+        self.anomaly_models: Dict[str, anomaly.HalfSpaceTrees] = defaultdict(
+            lambda: anomaly.HalfSpaceTrees(n_trees=10, height=8, window_size=250)
+        )
+
+        # Routine model: KMeans clustering for activity patterns
+        # Features: hour_sin, hour_cos, dow_sin, dow_cos, sensor_type_encoded,
+        #           location_encoded, sunrise_offset, sunset_offset, weather_category
+        self.routine_model = cluster.KMeans(
+            n_clusters=6,
+            halflife=0.5,
+            sigma=3,
+            seed=42
+        )
+
+        # Occupancy model: Logistic regression
+        # Features: motion_count, door_events, temp_variance, humidity_variance,
+        #           time_features, weather_features
+        self.occupancy_model = linear_model.LogisticRegression(
+            optimizer=optim.SGD(lr=0.05)
+        )
+
+        # Baseline models: Running mean/variance per device+metric
+        self.baseline_models: Dict[str, Dict[str, Tuple[stats.Mean, stats.Var]]] = defaultdict(dict)
+
+        # Model metadata
+        self.model_update_counts = defaultdict(int)
+
+    def _init_db(self):
+        """Initialize database for model persistence"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+
+        # Model persistence table
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS river_models (
+                model_name TEXT PRIMARY KEY,
+                model_data BLOB NOT NULL,
+                last_updated TIMESTAMP NOT NULL,
+                update_count INTEGER DEFAULT 0
+            )
+        """)
+
+        # Prediction history
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS river_predictions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                prediction_type TEXT NOT NULL,
+                device_id TEXT,
+                location TEXT,
+                prediction_value REAL,
+                confidence REAL,
+                features TEXT,
+                timestamp TIMESTAMP NOT NULL
+            )
+        """)
+
+        # Model stats
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS river_stats (
+                stat_key TEXT PRIMARY KEY,
+                stat_value REAL,
+                last_updated TIMESTAMP NOT NULL
+            )
+        """)
+
+        conn.commit()
+        conn.close()
+
+    def _load_models(self):
+        """Load persisted models from database"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+
+        cursor.execute("SELECT model_name, model_data, update_count FROM river_models")
+
+        for row in cursor.fetchall():
+            model_name, model_data, update_count = row
+            try:
+                model_obj = pickle.loads(model_data)
+
+                if model_name == "comfort_model":
+                    self.comfort_model = model_obj
+                elif model_name == "routine_model":
+                    self.routine_model = model_obj
+                elif model_name == "occupancy_model":
+                    self.occupancy_model = model_obj
+                elif model_name.startswith("anomaly_"):
+                    device_id = model_name.replace("anomaly_", "")
+                    self.anomaly_models[device_id] = model_obj
+                elif model_name.startswith("baseline_"):
+                    # Parse baseline_{device_id}_{metric}
+                    parts = model_name.replace("baseline_", "").rsplit("_", 1)
+                    if len(parts) == 2:
+                        device_id, metric = parts
+                        self.baseline_models[device_id][metric] = model_obj
+
+                self.model_update_counts[model_name] = update_count
+                logger.debug(f"Loaded model: {model_name} (updates: {update_count})")
+
+            except Exception as e:
+                logger.error(f"Error loading model {model_name}: {e}")
+
+        conn.close()
+        logger.info(f"Loaded {len(self.model_update_counts)} persisted models")
+
+    def _save_model(self, model_name: str, model_obj: Any):
+        """Persist a model to database"""
+        try:
+            model_data = pickle.dumps(model_obj)
+
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+
+            update_count = self.model_update_counts[model_name] + 1
+
+            cursor.execute("""
+                INSERT OR REPLACE INTO river_models
+                (model_name, model_data, last_updated, update_count)
+                VALUES (?, ?, ?, ?)
+            """, (model_name, model_data, datetime.now().isoformat(), update_count))
+
+            conn.commit()
+            conn.close()
+
+            self.model_update_counts[model_name] = update_count
+
+        except Exception as e:
+            logger.error(f"Error saving model {model_name}: {e}")
+
+    def set_weather_context(self, env: EnvironmentalContext):
+        """Cache environmental context for predictions"""
+        self._env_context = env
+
+    # ==================== FEATURE ENGINEERING ====================
+
+    def _encode_time_cyclic(self, timestamp: datetime) -> Dict[str, float]:
+        """Encode time as sin/cos for cyclical patterns"""
+        hour = timestamp.hour
+        dow = timestamp.weekday()
+
+        hour_radians = 2 * math.pi * hour / 24
+        dow_radians = 2 * math.pi * dow / 7
+
+        return {
+            "hour_sin": math.sin(hour_radians),
+            "hour_cos": math.cos(hour_radians),
+            "dow_sin": math.sin(dow_radians),
+            "dow_cos": math.cos(dow_radians),
+        }
+
+    def _compute_sun_elevation(self, timestamp: datetime, env: Optional[EnvironmentalContext]) -> float:
+        """
+        Compute approximate sun elevation (0-1 normalized).
+        0 = below horizon, 1 = solar noon peak
+        """
+        if not env:
+            return 0.5
+
+        sunrise = env.sun.sunrise
+        sunset = env.sun.sunset
+
+        if timestamp < sunrise or timestamp > sunset:
+            return 0.0
+
+        # Normalize position in day
+        day_progress = (timestamp - sunrise).total_seconds() / (sunset - sunrise).total_seconds()
+
+        # Simple parabolic elevation (peaks at noon)
+        elevation = 4 * day_progress * (1 - day_progress)
+
+        return elevation
+
+    def _compute_sun_offsets(self, timestamp: datetime, env: Optional[EnvironmentalContext]) -> Tuple[float, float]:
+        """
+        Compute minutes since sunrise and until sunset.
+        Normalized to [-1, 1] range.
+        """
+        if not env:
+            return 0.0, 0.0
+
+        sunrise_offset = (timestamp - env.sun.sunrise).total_seconds() / 3600  # hours
+        sunset_offset = (env.sun.sunset - timestamp).total_seconds() / 3600
+
+        # Normalize to [-1, 1]
+        sunrise_offset_norm = max(-1.0, min(1.0, sunrise_offset / 12))
+        sunset_offset_norm = max(-1.0, min(1.0, sunset_offset / 12))
+
+        return sunrise_offset_norm, sunset_offset_norm
+
+    def _categorize_weather(self, env: Optional[EnvironmentalContext]) -> Dict[str, float]:
+        """
+        Categorize weather into binary features.
+        Returns one-hot-like encoding.
+        """
+        if not env:
+            return {
+                "weather_hot": 0.0,
+                "weather_cold": 0.0,
+                "weather_humid": 0.0,
+                "weather_stormy": 0.0
+            }
+
+        temp = env.weather.temperature
+        humidity = env.weather.humidity
+        description = env.weather.description.lower()
+
+        return {
+            "weather_hot": 1.0 if temp > 80 else 0.0,
+            "weather_cold": 1.0 if temp < 50 else 0.0,
+            "weather_humid": 1.0 if humidity > 70 else 0.0,
+            "weather_stormy": 1.0 if any(word in description for word in ["rain", "storm", "thunder"]) else 0.0
+        }
+
+    def _extract_comfort_features(
+        self,
+        context: EventContext,
+        env: Optional[EnvironmentalContext]
+    ) -> Dict[str, float]:
+        """Extract features for comfort model"""
+        features = {}
+
+        # Indoor conditions
+        features["indoor_temp"] = float(context.event_value) if context.event_type in ["temperature", "temp"] else 70.0
+        features["indoor_humidity"] = 50.0  # Default, can be enriched from context
+
+        # Time features
+        time_features = self._encode_time_cyclic(context.timestamp)
+        features.update(time_features)
+
+        # Weather features
+        if env:
+            features["external_temp"] = env.weather.temperature
+            features["feels_like"] = env.weather.feels_like
+            features["external_humidity"] = env.weather.humidity
+            features["wind_speed"] = env.weather.wind_speed
+            features["aqi"] = env.air_quality.aqi if env.air_quality else 1.0
+            features["sun_elevation"] = self._compute_sun_elevation(context.timestamp, env)
+        else:
+            features["external_temp"] = 70.0
+            features["feels_like"] = 70.0
+            features["external_humidity"] = 50.0
+            features["wind_speed"] = 0.0
+            features["aqi"] = 1.0
+            features["sun_elevation"] = 0.5
+
+        return features
+
+    def _extract_routine_features(
+        self,
+        context: EventContext,
+        env: Optional[EnvironmentalContext]
+    ) -> Dict[str, float]:
+        """Extract features for routine clustering"""
+        features = {}
+
+        # Time features
+        time_features = self._encode_time_cyclic(context.timestamp)
+        features.update(time_features)
+
+        # Sun features
+        sunrise_offset, sunset_offset = self._compute_sun_offsets(context.timestamp, env)
+        features["sunrise_offset"] = sunrise_offset
+        features["sunset_offset"] = sunset_offset
+
+        # Sensor type encoding (simple hash)
+        features["sensor_type"] = hash(context.event_type) % 100 / 100.0
+
+        # Location encoding
+        features["location"] = hash(context.location) % 100 / 100.0
+
+        # Weather category
+        weather_cat = self._categorize_weather(env)
+        features.update(weather_cat)
+
+        # Activity indicators
+        features["is_motion"] = 1.0 if "motion" in context.event_type.lower() else 0.0
+        features["is_door"] = 1.0 if "door" in context.event_type.lower() else 0.0
+
+        return features
+
+    def _extract_anomaly_features(
+        self,
+        context: EventContext,
+        env: Optional[EnvironmentalContext]
+    ) -> Dict[str, float]:
+        """Extract features for anomaly detection"""
+        features = {}
+
+        # Primary value
+        if isinstance(context.event_value, (int, float)):
+            features["value"] = float(context.event_value)
+        else:
+            features["value"] = 0.0
+
+        # Trends
+        features["trend_1h"] = context.trend_1h or 0.0
+        features["trend_24h"] = context.trend_24h or 0.0
+
+        # Weather context (to reduce false positives during weather events)
+        if env:
+            features["external_temp"] = env.weather.temperature
+            features["external_humidity"] = env.weather.humidity
+            weather_cat = self._categorize_weather(env)
+            features.update(weather_cat)
+        else:
+            features["external_temp"] = 70.0
+            features["external_humidity"] = 50.0
+
+        return features
+
+    # ==================== LEARNING ====================
+
+    async def learn_from_sensor_data(
+        self,
+        context: EventContext,
+        env: Optional[EnvironmentalContext] = None
+    ):
+        """
+        Update all models incrementally from sensor data.
+
+        Args:
+            context: EventContext from sensor event
+            env: Optional environmental context from weather service
+        """
+        # Cache weather context for this learning cycle
+        if env:
+            self._env_context = env
+            logger.debug(f"Updated weather context: {env.weather.temperature:.1f}°F, {env.weather.description}")
+        else:
+            env = self._env_context
+            if not env:
+                logger.debug("No weather context available - using defaults")
+
+        # Update baseline model
+        if isinstance(context.event_value, (int, float)):
+            await self._update_baseline(context.device_id, context.event_type, float(context.event_value))
+
+        # Update anomaly model
+        await self._update_anomaly_model(context, env)
+
+        # Update routine model
+        await self._update_routine_model(context, env)
+
+        # Update comfort model (for temp/humidity events)
+        if context.event_type in ["temperature", "temp", "humidity"]:
+            await self._update_comfort_model(context, env)
+
+        # Persist models periodically (every 50 updates)
+        if sum(self.model_update_counts.values()) % 50 == 0:
+            await self._persist_all_models()
+
+    async def _update_baseline(self, device_id: str, metric: str, value: float):
+        """Update running baseline statistics"""
+        if device_id not in self.baseline_models:
+            self.baseline_models[device_id] = {}
+
+        if metric not in self.baseline_models[device_id]:
+            self.baseline_models[device_id][metric] = (stats.Mean(), stats.Var())
+
+        mean_model, var_model = self.baseline_models[device_id][metric]
+        mean_model.update(value)
+        var_model.update(value)
+
+        # Persist every 100 updates
+        model_name = f"baseline_{device_id}_{metric}"
+        self.model_update_counts[model_name] += 1
+
+        if self.model_update_counts[model_name] % 100 == 0:
+            self._save_model(model_name, (mean_model, var_model))
+
+    async def _update_anomaly_model(self, context: EventContext, env: Optional[EnvironmentalContext]):
+        """Update per-device anomaly detection model"""
+        features = self._extract_anomaly_features(context, env)
+
+        # Update model
+        model = self.anomaly_models[context.device_id]
+        model.learn_one(features)
+
+        # Persist periodically
+        model_name = f"anomaly_{context.device_id}"
+        self.model_update_counts[model_name] += 1
+
+        if self.model_update_counts[model_name] % 100 == 0:
+            self._save_model(model_name, model)
+
+    async def _update_routine_model(self, context: EventContext, env: Optional[EnvironmentalContext]):
+        """Update routine clustering model"""
+        features = self._extract_routine_features(context, env)
+
+        # Learn from this routine event
+        self.routine_model.learn_one(features)
+
+        # Persist periodically
+        model_name = "routine_model"
+        self.model_update_counts[model_name] += 1
+
+        if self.model_update_counts[model_name] % 100 == 0:
+            self._save_model(model_name, self.routine_model)
+
+    async def _update_comfort_model(self, context: EventContext, env: Optional[EnvironmentalContext]):
+        """
+        Update comfort model.
+
+        For now, we use a simple target: assume current conditions are acceptable.
+        In production, this would be refined with user feedback.
+        """
+        features = self._extract_comfort_features(context, env)
+
+        # Target: current value (assumes it's acceptable)
+        # This gets refined by user feedback via separate update path
+        if context.event_type in ["temperature", "temp"]:
+            target = float(context.event_value)
+        else:
+            target = 50.0  # humidity default
+
+        # Learn
+        self.comfort_model.learn_one(features, target)
+
+        # Persist periodically
+        model_name = "comfort_model"
+        self.model_update_counts[model_name] += 1
+
+        if self.model_update_counts[model_name] % 100 == 0:
+            self._save_model(model_name, self.comfort_model)
+
+    async def _persist_all_models(self):
+        """Persist all models to database"""
+        self._save_model("comfort_model", self.comfort_model)
+        self._save_model("routine_model", self.routine_model)
+        self._save_model("occupancy_model", self.occupancy_model)
+
+        for device_id, model in self.anomaly_models.items():
+            self._save_model(f"anomaly_{device_id}", model)
+
+        for device_id, metrics in self.baseline_models.items():
+            for metric, model_tuple in metrics.items():
+                self._save_model(f"baseline_{device_id}_{metric}", model_tuple)
+
+        logger.debug("Persisted all River models")
+
+    # ==================== ANOMALY DETECTION ====================
+
+    async def is_anomalous(
+        self,
+        device_id: str,
+        metric: str,
+        value: float
+    ) -> Tuple[bool, float]:
+        """
+        Check if value is anomalous.
+
+        Returns:
+            (is_anomalous, score)
+            score: 0-1, higher = more anomalous
+        """
+        # Check baseline model first
+        baseline_result = await self._is_baseline_anomalous(device_id, metric, value)
+
+        # Check HalfSpaceTrees anomaly model
+        if device_id in self.anomaly_models:
+            model = self.anomaly_models[device_id]
+
+            # Create minimal feature dict
+            features = {
+                "value": value,
+                "trend_1h": 0.0,
+                "trend_24h": 0.0,
+                "external_temp": 70.0,
+                "external_humidity": 50.0
+            }
+
+            # Get anomaly score
+            anomaly_score = model.score_one(features)
+
+            # Normalize score (HalfSpaceTrees returns 0-1, higher = more anomalous)
+            is_anomalous = anomaly_score > 0.7
+
+            # Combine with baseline check
+            if baseline_result[0] and is_anomalous:
+                return True, max(baseline_result[1], anomaly_score)
+            elif baseline_result[0] or is_anomalous:
+                return True, (baseline_result[1] + anomaly_score) / 2
+            else:
+                return False, anomaly_score
+
+        return baseline_result
+
+    async def _is_baseline_anomalous(
+        self,
+        device_id: str,
+        metric: str,
+        value: float,
+        stddev_threshold: float = 3.0
+    ) -> Tuple[bool, float]:
+        """Check if value exceeds baseline by stddev_threshold"""
+        if device_id not in self.baseline_models:
+            return False, 0.0
+
+        if metric not in self.baseline_models[device_id]:
+            return False, 0.0
+
+        mean_model, var_model = self.baseline_models[device_id][metric]
+
+        mean_val = mean_model.get()
+        var_val = var_model.get()
+
+        if mean_val is None or var_val is None or var_val <= 0:
+            return False, 0.0
+
+        stddev = math.sqrt(var_val)
+
+        if stddev == 0:
+            return False, 0.0
+
+        z_score = abs(value - mean_val) / stddev
+
+        # Normalize to 0-1 score
+        score = min(1.0, z_score / (stddev_threshold * 2))
+
+        return z_score > stddev_threshold, score
+
+    # ==================== PREDICTIONS ====================
+
+    async def predict_preferred_value(
+        self,
+        location: str,
+        metric: str,
+        current_value: float,
+        env: Optional[EnvironmentalContext] = None
+    ) -> Tuple[Optional[float], float]:
+        """
+        Predict preferred value for a metric.
+
+        Returns:
+            (predicted_value, confidence)
+        """
+        if env:
+            self._env_context = env
+        else:
+            env = self._env_context
+
+        # Build feature vector
+        # Create a pseudo-context
+        from .types import EventContext
+
+        pseudo_context = EventContext(
+            device_id="virtual",
+            sensor_id="virtual",
+            event_type=metric,
+            event_value=current_value,
+            location=location,
+            device_type="virtual",
+            timestamp=datetime.now()
+        )
+
+        features = self._extract_comfort_features(pseudo_context, env)
+
+        # Predict using comfort model
+        try:
+            predicted = self.comfort_model.predict_one(features)
+
+            # Confidence based on model update count
+            model_name = "comfort_model"
+            update_count = self.model_update_counts.get(model_name, 0)
+
+            # Confidence scales with training samples (capped at 0.9)
+            confidence = min(0.9, update_count / 1000.0)
+
+            return predicted, confidence
+
+        except Exception as e:
+            logger.error(f"Error predicting preferred value: {e}")
+            return None, 0.0
+
+    async def get_comfort_preference(self, location: str) -> Optional[Dict[str, Any]]:
+        """
+        Get learned comfort preferences for a location.
+
+        Returns dict with predicted ranges.
+        """
+        env = self._env_context
+
+        # Predict for multiple conditions
+        temp_pred, temp_conf = await self.predict_preferred_value(location, "temperature", 70.0, env)
+        humid_pred, humid_conf = await self.predict_preferred_value(location, "humidity", 50.0, env)
+
+        if temp_pred is None:
+            return None
+
+        return {
+            "preferred_temp": temp_pred,
+            "preferred_temp_confidence": temp_conf,
+            "preferred_humidity": humid_pred or 50.0,
+            "preferred_humidity_confidence": humid_conf,
+            "location": location
+        }
+
+    async def get_routine_features(self, location: str) -> Dict[str, Any]:
+        """
+        Get routine clustering features for a location.
+
+        Returns cluster assignments and patterns.
+        """
+        # This is a simplified implementation
+        # In production, would analyze cluster centroids and patterns
+
+        return {
+            "location": location,
+            "routine_clusters_active": len(self.routine_model.centers) if hasattr(self.routine_model, "centers") else 0,
+            "model_updates": self.model_update_counts.get("routine_model", 0)
+        }
+
+    # ==================== STATISTICS ====================
+
+    async def get_stats(self) -> Dict[str, Any]:
+        """Get ML engine statistics"""
+        return {
+            "comfort_model_updates": self.model_update_counts.get("comfort_model", 0),
+            "routine_model_updates": self.model_update_counts.get("routine_model", 0),
+            "occupancy_model_updates": self.model_update_counts.get("occupancy_model", 0),
+            "anomaly_models_active": len(self.anomaly_models),
+            "baseline_models_active": sum(len(metrics) for metrics in self.baseline_models.values()),
+            "total_model_updates": sum(self.model_update_counts.values()),
+            "devices_tracked": len(self.baseline_models)
+        }
