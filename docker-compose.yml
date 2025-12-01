@@ -1,4 +1,55 @@
 services:
+  # MQTT Message Bus - Central communication hub
+  mosquitto:
+    image: eclipse-mosquitto:2
+    container_name: homesight-mosquitto
+    ports:
+      - "1883:1883"
+      - "9001:9001"
+    volumes:
+      - ./docker/mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+      - mosquitto_data:/mosquitto/data
+      - mosquitto_log:/mosquitto/log
+    restart: unless-stopped
+    networks:
+      - homesight
+
+  # HomeSight Core API
+  api:
+    build:
+      context: .
+      dockerfile: docker/api/Dockerfile
+    image: homesight-api
+    container_name: homesight-api
+    ports:
+      - "8080:8080"
+    environment:
+      - HOMESIGHT_CONFIG=/app/config.yaml
+      # Docker networking - use service names instead of localhost
+      - MQTT_BROKER_URL=tcp://mosquitto:1883
+      - AI_SERVICE_URL=http://ai-sidecar:8001
+      - PROMETHEUS_URL=http://prometheus:9090
+      # ZwaveJS WebSocket API is on port 3000 inside the container
+      - ZWAVE_WEBSOCKET_URL=ws://zwavejs:3000
+    volumes:
+      - ./config.yaml:/app/config.yaml:ro
+      - /var/lib/homesight:/var/lib/homesight:rw
+      - /etc/localtime:/etc/localtime:ro
+    depends_on:
+      - mosquitto
+      - zwavejs
+    restart: unless-stopped
+    networks:
+      - homesight
+    # Allow container to reach host for zwavejs if needed
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
   prometheus:
     image: prom/prometheus:latest
     container_name: homesight-prometheus
@@ -34,7 +85,8 @@ services:
     environment:
       - TOKENIZERS_PARALLELISM=false
       - LLAMA_VULKAN=1
-      - BACKEND_URL=http://host.docker.internal:8080
+      - BACKEND_URL=http://api:8080
+      - MQTT_BROKER_URL=tcp://mosquitto:1883
       - BRAVE_SEARCH_API_KEY=${BRAVE_SEARCH_API_KEY}
       - BING_SEARCH_API_KEY=${BING_SEARCH_API_KEY}
       - OPENAI_API_KEY=${OPENAI_API_KEY}
@@ -60,6 +112,9 @@ services:
     restart: unless-stopped
     networks:
       - homesight
+    depends_on:
+      - api
+      - mosquitto
     # Allow container to reach host via host.docker.internal
     extra_hosts:
       - "host.docker.internal:host-gateway"
@@ -156,6 +211,8 @@ volumes:
   prometheus_data:
   grafana_data:
   zwavejs_data:
+  mosquitto_data:
+  mosquitto_log:
 
 
 networks:

@@ -1,8 +1,7 @@
 .git
 node_modules
 **/node_modules
-web-ui/dist
-web-ui/build
+web-ui/node_modules
 **/__pycache__
 *.pyc
 *.pyo

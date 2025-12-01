@@ -360,7 +360,7 @@ export default function HSILRoomView() {
 
   const handleDeviceZoneUpdate = async (deviceId: string, zoneId: string) => {
     try {
-      await fetch(`${API_BASE}/api/devices/${deviceId}/zone`, {
+      await fetch(`${API_BASE}/api/devices/${deviceId}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ zone_id: zoneId }),

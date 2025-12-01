@@ -37,6 +37,14 @@ type Config struct {
 	} `yaml:"zwave"`
 }
 
+// getEnvOrDefault returns the environment variable value or a default
+func getEnvOrDefault(key, defaultValue string) string {
+	if value := os.Getenv(key); value != "" {
+		return value
+	}
+	return defaultValue
+}
+
 // Load reads configuration from a YAML file
 func Load(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
@@ -49,25 +57,37 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("failed to parse config file: %w", err)
 	}
 
-	// Set defaults
+	// Apply defaults and environment variable overrides
+	// Environment variables take precedence over config file values
 	if cfg.Database.Path == "" {
 		cfg.Database.Path = "/var/lib/homesight/homesight.db"
 	}
+	cfg.Database.Path = getEnvOrDefault("HOMESIGHT_DB_PATH", cfg.Database.Path)
+
 	if cfg.MQTT.BrokerURL == "" {
 		cfg.MQTT.BrokerURL = "tcp://localhost:1883"
 	}
+	cfg.MQTT.BrokerURL = getEnvOrDefault("MQTT_BROKER_URL", cfg.MQTT.BrokerURL)
+
 	if cfg.Prometheus.URL == "" {
 		cfg.Prometheus.URL = "http://localhost:9090"
 	}
+	cfg.Prometheus.URL = getEnvOrDefault("PROMETHEUS_URL", cfg.Prometheus.URL)
+
 	if cfg.AI.ServiceURL == "" {
 		cfg.AI.ServiceURL = "http://localhost:8001"
 	}
+	cfg.AI.ServiceURL = getEnvOrDefault("AI_SERVICE_URL", cfg.AI.ServiceURL)
+
 	if cfg.API.Addr == "" {
-		cfg.API.Addr = ":8000"
+		cfg.API.Addr = ":8080"
 	}
+	cfg.API.Addr = getEnvOrDefault("API_ADDR", cfg.API.Addr)
+
 	if cfg.ZWave.WebSocketURL == "" {
 		cfg.ZWave.WebSocketURL = "ws://localhost:3001"
 	}
+	cfg.ZWave.WebSocketURL = getEnvOrDefault("ZWAVE_WEBSOCKET_URL", cfg.ZWave.WebSocketURL)
 
 	return &cfg, nil
 }
@@ -75,12 +95,12 @@ func Load(path string) (*Config, error) {
 // Default returns a configuration with default values
 func Default() *Config {
 	cfg := &Config{}
-	cfg.Database.Path = "/var/lib/homesight/homesight.db"
-	cfg.MQTT.BrokerURL = "tcp://localhost:1883"
-	cfg.Prometheus.URL = "http://localhost:9090"
-	cfg.AI.ServiceURL = "http://localhost:8001"
-	cfg.API.Addr = ":8000"
+	cfg.Database.Path = getEnvOrDefault("HOMESIGHT_DB_PATH", "/var/lib/homesight/homesight.db")
+	cfg.MQTT.BrokerURL = getEnvOrDefault("MQTT_BROKER_URL", "tcp://localhost:1883")
+	cfg.Prometheus.URL = getEnvOrDefault("PROMETHEUS_URL", "http://localhost:9090")
+	cfg.AI.ServiceURL = getEnvOrDefault("AI_SERVICE_URL", "http://localhost:8001")
+	cfg.API.Addr = getEnvOrDefault("API_ADDR", ":8080")
 	cfg.ZWave.Enabled = false
-	cfg.ZWave.WebSocketURL = "ws://localhost:3001"
+	cfg.ZWave.WebSocketURL = getEnvOrDefault("ZWAVE_WEBSOCKET_URL", "ws://localhost:3001")
 	return cfg
 }

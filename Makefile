@@ -10,6 +10,7 @@ BINARY_PATH=bin/$(BINARY_NAME)
 
 all: build
 
+# Local Go build (for development without Docker)
 build:
 	$(GOBUILD) -o $(BINARY_PATH) ./cmd/homesightd
 
@@ -45,20 +46,59 @@ docker-fix-permissions:
 	@echo "Fixing Docker permissions..."
 	@./scripts/fix-docker-permissions.sh
 
-# Docker commands
-docker-build:
-	@echo "Building AI sidecar Docker image..."
-	@docker compose build ai-sidecar || (echo "" && echo "❌ Error: Permission denied." && echo "Run 'make docker-fix-permissions' to fix Docker permissions." && exit 1)
+# Build web UI
+web-build:
+	@echo "Building Web UI..."
+	@cd web-ui && npm run build
 
-docker-rebuild:
+# Docker commands - API
+docker-build-api: web-build
+	@echo "Building API Docker image..."
+	@docker compose build api
+
+docker-rebuild-api: web-build
+	@echo "Rebuilding API Docker image (no cache)..."
+	@docker compose build --no-cache api
+
+# Docker commands - AI Sidecar
+docker-build-ai:
+	@echo "Building AI sidecar Docker image..."
+	@docker compose build ai-sidecar
+
+docker-rebuild-ai:
 	@echo "Rebuilding AI sidecar with no cache..."
 	@docker compose build --no-cache ai-sidecar
 
+# Docker commands - All services
+docker-build: web-build
+	@echo "Building all Docker images..."
+	@docker compose build api ai-sidecar
+
+docker-rebuild: web-build
+	@echo "Rebuilding all Docker images (no cache)..."
+	@docker compose build --no-cache api ai-sidecar
+
 docker-restart:
+	@echo "Restarting all containers..."
+	@docker compose restart
+
+docker-restart-api:
+	@echo "Restarting API container..."
+	@docker compose restart api
+
+docker-restart-ai:
 	@echo "Restarting AI sidecar container..."
 	@docker compose restart ai-sidecar
 
 docker-logs:
+	@echo "Showing all logs..."
+	@docker compose logs -f
+
+docker-logs-api:
+	@echo "Showing API logs..."
+	@docker compose logs -f api
+
+docker-logs-ai:
 	@echo "Showing AI sidecar logs..."
 	@docker compose logs -f ai-sidecar
 
@@ -70,22 +110,35 @@ docker-up:
 	@echo "Starting all containers..."
 	@docker compose up -d
 
+docker-ps:
+	@docker compose ps
+
 # Full rebuild commands
-rebuild-all: clean build docker-rebuild
+rebuild-all: web-build docker-rebuild
 	@echo "✅ Full rebuild complete!"
 	@echo ""
-	@echo "Next steps:"
-	@echo "  1. Run 'make docker-up' to start containers"
-	@echo "  2. Run './bin/homesightd' to start Go API"
-	@echo "  3. Check logs with 'make docker-logs'"
+	@echo "Run './scripts/homesight.sh start' to start all services"
 
-rebuild-go: clean build
-	@echo "✅ Go binaries rebuilt!"
-	@echo "Run './bin/homesightd' to start the API"
+rebuild-api: docker-rebuild-api
+	@echo "✅ API rebuilt!"
+	@echo "Run 'docker compose restart api' or './scripts/homesight.sh restart'"
 
-rebuild-ai: docker-rebuild docker-up
-	@echo "✅ AI sidecar rebuilt and restarted!"
-	@echo "Check logs with 'make docker-logs'"
+rebuild-ai: docker-rebuild-ai
+	@echo "✅ AI sidecar rebuilt!"
+	@echo "Run 'docker compose restart ai-sidecar'"
 
-rebuild-quick: build docker-restart
-	@echo "✅ Quick rebuild complete (Go + Docker restart)"
+rebuild-quick: web-build docker-build docker-restart
+	@echo "✅ Quick rebuild complete"
+
+# Development shortcuts
+start:
+	@./scripts/homesight.sh start
+
+stop:
+	@./scripts/homesight.sh stop
+
+restart:
+	@./scripts/homesight.sh restart
+
+status:
+	@./scripts/homesight.sh status

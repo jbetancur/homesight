@@ -1,5 +1,5 @@
 database:
-  path: ./data/homesight.db
+  path: /var/lib/homesight/homesight.db
 
 mqtt:
   # MQTT broker URL for internal message bus
