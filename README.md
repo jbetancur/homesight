@@ -5,10 +5,8 @@
 ## What It Does
 
 - 🚰 **Leak Detection** - Water sensors trigger instant alerts
-- 🥶 **Freeze Prevention** - Temperature monitoring with risk warnings
 - 🔋 **Battery Monitoring** - Track device battery levels, get low-battery alerts
 - 📡 **Device Health** - Detect offline devices and connectivity issues
-- 💧 **Sump Pump Tracking** - Monitor pump cycles and detect failures
 - 🤖 **AI-Powered Chat** - Ask questions about your home in natural language
 - 📚 **Smart Documentation** - Auto-fetches device manuals for troubleshooting
 
@@ -33,6 +31,7 @@
 ```
 
 **Services:**
+
 | Service | Port | Description |
 |---------|------|-------------|
 | API | `:8080` | HomeSight Core REST API + Web UI |
@@ -45,7 +44,199 @@
 
 ## Architecture
 
-HomeSight uses a **containerized microservices architecture** with all services running in Docker containers and communicating via MQTT message bus.
+HomeSight is built as a **modular, event-driven system** with clear separation between device communication, core logic, and intelligence layers.
+
+### System Overview
+
+```mermaid
+graph TB
+    subgraph Physical["🏠 Physical Layer"]
+        ZDEVICES["Z-Wave Devices<br/>(sensors, switches, locks)"]
+        ZSTICK["Z-Wave USB Controller"]
+    end
+
+    subgraph Gateway["📡 Gateway Layer"]
+        ZWAVEJS["ZwaveJS Server"]
+        MQTT["Mosquitto MQTT Broker"]
+    end
+
+    subgraph Core["⚙️ HomeSight Core (Go)"]
+        BRIDGE["Z-Wave Bridge"]
+        CONSUMER["MQTT Consumer"]
+        PUBLISHER["MQTT Publisher"]
+        API["REST API + SSE"]
+        DB[(SQLite)]
+        RULES["Rules Engine"]
+        ALARM["Alarm Manager"]
+    end
+
+    subgraph Intelligence["🧠 AI Sidecar (Python)"]
+        HSIL["HSIL Service"]
+        CHAT["Chat Service"]
+        LLM["LLM Provider"]
+        RAG["RAG Engine"]
+        MQTTSUB["MQTT Subscriber"]
+    end
+
+    subgraph Interface["🖥️ Interface"]
+        REACT["React Dashboard"]
+    end
+
+    %% Physical connections
+    ZDEVICES <-->|"Z-Wave RF"| ZSTICK
+    ZSTICK -->|"USB"| ZWAVEJS
+
+    %% Z-Wave Bridge connects to ZwaveJS via WebSocket
+    ZWAVEJS <-->|"WebSocket"| BRIDGE
+
+    %% Bridge publishes Z-Wave events to MQTT broker
+    BRIDGE -->|"publish"| MQTT
+
+    %% MQTT Consumer subscribes to broker
+    MQTT -->|"subscribe"| CONSUMER
+    CONSUMER -->|"update"| DB
+    CONSUMER -->|"events"| RULES
+    RULES -->|"triggers"| ALARM
+    ALARM -->|"create"| DB
+
+    %% Publisher sends commands to broker
+    API --> PUBLISHER
+    PUBLISHER -->|"publish"| MQTT
+    MQTT -->|"commands"| BRIDGE
+
+    %% AI Sidecar subscribes to MQTT broker
+    MQTT -->|"subscribe"| MQTTSUB
+    MQTTSUB -->|"events"| HSIL
+    CONSUMER -->|"HTTP"| HSIL
+    API <-->|"HTTP proxy"| CHAT
+    CHAT --> LLM
+    CHAT --> RAG
+    HSIL --> LLM
+
+    %% UI connections
+    REACT <-->|"REST"| API
+    API -->|"SSE"| REACT
+
+    classDef physical fill:#ffecb3,stroke:#ff8f00,color:#000
+    classDef gateway fill:#b3e5fc,stroke:#0288d1,color:#000
+    classDef core fill:#c8e6c9,stroke:#388e3c,color:#000
+    classDef ai fill:#e1bee7,stroke:#7b1fa2,color:#000
+    classDef ui fill:#f5f5f5,stroke:#616161,color:#000
+
+    class ZDEVICES,ZSTICK physical
+    class ZWAVEJS,MQTT gateway
+    class BRIDGE,CONSUMER,PUBLISHER,API,DB,RULES,ALARM core
+    class HSIL,CHAT,LLM,RAG,MQTTSUB ai
+    class REACT ui
+```
+
+### Data Flow Details
+
+#### 1. Device State Updates (Z-Wave → Dashboard)
+
+```mermaid
+sequenceDiagram
+    participant ZD as Z-Wave Device
+    participant ZJS as ZwaveJS
+    participant Bridge as Z-Wave Bridge
+    participant MQTT as Mosquitto
+    participant Consumer as MQTT Consumer
+    participant DB as SQLite
+    participant Rules as Rules Engine
+    participant SSE as SSE EventBus
+    participant UI as React Dashboard
+
+    ZD->>ZJS: State change (e.g., leak detected)
+    ZJS->>Bridge: WebSocket event
+    Bridge->>MQTT: Publish homesight/zwave/{id}/state
+    MQTT->>Consumer: Deliver message
+    Consumer->>DB: Update device state
+    Consumer->>Rules: Process event
+    Rules->>DB: Create incident (if triggered)
+    Consumer->>SSE: Emit device_updated
+    SSE->>UI: Push via SSE
+    UI->>UI: Update display
+```
+
+#### 2. AI Chat (Dashboard → LLM → Response)
+
+```mermaid
+sequenceDiagram
+    participant UI as React Dashboard
+    participant API as Go API
+    participant Chat as Chat Service
+    participant LLM as LLM Provider
+    participant RAG as ChromaDB
+    participant Tools as Tool Executor
+    participant Backend as Go API
+
+    UI->>API: POST /api/hsil/chat
+    API->>Chat: HTTP Proxy
+    Chat->>RAG: Query relevant docs
+    RAG-->>Chat: Document context
+    Chat->>LLM: Generate with tools
+    LLM-->>Chat: Tool call (e.g., get_devices)
+    Chat->>Backend: Execute tool via HTTP
+    Backend-->>Chat: Tool result
+    Chat->>LLM: Continue with result
+    LLM-->>Chat: Final response
+    Chat-->>API: JSON response
+    API-->>UI: Display to user
+```
+
+#### 3. Device Commands (Dashboard → Z-Wave Device)
+
+```mermaid
+sequenceDiagram
+    participant UI as React Dashboard
+    participant API as Go API
+    participant Pub as MQTT Publisher
+    participant MQTT as Mosquitto
+    participant Bridge as Z-Wave Bridge
+    participant ZJS as ZwaveJS
+    participant ZD as Z-Wave Device
+
+    UI->>API: POST /api/devices/{id}/command
+    API->>Pub: Publish command
+    Pub->>MQTT: homesight/cmd/zwave-{id}
+    MQTT->>Bridge: Deliver command
+    Bridge->>ZJS: WebSocket setValue
+    ZJS->>ZD: Z-Wave command
+    ZD-->>ZJS: Ack
+```
+
+### Component Descriptions
+
+| Component | Language | Responsibility |
+|-----------|----------|----------------|
+| **ZwaveJS** | Node.js | Z-Wave protocol translation, device interview, mesh management |
+| **Mosquitto** | C | MQTT message broker - central pub/sub bus for all services |
+| **Z-Wave Bridge** | Go | Connects to ZwaveJS WebSocket, publishes events to MQTT, handles commands |
+| **MQTT Consumer** | Go | Subscribes to `homesight/#`, updates DB, triggers rules engine |
+| **MQTT Publisher** | Go | Publishes device commands to MQTT topics |
+| **REST API** | Go | HTTP endpoints, SSE streaming, proxies AI requests |
+| **Rules Engine** | Go | Evaluates alarm conditions from events |
+| **Alarm Manager** | Go | Incident lifecycle (create, auto-resolve) |
+| **SQLite** | - | Device state, incidents, zones, knowledge base |
+| **HSIL Service** | Python | Home intelligence layer - learning, predictions, anomaly detection |
+| **Chat Service** | Python | Conversational AI with function/tool calling |
+| **LLM Provider** | Python | Abstraction over Llama (local) or OpenAI API |
+| **RAG Engine** | Python | ChromaDB-based document retrieval for device manuals |
+| **React Dashboard** | TypeScript | Real-time web UI with SSE updates |
+
+### Key Design Principles
+
+1. **External MQTT Broker** - Go and Python services are *clients* that connect to Mosquitto (they don't run MQTT themselves)
+2. **Bridge Pattern** - Z-Wave Bridge translates ZwaveJS WebSocket events to MQTT messages
+3. **Event-Driven** - All state changes flow through MQTT, any service can subscribe
+4. **HTTP Proxy** - Go API is the single entry point; it proxies `/api/hsil/*` to the AI sidecar
+5. **Local-First** - No cloud dependencies; runs entirely on your hardware
+
+---
+
+## Deployment
+
+HomeSight runs as **Docker containers** orchestrated by Docker Compose. All services communicate via the internal `homesight` bridge network.
 
 ### Docker Services
 
@@ -181,20 +372,26 @@ flowchart LR
 ## Docker Compose Services
 
 ### mosquitto - MQTT Message Bus
+
 Eclipse Mosquitto broker for all inter-service communication.
+
 - **Image:** `eclipse-mosquitto:2`
 - **Ports:** `1883` (MQTT), `9001` (WebSocket)
 - **Config:** `docker/mosquitto/mosquitto.conf`
 
 ### api - HomeSight Core
+
 Go-based REST API with embedded React dashboard.
+
 - **Image:** `homesight-api` (built from `docker/api/Dockerfile`)
 - **Port:** `8080`
 - **Features:** Device management, incidents, rules engine, SSE events
 - **Mounts:** `config.yaml`, `/var/lib/homesight` (database)
 
 ### ai-sidecar - Intelligence Layer
+
 Python-based AI service with local LLM support.
+
 - **Image:** `homesight-ai-sidecar` (built from `docker/ai-sidecar/Dockerfile`)
 - **Port:** `8001`
 - **Features:** HIL pipeline, conversational agent, RAG, anomaly detection
@@ -202,13 +399,17 @@ Python-based AI service with local LLM support.
 - **Mounts:** LLM models, ChromaDB, manuals
 
 ### zwavejs - Z-Wave Integration
+
 Z-Wave JS UI for Z-Wave device management.
+
 - **Image:** `zwavejs/zwave-js-ui:latest`
 - **Ports:** `3001` (WebSocket API), `8091` (Admin UI)
 - **Device:** USB Z-Wave stick mounted at `/dev/zwave`
 
 ### prometheus & grafana - Monitoring
+
 Metrics collection and visualization.
+
 - **Prometheus:** `9090` - Scrapes API and AI sidecar metrics
 - **Grafana:** `3000` - Dashboards (admin/admin)
 
@@ -353,12 +554,14 @@ homesight/cmd/zwave-{nodeId}        → Commands
 ```
 
 **Supported Integrations:**
+
 - **Z-Wave** - Via ZwaveJS WebSocket → MQTT bridge
 - **Custom MQTT** - Any device publishing to `homesight/` topics
 
 ## Rules Engine
 
 Auto-creates incidents for:
+
 - **Leak Detection** - Water sensor triggered
 - **Freeze Risk** - Temperature < 35°F
 - **Low Battery** - Battery < 20%
