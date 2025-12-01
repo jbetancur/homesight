@@ -15,7 +15,7 @@ import './App.css';
 
 const navItems = [
   { label: 'Devices', icon: Activity, path: '/' },
-  { label: 'HSIL', icon: Brain, path: '/hsil' },
+  { label: 'Home Intelligence', icon: Brain, path: '/hsil' },
   { label: 'Incidents', icon: AlertCircle, path: '/incidents' },
   { label: 'Integrations', icon: Layers, path: '/integrations' },
   { label: 'Status', icon: Server, path: '/status' },

@@ -29,10 +29,12 @@ echo "  1) Llama 3.2 3B (Q4_K_M, ~2GB) - GPU OPTIMAL (Recommended)"
 echo "  2) Phi-2 (2.7B Fast Instruct, ~1.8GB) - GPU FASTEST"
 echo "  3) Llama 3.1 1B (Q4_K_M, ~800MB) - Tiny / Edge"
 echo "  4) Llama 3.1 8B (Q4_K_M, ~4.9GB) - CPU ONLY (Too large for 780M GPU)"
-echo "  5) DeepSeek R1 Distill Llama 8B (Q4_K_M, ~4.9GB) - CPU ONLY"
-echo "  6) Custom model (enter repo ID manually)"
+echo "  5) DeepSeek R1 Distill Qwen 7B (Q4_K_M, ~4.7GB) - BEST REASONING"
+echo "  6) DeepSeek R1 Distill Llama 8B (Q4_K_M, ~4.9GB) - CPU ONLY"
+echo "  7) Qwen2.5 7B Instruct (Q4_K_M, ~4.7GB) - GREAT ALL-ROUNDER"
+echo "  8) Custom model (enter repo ID manually)"
 echo ""
-read -p "Enter choice [1-6]: " choice
+read -p "Enter choice [1-8]: " choice
 
 case $choice in
     1)
@@ -65,14 +67,30 @@ case $choice in
         ;;
 
     5)
+        echo -e "${GREEN}🧠 DeepSeek R1 Distill Qwen 7B - Excellent reasoning & conversational${NC}"
+        REPO_ID="bartowski/DeepSeek-R1-Distill-Qwen-7B-GGUF"
+        FILENAME="DeepSeek-R1-Distill-Qwen-7B-Q4_K_M.gguf"
+        OUTPUT_NAME="deepseek-r1-distill-qwen-7b.gguf"
+        REQUIRES_TOKEN=false
+        ;;
+
+    6)
         echo -e "${YELLOW}⚠️ WARNING: 8B DeepSeek models do NOT fit on the 780M GPU (CPU fallback only)${NC}"
         REPO_ID="bartowski/DeepSeek-R1-Distill-Llama-8B-GGUF"
         FILENAME="DeepSeek-R1-Distill-Llama-8B-Q4_K_M.gguf"
         OUTPUT_NAME="deepseek-r1-distill-llama-8b.gguf"
-        REQUIRES_TOKEN=true
+        REQUIRES_TOKEN=false
         ;;
 
-    6)
+    7)
+        echo -e "${GREEN}🌟 Qwen2.5 7B - Great all-around instruct model${NC}"
+        REPO_ID="bartowski/Qwen2.5-7B-Instruct-GGUF"
+        FILENAME="Qwen2.5-7B-Instruct-Q4_K_M.gguf"
+        OUTPUT_NAME="qwen2.5-7b-instruct.gguf"
+        REQUIRES_TOKEN=false
+        ;;
+
+    8)
         read -p "Enter HuggingFace repo ID (e.g. author/model-name): " REPO_ID
         read -p "Enter filename: " FILENAME
         read -p "Enter output name: " OUTPUT_NAME

@@ -15,6 +15,11 @@ import {
   rem,
   Modal,
   Select,
+  Switch,
+  Divider,
+  NumberInput,
+  MultiSelect,
+  ActionIcon,
 } from '@mantine/core';
 import {
   Thermometer,
@@ -29,6 +34,7 @@ import {
   Wind,
   Sunrise,
   Sunset,
+  Settings,
 } from 'lucide-react';
 import { API_BASE } from '../apiConfig';
 import { useEventSubscription } from '../useEventSubscription';
@@ -50,7 +56,50 @@ interface Device {
 interface Room {
   id: string;
   name: string;
+  type: string;
   devices: Device[];
+  attributes?: ZoneAttributes;
+}
+
+interface ZoneAttributes {
+  floor_type?: string;
+  square_feet?: number;
+  has_windows?: boolean;
+  has_fireplace?: boolean;
+  has_hvac_return?: boolean;
+  has_hvac_vent?: boolean;
+  has_radiant_heat?: boolean;
+  has_ceiling_fan?: boolean;
+  has_plumbing?: boolean;
+  has_water_heater?: boolean;
+  has_washer?: boolean;
+  has_sump_pump?: boolean;
+  has_valuables?: boolean;
+  has_pets?: boolean;
+  has_infant?: boolean;
+  has_elderly?: boolean;
+  is_occupied_daily?: boolean;
+  tags?: string[];
+  [key: string]: string | number | boolean | string[] | undefined; // Allow dynamic keys
+}
+
+interface ZoneAttributeOption {
+  value: string;
+  label: string;
+}
+
+interface ZoneAttributeField {
+  name: string;
+  label: string;
+  type: 'select' | 'number' | 'boolean' | 'tags';
+  category: string;
+  options?: ZoneAttributeOption[];
+  description?: string;
+}
+
+interface ZoneSchema {
+  zone_types: ZoneAttributeOption[];
+  attributes: ZoneAttributeField[];
 }
 
 interface AIMessage {
@@ -93,6 +142,7 @@ const getStateColor = (state: string) => {
 export default function HSILRoomView() {
   const [rooms, setRooms] = useState<Room[]>([]);
   const [availableZones, setAvailableZones] = useState<any[]>([]);
+  const [zoneSchema, setZoneSchema] = useState<ZoneSchema | null>(null);
   const [chatMessages, setChatMessages] = useState<AIMessage[]>([]);
   const [chatInput, setChatInput] = useState('');
   const [chatLoading, setChatLoading] = useState(false);
@@ -101,6 +151,8 @@ export default function HSILRoomView() {
   const [selectedDevice, setSelectedDevice] = useState<Device | null>(null);
   const [selectedZone, setSelectedZone] = useState<string>('');
   const [weather, setWeather] = useState<any>(null);
+  const [editingZone, setEditingZone] = useState<Room | null>(null);
+  const [editedAttributes, setEditedAttributes] = useState<ZoneAttributes | null>(null);
   const chatEndRef = useRef<HTMLDivElement>(null);
 
   // Helper to check if device was recently updated (within last 30 seconds)
@@ -114,6 +166,7 @@ export default function HSILRoomView() {
 
   useEffect(() => {
     fetchRoomsAndDevices();
+    fetchZoneSchema();
     fetchWeather();
     const weatherInterval = setInterval(fetchWeather, 900000); // 15 minutes
     return () => {
@@ -137,6 +190,18 @@ export default function HSILRoomView() {
   }, []);
 
   useEventSubscription(handleEvent);
+
+  const fetchZoneSchema = async () => {
+    try {
+      const res = await fetch(`${API_BASE}/api/zones/schema`);
+      if (res.ok) {
+        const data = await res.json();
+        setZoneSchema(data);
+      }
+    } catch (error) {
+      console.error('Failed to fetch zone schema:', error);
+    }
+  };
 
   const fetchWeather = async () => {
     try {
@@ -168,12 +233,14 @@ export default function HSILRoomView() {
       // Group devices by room/zone
       const roomMap = new Map<string, Room>();
 
-      // Add all available zones as rooms
+      // Add all available zones as rooms with attributes
       zones.forEach((zone: any) => {
         roomMap.set(zone.id, {
           id: zone.id,
           name: zone.name,
+          type: zone.type || 'unknown',
           devices: [],
+          attributes: zone.attributes || {},
         });
       });
 
@@ -184,7 +251,9 @@ export default function HSILRoomView() {
           roomMap.set(zoneId, {
             id: zoneId,
             name: zoneId === 'unassigned' ? 'Unassigned Devices' : zoneId,
+            type: 'unknown',
             devices: [],
+            attributes: {},
           });
         }
         roomMap.get(zoneId)!.devices.push({
@@ -243,6 +312,28 @@ export default function HSILRoomView() {
     } finally {
       setChatLoading(false);
       setAiThinking(false);
+    }
+  };
+
+  const handleSaveZone = async () => {
+    if (!editingZone || !editedAttributes) return;
+    
+    try {
+      await fetch(`${API_BASE}/api/zones/${editingZone.id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          id: editingZone.id,
+          name: editingZone.name,
+          type: editingZone.type,
+          attributes: editedAttributes,
+        }),
+      });
+      fetchRoomsAndDevices();
+      setEditingZone(null);
+      setEditedAttributes(null);
+    } catch (error) {
+      console.error('Failed to save zone:', error);
     }
   };
 
@@ -405,13 +496,27 @@ export default function HSILRoomView() {
                           })()}
                         <Text fw={600}>{room.name}</Text>
                       </Group>
-                      <Badge
-                        size="sm"
-                        variant="light"
-                        color={hasCritical ? 'red' : hasWarning ? 'yellow' : undefined}
-                      >
-                        {room.devices.length} {room.devices.length === 1 ? 'device' : 'devices'}
-                      </Badge>
+                      <Group gap="xs">
+                        <Badge
+                          size="sm"
+                          variant="light"
+                          color={hasCritical ? 'red' : hasWarning ? 'yellow' : undefined}
+                        >
+                          {room.devices.length} {room.devices.length === 1 ? 'device' : 'devices'}
+                        </Badge>
+                        {room.id !== 'unassigned' && (
+                          <ActionIcon
+                            variant="subtle"
+                            size="sm"
+                            onClick={() => {
+                              setEditingZone(room);
+                              setEditedAttributes(room.attributes || {});
+                            }}
+                          >
+                            <Settings size={16} />
+                          </ActionIcon>
+                        )}
+                      </Group>
                     </Group>
                   </Card.Section>
 
@@ -624,6 +729,116 @@ export default function HSILRoomView() {
             </Button>
           </Group>
         </Stack>
+      </Modal>
+
+      {/* Zone Attributes Modal */}
+      <Modal
+        opened={editingZone !== null}
+        onClose={() => {
+          setEditingZone(null);
+          setEditedAttributes(null);
+        }}
+        title={`Configure Zone: ${editingZone?.name}`}
+        size="lg"
+      >
+        {editedAttributes && zoneSchema && (
+          <Stack gap="md">
+            {/* Render attributes by category */}
+            {['basic', 'hvac', 'plumbing', 'safety', 'custom'].map((category, catIdx) => {
+              const categoryLabels: Record<string, string> = {
+                basic: 'Basic Properties',
+                hvac: 'HVAC & Climate',
+                plumbing: 'Plumbing & Water',
+                safety: 'Safety & Occupancy',
+                custom: 'Custom',
+              };
+              const categoryFields = zoneSchema.attributes.filter(f => f.category === category);
+              if (categoryFields.length === 0) return null;
+
+              return (
+                <div key={category}>
+                  {catIdx > 0 && <Divider />}
+                  <Text fw={600} size="sm" c="dimmed">{categoryLabels[category]}</Text>
+                  
+                  {/* Special handling for basic category with floor type and square feet */}
+                  {category === 'basic' && (
+                    <Group grow>
+                      {categoryFields
+                        .filter(f => f.type === 'select' || f.type === 'number')
+                        .map(field => (
+                          field.type === 'select' ? (
+                            <Select
+                              key={field.name}
+                              label={field.label}
+                              placeholder={`Select ${field.label.toLowerCase()}`}
+                              data={field.options?.map(o => ({ value: o.value, label: o.label })) || []}
+                              value={(editedAttributes[field.name] as string) || ''}
+                              onChange={(value) => setEditedAttributes({ ...editedAttributes, [field.name]: value || undefined })}
+                            />
+                          ) : (
+                            <NumberInput
+                              key={field.name}
+                              label={field.label}
+                              placeholder={field.description || field.label}
+                              value={(editedAttributes[field.name] as number) || ''}
+                              onChange={(value) => setEditedAttributes({ ...editedAttributes, [field.name]: typeof value === 'number' ? value : undefined })}
+                              min={0}
+                            />
+                          )
+                        ))}
+                    </Group>
+                  )}
+
+                  {/* Boolean switches */}
+                  <Group>
+                    {categoryFields
+                      .filter(f => f.type === 'boolean')
+                      .map(field => (
+                        <Switch
+                          key={field.name}
+                          label={field.label}
+                          checked={(editedAttributes[field.name] as boolean) || false}
+                          onChange={(e) => setEditedAttributes({ ...editedAttributes, [field.name]: e.currentTarget.checked })}
+                        />
+                      ))}
+                  </Group>
+
+                  {/* Tags */}
+                  {categoryFields
+                    .filter(f => f.type === 'tags')
+                    .map(field => (
+                      <MultiSelect
+                        key={field.name}
+                        label={field.label}
+                        placeholder={field.description || `Add ${field.label.toLowerCase()}`}
+                        data={editedAttributes.tags || []}
+                        value={editedAttributes.tags || []}
+                        onChange={(value) => setEditedAttributes({ ...editedAttributes, tags: value })}
+                        searchable
+                      />
+                    ))}
+                </div>
+              );
+            })}
+
+            <Group justify="flex-end" gap="sm" mt="md">
+              <Button
+                variant="subtle"
+                onClick={() => {
+                  setEditingZone(null);
+                  setEditedAttributes(null);
+                }}
+              >
+                Cancel
+              </Button>
+              <Button
+                onClick={handleSaveZone}
+              >
+                Save Zone
+              </Button>
+            </Group>
+          </Stack>
+        )}
       </Modal>
     </Container>
   );

@@ -31,20 +31,20 @@ type DeviceCommand struct {
 
 // Device represents a physical or logical device
 type Device struct {
-	ID              string            `json:"id"`
-	Name            string            `json:"name"`
-	Type            string            `json:"type"`
-	Integration     string            `json:"integration"`
-	ZoneID          string            `json:"zone_id"`
-	AssetID         string            `json:"asset_id"`
-	Enabled         bool              `json:"enabled"`
-	LastSeen        time.Time         `json:"last_seen"`
-	Metadata        map[string]string `json:"metadata"`
-	DocsIngested    bool              `json:"docs_ingested"`     // Whether documentation has been processed
-	DocsIngestedAt  *time.Time        `json:"docs_ingested_at"`  // When documentation was last processed
-	DocsStatus      string            `json:"docs_status"`       // pending/success/partial/error
-	CreatedAt       time.Time         `json:"created_at"`
-	UpdatedAt       time.Time         `json:"updated_at"`
+	ID             string            `json:"id"`
+	Name           string            `json:"name"`
+	Type           string            `json:"type"`
+	Integration    string            `json:"integration"`
+	ZoneID         string            `json:"zone_id"`
+	AssetID        string            `json:"asset_id"`
+	Enabled        bool              `json:"enabled"`
+	LastSeen       time.Time         `json:"last_seen"`
+	Metadata       map[string]string `json:"metadata"`
+	DocsIngested   bool              `json:"docs_ingested"`    // Whether documentation has been processed
+	DocsIngestedAt *time.Time        `json:"docs_ingested_at"` // When documentation was last processed
+	DocsStatus     string            `json:"docs_status"`      // pending/success/partial/error
+	CreatedAt      time.Time         `json:"created_at"`
+	UpdatedAt      time.Time         `json:"updated_at"`
 }
 
 // Sensor represents a sensor within a device
@@ -71,14 +71,46 @@ type Home struct {
 
 // Zone represents a logical area within a home
 type Zone struct {
-	ID        string            `json:"id"`
-	HomeID    string            `json:"home_id"`
-	Name      string            `json:"name"`
-	Type      string            `json:"type"`      // "basement", "bathroom", "kitchen", etc.
-	ParentID  string            `json:"parent_id"` // for nested zones
-	Metadata  map[string]string `json:"metadata"`
-	CreatedAt time.Time         `json:"created_at"`
-	UpdatedAt time.Time         `json:"updated_at"`
+	ID         string            `json:"id"`
+	HomeID     string            `json:"home_id"`
+	Name       string            `json:"name"`
+	Type       string            `json:"type"`       // "basement", "bathroom", "kitchen", etc.
+	ParentID   string            `json:"parent_id"`  // for nested zones
+	Attributes *ZoneAttributes   `json:"attributes"` // Rich attributes for HIL reasoning
+	Metadata   map[string]string `json:"metadata"`
+	CreatedAt  time.Time         `json:"created_at"`
+	UpdatedAt  time.Time         `json:"updated_at"`
+}
+
+// ZoneAttributes contains rich metadata for HIL reasoning
+type ZoneAttributes struct {
+	// Physical characteristics
+	FloorType    string `json:"floor_type,omitempty"` // hardwood, tile, carpet, concrete, laminate
+	SquareFeet   int    `json:"square_feet,omitempty"`
+	HasWindows   bool   `json:"has_windows,omitempty"`
+	HasFireplace bool   `json:"has_fireplace,omitempty"`
+
+	// HVAC/Climate
+	HasHVACReturn  bool `json:"has_hvac_return,omitempty"` // Main return location
+	HasHVACVent    bool `json:"has_hvac_vent,omitempty"`
+	HasRadiantHeat bool `json:"has_radiant_heat,omitempty"`
+	HasCeilingFan  bool `json:"has_ceiling_fan,omitempty"`
+
+	// Water/Plumbing
+	HasPlumbing    bool `json:"has_plumbing,omitempty"` // Sinks, toilets, etc.
+	HasWaterHeater bool `json:"has_water_heater,omitempty"`
+	HasWasher      bool `json:"has_washer,omitempty"`
+	HasSumpPump    bool `json:"has_sump_pump,omitempty"`
+
+	// Risk factors & Occupancy
+	HasValuables    bool `json:"has_valuables,omitempty"` // Office with electronics, etc.
+	HasPets         bool `json:"has_pets,omitempty"`
+	HasInfant       bool `json:"has_infant,omitempty"`
+	HasElderly      bool `json:"has_elderly,omitempty"`
+	IsOccupiedDaily bool `json:"is_occupied_daily,omitempty"` // Regularly occupied vs storage
+
+	// Custom tags for flexibility
+	Tags []string `json:"tags,omitempty"` // ["workshop", "server-room", "wine-cellar"]
 }
 
 // Asset represents a physical asset that may have sensors
@@ -120,44 +152,44 @@ const (
 type IncidentType string
 
 const (
-	IncidentTypeWaterLeak    IncidentType = "water_leak"
-	IncidentTypeSmoke        IncidentType = "smoke_alarm"
-	IncidentTypeCO           IncidentType = "co_alarm"
-	IncidentTypeMotion       IncidentType = "motion_alarm"
-	IncidentTypeContact      IncidentType = "contact_alarm"
-	IncidentTypeTamper       IncidentType = "tamper_alarm"
-	IncidentTypeHeat         IncidentType = "heat_alarm"
-	IncidentTypePower        IncidentType = "power_alarm"
-	IncidentTypeGlassBreak   IncidentType = "glass_break"
-	IncidentTypeBurglar      IncidentType = "burglar_alarm"
-	IncidentTypeFreeze       IncidentType = "freeze_alarm"
-	IncidentTypeGeneric      IncidentType = "generic"
+	IncidentTypeWaterLeak  IncidentType = "water_leak"
+	IncidentTypeSmoke      IncidentType = "smoke_alarm"
+	IncidentTypeCO         IncidentType = "co_alarm"
+	IncidentTypeMotion     IncidentType = "motion_alarm"
+	IncidentTypeContact    IncidentType = "contact_alarm"
+	IncidentTypeTamper     IncidentType = "tamper_alarm"
+	IncidentTypeHeat       IncidentType = "heat_alarm"
+	IncidentTypePower      IncidentType = "power_alarm"
+	IncidentTypeGlassBreak IncidentType = "glass_break"
+	IncidentTypeBurglar    IncidentType = "burglar_alarm"
+	IncidentTypeFreeze     IncidentType = "freeze_alarm"
+	IncidentTypeGeneric    IncidentType = "generic"
 )
 
 // Incident represents a detected issue or alert
 type Incident struct {
-	ID             string           `json:"id"`
-	Type           IncidentType     `json:"type"`            // Type of incident (water_leak, smoke, etc.)
-	Title          string           `json:"title"`
-	Description    string           `json:"description"`
-	Severity       IncidentSeverity `json:"severity"`
-	Status         IncidentStatus   `json:"status"`
-	DeviceID       string           `json:"device_id"`
-	SensorID       string           `json:"sensor_id"`
-	ZoneID         string           `json:"zone_id"`
-	AssetID        string           `json:"asset_id"`
-	RuleName       string           `json:"rule_name"`
-	Data           map[string]any   `json:"data"`
-	CreatedAt      time.Time        `json:"created_at"`
-	UpdatedAt      time.Time        `json:"updated_at"`
-	ResolvedAt     *time.Time       `json:"resolved_at"`
+	ID          string           `json:"id"`
+	Type        IncidentType     `json:"type"` // Type of incident (water_leak, smoke, etc.)
+	Title       string           `json:"title"`
+	Description string           `json:"description"`
+	Severity    IncidentSeverity `json:"severity"`
+	Status      IncidentStatus   `json:"status"`
+	DeviceID    string           `json:"device_id"`
+	SensorID    string           `json:"sensor_id"`
+	ZoneID      string           `json:"zone_id"`
+	AssetID     string           `json:"asset_id"`
+	RuleName    string           `json:"rule_name"`
+	Data        map[string]any   `json:"data"`
+	CreatedAt   time.Time        `json:"created_at"`
+	UpdatedAt   time.Time        `json:"updated_at"`
+	ResolvedAt  *time.Time       `json:"resolved_at"`
 	// AI Analysis fields
-	AnalysisStatus string           `json:"analysis_status"` // "pending", "completed", "failed"
-	Analysis       string           `json:"analysis"`
-	Insights       []string         `json:"insights"`
-	Actions        []string         `json:"actions"`
-	AnalysisData   map[string]any   `json:"analysis_data"`   // metadata, sources, etc.
-	AnalyzedAt     *time.Time       `json:"analyzed_at"`
+	AnalysisStatus string         `json:"analysis_status"` // "pending", "completed", "failed"
+	Analysis       string         `json:"analysis"`
+	Insights       []string       `json:"insights"`
+	Actions        []string       `json:"actions"`
+	AnalysisData   map[string]any `json:"analysis_data"` // metadata, sources, etc.
+	AnalyzedAt     *time.Time     `json:"analyzed_at"`
 }
 
 // Task represents a maintenance or action item

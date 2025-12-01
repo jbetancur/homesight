@@ -94,7 +94,10 @@ class Config(BaseModel):
     search: SearchConfig = Field(default_factory=SearchConfig)
     document_fetcher: DocumentFetcherConfig = Field(default_factory=DocumentFetcherConfig)
     queues: QueuesConfig = Field(default_factory=QueuesConfig)
-    backend_url: str = Field(default="http://localhost:8080", description="HomeSight Go backend API URL")
+    backend_url: str = Field(
+        default_factory=lambda: os.getenv('BACKEND_URL', 'http://localhost:8080'),
+        description="HomeSight Go backend API URL"
+    )
 
     @property
     def bing_search_api_key(self) -> Optional[str]:
@@ -167,8 +170,8 @@ class Config(BaseModel):
             if inference_config_data:
                 llm_config_data['inference'] = InferenceConfig(**inference_config_data)
 
-            # Extract backend_url from root level if present
-            backend_url = yaml_data.get('backend_url', 'http://localhost:8080')
+            # Extract backend_url: environment variable takes precedence over YAML
+            backend_url = os.getenv('BACKEND_URL') or yaml_data.get('backend_url', 'http://localhost:8080')
 
             # Build RAG config
             rag_config_data = {}

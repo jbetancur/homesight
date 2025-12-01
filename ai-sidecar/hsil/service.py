@@ -10,8 +10,13 @@ Main service that coordinates all HSIL components:
 - Conversational Agent
 - Action Dispatcher
 - Adaptive Learning
+- HIL Intelligence Pipeline (NEW)
+- Sensor Fusion (NEW)
+- Safety Guardian (NEW)
+- Reasoning Templates (NEW)
 """
 
+import os
 import logging
 from typing import Optional, Dict, Any, List
 from datetime import datetime
@@ -35,7 +40,18 @@ from .weather_sync import WeatherSyncService
 from .hsil_ml_river import HSILRiverLearningEngine
 from .river_feedback_adapter import RiverFeedbackAdapter
 
+# NEW: HIL Evolution modules
+from .sensor_fusion import SensorFusionEngine
+from .safety_guardian import SafetyGuardian
+from .reasoning_templates import ScenarioDetector, ReasoningEngine
+from .intelligence_pipeline import IntelligencePipeline
+from .incident_generator import IncidentGenerator
+
 logger = logging.getLogger(__name__)
+
+# Feature flag for gradual HIL rollout
+USE_HIL_PIPELINE = os.getenv("USE_HIL_PIPELINE", "true").lower() == "true"
+HIL_SHADOW_MODE = os.getenv("HIL_SHADOW_MODE", "false").lower() == "true"
 
 
 class HSILService:
@@ -108,6 +124,50 @@ class HSILService:
             backend_url=backend_url
         )
 
+        # NEW: HIL Evolution components
+        if USE_HIL_PIPELINE:
+            logger.info("Initializing HIL Evolution components...")
+            
+            # Sensor fusion engine
+            self.sensor_fusion = SensorFusionEngine(backend_url=backend_url)
+            
+            # Safety guardian
+            self.safety_guardian = SafetyGuardian()
+            
+            # Scenario detection and reasoning
+            self.scenario_detector = ScenarioDetector()
+            self.reasoning_engine = ReasoningEngine()
+            
+            # Incident generator
+            self.incident_generator = IncidentGenerator(
+                backend_url=backend_url,
+                dry_run=HIL_SHADOW_MODE
+            )
+            
+            # Unified intelligence pipeline
+            # Integrates with existing services to avoid duplication
+            self.intelligence_pipeline = IntelligencePipeline(
+                fusion_engine=self.sensor_fusion,
+                safety_guardian=self.safety_guardian,
+                reasoning_engine=self.reasoning_engine,
+                scenario_detector=self.scenario_detector,
+                ml_engine=self.learning,
+                llm_provider=llm_provider,
+                action_dispatcher=self.action_dispatcher if not HIL_SHADOW_MODE else None,
+                feedback_learning=self.feedback_learning,  # Reuse existing feedback service
+                backend_url=backend_url
+            )
+            
+            logger.info(f"✅ HIL Evolution initialized (shadow_mode={HIL_SHADOW_MODE})")
+        else:
+            self.sensor_fusion = None
+            self.safety_guardian = None
+            self.scenario_detector = None
+            self.reasoning_engine = None
+            self.incident_generator = None
+            self.intelligence_pipeline = None
+            logger.info("HIL Evolution disabled via USE_HIL_PIPELINE=false")
+
         logger.info("✅ HSIL services initialized successfully")
 
     async def start(self):
@@ -150,7 +210,12 @@ class HSILService:
         1. Event Ingestion (normalize, enrich with trends/anomalies)
         2. Feature Extraction (extract high-level features)
         3. Adaptive Learning (update baselines, learn patterns)
-        4. Behavior Model (make predictions if applicable)
+        4. [NEW] HIL Intelligence Pipeline (if enabled)
+           - Sensor Fusion
+           - Scenario Detection
+           - Reasoning Templates
+           - Safety Guardian
+           - Incident Generation
         5. Policy Engine (determine if action needed)
         6. Action Dispatcher (execute action if needed)
 
@@ -196,8 +261,51 @@ class HSILService:
                         f"(anomaly_score: {anomaly_score:.2f})"
                     )
 
-            # River ML handles predictions via learn_from_sensor_data
-            # Policy engine can still trigger actions based on thresholds
+            # 6. [NEW] Process through HIL Intelligence Pipeline
+            hil_result = None
+            if USE_HIL_PIPELINE and self.intelligence_pipeline:
+                try:
+                    hil_result = await self.intelligence_pipeline.process_event(
+                        event_context=context,
+                        enable_llm=True,
+                        enable_actions=not HIL_SHADOW_MODE
+                    )
+                    
+                    # Generate incidents if scenarios detected
+                    if hil_result.matched_scenarios and self.incident_generator:
+                        await self.incident_generator.process_scenarios(
+                            scenarios=hil_result.matched_scenarios,
+                            fused_context=hil_result.fused_context,
+                            reasoning_result=hil_result.reasoning_result
+                        )
+                        
+                        # Check for auto-resolve
+                        await self.incident_generator.check_auto_resolve(
+                            hil_result.fused_context
+                        )
+                    
+                    # Track actions from HIL
+                    if hil_result.actions_taken:
+                        actions_taken.extend([
+                            {
+                                "action_id": a.action_id,
+                                "device_id": a.device_id,
+                                "command": a.command,
+                                "value": a.value,
+                                "success": a.success
+                            }
+                            for a in hil_result.actions_taken
+                        ])
+                    
+                    if HIL_SHADOW_MODE:
+                        logger.debug(
+                            f"HIL shadow mode: {len(hil_result.matched_scenarios)} scenarios, "
+                            f"{len(hil_result.actions_taken)} actions (not executed)"
+                        )
+                        
+                except Exception as e:
+                    logger.error(f"HIL pipeline error: {e}", exc_info=True)
+                    # Continue with legacy processing on error
 
             return {
                 "status": "processed",
@@ -205,6 +313,7 @@ class HSILService:
                 "features": [f.model_dump(mode='json') for f in features],
                 "predictions": [p.model_dump(mode='json') for p in predictions],
                 "actions_taken": actions_taken,
+                "hil_result": hil_result.model_dump(mode='json') if hil_result else None,
                 "timestamp": datetime.now().isoformat()
             }
 
@@ -369,13 +478,26 @@ class HSILService:
         """Get HSIL statistics"""
         feedback_stats = await self.feedback_learning.get_stats()
         river_stats = await self.learning.get_stats()
-
-        return {
+        
+        stats = {
             "hsil_version": "2.0.0-river",
             "feedback_learning": feedback_stats,
             "river_ml": river_stats,
             "timestamp": datetime.now().isoformat()
         }
+        
+        # Add HIL Evolution stats if enabled
+        if USE_HIL_PIPELINE and self.intelligence_pipeline:
+            stats["hil_pipeline"] = await self.intelligence_pipeline.get_stats()
+            stats["hil_shadow_mode"] = HIL_SHADOW_MODE
+            
+            if self.incident_generator:
+                stats["incident_generator"] = await self.incident_generator.get_stats()
+            
+            if self.safety_guardian:
+                stats["safety_guardian"] = await self.safety_guardian.get_stats()
+
+        return stats
 
     async def get_learned_preferences(self) -> Dict[str, Any]:
         """Get all learned preferences"""

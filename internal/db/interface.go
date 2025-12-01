@@ -34,6 +34,7 @@ type HomeRepository interface {
 // ZoneRepository manages zone persistence
 type ZoneRepository interface {
 	Get(ctx context.Context, id string) (*model.Zone, error)
+	List(ctx context.Context) ([]model.Zone, error)
 	ListByHome(ctx context.Context, homeID string) ([]model.Zone, error)
 	Upsert(ctx context.Context, zone *model.Zone) error
 	Delete(ctx context.Context, id string) error

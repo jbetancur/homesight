@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"log"
 	"os"
 	"os/signal"
@@ -45,6 +46,12 @@ func main() {
 	sensorRepo := db.NewSensorRepo(database)
 	incidentRepo := db.NewIncidentRepo(database)
 	knowledgeBaseRepo := db.NewKnowledgeBaseRepo(database)
+	zoneRepo := db.NewZoneRepo(database)
+
+	// Seed default zones if none exist
+	if err := zoneRepo.SeedDefaultZones(context.Background()); err != nil {
+		log.Printf("Warning: Failed to seed default zones: %v", err)
+	}
 
 	// Initialize metrics sink
 	var metricsSink metrics.MetricsSink
@@ -121,7 +128,7 @@ func main() {
 	}
 
 	// Start API server
-	server := api.NewServer(cfg.API.Addr, incidentService, deviceRepo, sensorRepo, knowledgeBaseRepo, metricsSink, aiClient, cfg)
+	server := api.NewServer(cfg.API.Addr, incidentService, deviceRepo, sensorRepo, zoneRepo, knowledgeBaseRepo, metricsSink, aiClient, cfg)
 
 	// Set MQTT publisher for device commands
 	if mqttPublisher != nil {

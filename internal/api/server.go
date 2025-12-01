@@ -32,6 +32,7 @@ type Server struct {
 	incidentService   incidents.IncidentService
 	deviceRepo        db.DeviceRepository
 	sensorRepo        db.SensorRepository
+	zoneRepo          db.ZoneRepository
 	knowledgeBaseRepo db.KnowledgeBaseRepository
 	metricsSink       metrics.MetricsSink
 	aiClient          ai.Client
@@ -56,6 +57,7 @@ func NewServer(
 	incidentService incidents.IncidentService,
 	deviceRepo db.DeviceRepository,
 	sensorRepo db.SensorRepository,
+	zoneRepo db.ZoneRepository,
 	knowledgeBaseRepo db.KnowledgeBaseRepository,
 	metricsSink metrics.MetricsSink,
 	aiClient ai.Client,
@@ -66,6 +68,7 @@ func NewServer(
 		incidentService:   incidentService,
 		deviceRepo:        deviceRepo,
 		sensorRepo:        sensorRepo,
+		zoneRepo:          zoneRepo,
 		knowledgeBaseRepo: knowledgeBaseRepo,
 		metricsSink:       metricsSink,
 		aiClient:          aiClient,
@@ -149,6 +152,11 @@ func (s *Server) setupRoutes() {
 		// Zones/Rooms
 		r.Route("/zones", func(r chi.Router) {
 			r.Get("/", s.handleListZones)
+			r.Get("/schema", s.handleGetZoneSchema)
+			r.Post("/", s.handleCreateZone)
+			r.Get("/{id}", s.handleGetZone)
+			r.Put("/{id}", s.handleUpdateZone)
+			r.Delete("/{id}", s.handleDeleteZone)
 		})
 
 		// Metrics

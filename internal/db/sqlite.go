@@ -53,6 +53,7 @@ func (s *SQLiteDB) initSchema() error {
 			name TEXT NOT NULL,
 			type TEXT,
 			parent_id TEXT,
+			attributes TEXT,
 			metadata TEXT,
 			created_at DATETIME NOT NULL,
 			updated_at DATETIME NOT NULL,
@@ -168,10 +169,28 @@ func (s *SQLiteDB) initSchema() error {
 		CREATE INDEX IF NOT EXISTS idx_devices_zone ON devices(zone_id);
 		CREATE INDEX IF NOT EXISTS idx_sensors_device ON sensors(device_id);
 		CREATE INDEX IF NOT EXISTS idx_knowledge_base_device ON knowledge_base_articles(device_id);
+		CREATE INDEX IF NOT EXISTS idx_zones_type ON zones(type);
 	`
 
 	_, err := s.db.Exec(schema)
-	return err
+	if err != nil {
+		return err
+	}
+
+	// Run migrations for existing databases
+	return s.runMigrations()
+}
+
+// runMigrations applies schema updates for existing databases
+func (s *SQLiteDB) runMigrations() error {
+	// Migration: Add attributes column to zones if it doesn't exist
+	_, err := s.db.Exec(`ALTER TABLE zones ADD COLUMN attributes TEXT`)
+	if err != nil {
+		// Ignore error if column already exists
+		// SQLite doesn't have "IF NOT EXISTS" for ALTER TABLE
+	}
+
+	return nil
 }
 
 // Close closes the database connection

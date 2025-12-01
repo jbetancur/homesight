@@ -114,6 +114,18 @@ class ConversationalAgentService:
             logger.info(f"High-confidence intent: {intent.intent} ({intent.confidence:.2f})")
             # Intent handling could be added here for direct responses
 
+        # Check if this is a room/zone query - handle directly for better responses
+        room_query = self._detect_room_query(message)
+        logger.info(f"Room query detection: message='{message}', detected_zone={room_query}, ontology_loaded={self.ontology._loaded}")
+        if room_query:
+            room_response = await self._handle_room_query(room_query, home_state)
+            if room_response:
+                self.conversation_memory.append({"role": "user", "content": message})
+                self.conversation_memory.append({"role": "assistant", "content": room_response.reply})
+                if len(self.conversation_memory) > 20:
+                    self.conversation_memory = self.conversation_memory[-20:]
+                return room_response
+
         context = await self._build_context(message, event_context, home_state)
 
         system_prompt = await self._build_system_prompt(context)
@@ -128,6 +140,103 @@ class ConversationalAgentService:
             self.conversation_memory = self.conversation_memory[-20:]
 
         return parsed
+
+    def _detect_room_query(self, message: str) -> Optional[str]:
+        """Detect if user is asking about a specific room/zone."""
+        message_lower = message.lower()
+        
+        # Common patterns for room queries
+        room_patterns = [
+            "tell me about", "what's in", "whats in", "what is in",
+            "how is", "how's", "status of", "check on", "check the",
+            "about my", "about the"
+        ]
+        
+        # Check if message matches a room query pattern
+        is_room_query = any(pattern in message_lower for pattern in room_patterns)
+        
+        if is_room_query and self.ontology._loaded:
+            # Find which room they're asking about
+            for zone_id in self.ontology.zone_ids:
+                zone = self.ontology.zones.get(zone_id)
+                if zone:
+                    zone_name_lower = zone.name.lower()
+                    zone_id_lower = zone_id.lower().replace("-", " ").replace("_", " ")
+                    if zone_name_lower in message_lower or zone_id_lower in message_lower:
+                        return zone_id
+        
+        return None
+
+    async def _handle_room_query(
+        self,
+        zone_id: str,
+        home_state: Optional[Dict[str, Any]]
+    ) -> Optional[ConversationResponse]:
+        """Handle a query about a specific room with comprehensive response."""
+        zone = self.ontology.zones.get(zone_id)
+        if not zone:
+            return None
+        
+        devices = self.ontology.devices_by_zone.get(zone_id, [])
+        attrs = zone.attributes
+        
+        # Build comprehensive response
+        parts = []
+        
+        # 1. Intro with device overview
+        if devices:
+            device_list = [f"{d.name} ({d.type})" for d in devices]
+            if len(devices) == 1:
+                parts.append(f"Your {zone.name.lower()} has a {device_list[0]} sensor.")
+            else:
+                parts.append(f"Your {zone.name.lower()} has {len(devices)} devices: {', '.join(device_list)}.")
+        else:
+            parts.append(f"Your {zone.name.lower()} doesn't have any sensors installed yet.")
+        
+        # 2. Device status from home_state (if available)
+        if home_state and devices:
+            device_states = home_state.get("devices", []) if isinstance(home_state, dict) else []
+            for device in devices:
+                for ds in device_states:
+                    if isinstance(ds, dict) and ds.get("id") == device.device_id:
+                        state = ds.get("state", "normal")
+                        if state == "normal":
+                            parts.append(f"The {device.name} is reporting normal status (no alerts).")
+                        else:
+                            parts.append(f"⚠️ The {device.name} status: {state}")
+                        break
+        
+        # 3. Room features
+        features = []
+        if attrs.floor_type:
+            features.append(f"{attrs.floor_type} floor")
+        if attrs.has_plumbing:
+            features.append("plumbing")
+        if attrs.has_water_heater:
+            features.append("water heater")
+        if attrs.has_washer:
+            features.append("washer/dryer")
+        if attrs.has_sump_pump:
+            features.append("sump pump")
+        if attrs.has_hvac_return:
+            features.append("HVAC return")
+        if attrs.has_hvac_vent:
+            features.append("HVAC vent")
+        if attrs.has_windows:
+            features.append("windows")
+        
+        if features:
+            parts.append(f"Room features: {', '.join(features)}.")
+        
+        # 4. Follow-up offer
+        if devices:
+            parts.append("\nWould you like me to check the sensor's battery level, view recent history, or look for any past incidents in this room?")
+        else:
+            parts.append("\nWould you like to add sensors to this room for monitoring?")
+        
+        reply = " ".join(parts)
+        
+        return ConversationResponse(reply=reply, action=None)
 
     # ---------------------------------------------------------------------
     # Temperature Intent Handling
@@ -274,7 +383,11 @@ class ConversationalAgentService:
 
         # Device ontology summary
         if self.ontology._loaded:
-            context["device_summary"] = self.ontology.get_device_summary()
+            summary = self.ontology.get_device_summary()
+            context["device_summary"] = summary
+            logger.info(f"Device summary zones: {list(summary.get('zone_details', {}).keys())}")
+        else:
+            logger.warning("Device ontology not loaded, skipping device_summary")
 
         # Home health assessment (authoritative status)
         home_health = await self.health_engine.evaluate(home_state=home_state)
@@ -359,6 +472,21 @@ class ConversationalAgentService:
             "6. If home_health says 'critical' or 'has_leak=true', YOU MUST acknowledge it",
             "7. If home_health says 'good', DON'T invent problems",
             "",
+            "RESPONSE STYLE:",
+            "- When asked about a room/zone, provide a COMPLETE overview:",
+            "  1. Room features/attributes (floor type, plumbing, HVAC, etc.)",
+            "  2. ALL devices/sensors in that room with their current status",
+            "  3. Any active incidents or alerts in that room",
+            "  4. Offer to provide more details (battery levels, history, trends)",
+            "- Be conversational and helpful, not just factual",
+            "- End responses about rooms with a helpful follow-up offer",
+            "",
+            "EXAMPLE (for room query):",
+            "User: tell me about my basement",
+            "Response: Your basement has a ZSE42 leak sensor which is currently reporting normal (no water detected).",
+            "The room features include: concrete floor, plumbing, water heater, washer/dryer, and sump pump.",
+            "Would you like me to check the sensor's battery level, view its recent history, or check for any past incidents?",
+            "",
             "Capabilities:",
             "- Remember conversation history",
             "- Learn temperature preferences",
@@ -402,13 +530,35 @@ class ConversationalAgentService:
 
         p.append("Current Context:")
 
-        # Device ontology summary
+        # Device ontology summary with zone details
         if "device_summary" in context:
             summary = context["device_summary"]
             p.append(f"Devices: {summary.get('total_devices', 0)} total")
             p.append(f"Rooms: {', '.join(summary.get('rooms', []))}")
             if summary.get('rooms_with_temperature'):
-                p.append(f"Temp sensors: {', '.join(summary['rooms_with_temperature'])}")
+                p.append(f"Temp sensors in: {', '.join(summary['rooms_with_temperature'])}")
+            if summary.get('rooms_with_leak_detection'):
+                p.append(f"Leak sensors in: {', '.join(summary['rooms_with_leak_detection'])}")
+            
+            # Include zone details with attributes and devices
+            zone_details = summary.get('zone_details', {})
+            if zone_details:
+                p.append("")
+                p.append("ZONE DETAILS (ALWAYS include devices when asked about a room):")
+                for zone_id, info in zone_details.items():
+                    p.append(f"  📍 {info.get('name', zone_id)} ({info.get('type', 'unknown')}):")
+                    
+                    # Devices with types
+                    devices = info.get('devices', [])
+                    if devices:
+                        p.append(f"     Sensors/Devices: {', '.join(devices)}")
+                    else:
+                        p.append(f"     Sensors/Devices: None installed")
+                    
+                    # Room features
+                    attrs = info.get('attributes', [])
+                    if attrs:
+                        p.append(f"     Features: {', '.join(attrs)}")
 
         if "home_state" in context:
             p.append(f"Home State: {json.dumps(context['home_state'], indent=2)[:500]}")
@@ -456,7 +606,7 @@ class ConversationalAgentService:
 Respond ONLY with valid JSON:
 
 {
-  "reply": "text",
+  "reply": "Your full, helpful response here. Include all relevant details and a follow-up question or offer when appropriate.",
   "action": {
     "topic": "homesight/device/command",
     "command": "cmd",
@@ -466,6 +616,8 @@ Respond ONLY with valid JSON:
 
 If no action is needed, set:
 "action": null
+
+IMPORTANT: The "reply" field should be conversational and complete - include device status, room features, AND a helpful follow-up offer.
 """)
 
         prompt = "\n".join(p)

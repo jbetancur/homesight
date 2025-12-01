@@ -234,4 +234,17 @@ def get_default_tools() -> ToolRegistry:
         ]
     ))
 
+    # Tool: Get zone/room info
+    registry.register(ToolDefinition(
+        name="get_zone_info",
+        description="Get detailed information about a specific zone/room including its devices, attributes (floor type, HVAC, plumbing, etc.), and current status. Use this when user asks about a specific room like 'tell me about my basement' or 'what's in the kitchen'.",
+        parameters=[
+            ToolParameter(
+                name="zone_name",
+                type="string",
+                description="The name or ID of the zone/room (e.g., 'basement', 'kitchen', 'living-room')"
+            )
+        ]
+    ))
+
     return registry
