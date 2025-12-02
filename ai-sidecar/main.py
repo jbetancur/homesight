@@ -29,7 +29,6 @@ from models.device_profile import DeviceProfile
 
 # Services
 from services.session_service import SessionService
-from services.analysis_service import AnalysisService
 from services.document_service import DocumentService
 from services.mqtt_service import initialize_mqtt_service, shutdown_mqtt_service, get_mqtt_service
 
@@ -80,7 +79,6 @@ logger = logging.getLogger(__name__)
 llm_provider = None
 rag_engine = None
 session_service = None
-analysis_service = None
 document_service = None
 hsil_service = None  # HSIL service (handles all chat)
 
@@ -109,7 +107,7 @@ async def lifespan(app: FastAPI):
     logger.info("🚀 Starting HomeSight AI Service")
 
     # Initialize services
-    global llm_provider, rag_engine, session_service, chat_service, analysis_service, document_service, analysis_queue
+    global llm_provider, rag_engine, session_service, chat_service, document_service
     global discovery_queue, ingestion_queue, analysis_task_queue, hsil_service
 
     try:
@@ -148,10 +146,6 @@ async def lifespan(app: FastAPI):
 
         # Initialize services
         session_service = SessionService(session_timeout_minutes=60)
-        analysis_service = AnalysisService(
-            llm_provider=llm_provider,
-            rag_engine=rag_engine
-        )
         document_service = DocumentService(
             rag_engine=rag_engine,
             cache_dir=Path(config.document_fetcher.cache_directory).expanduser(),
@@ -348,27 +342,83 @@ async def metrics():
     return Response(content=get_metrics(), media_type="text/plain; charset=utf-8")
 
 
-# Analysis endpoint (AI-powered, no hard-coded rules!)
+# Analysis endpoint - RAG-based document retrieval for incidents
 @app.post("/analyze", response_model=AnalyzeResponse)
 async def analyze(request: AnalyzeRequest):
     """
-    Analyze metrics or incidents using AI
-
-    Uses LLM + RAG instead of hard-coded rules
-    Queued to prevent concurrent LLM inference from blocking other requests
+    Get relevant documentation for an incident or device.
+    
+    Queries RAG for device-specific documentation and returns structured results.
+    No LLM inference - just document retrieval for speed.
+    
+    For AI-powered troubleshooting, use /hsil/chat with your question.
     """
-    if not analysis_service:
-        raise HTTPException(status_code=503, detail="Analysis service not initialized")
-    if not analysis_task_queue:
-        raise HTTPException(status_code=503, detail="Analysis task queue not initialized")
+    if not rag_engine:
+        raise HTTPException(status_code=503, detail="RAG engine not initialized")
 
     try:
-        # Queue the analysis task to limit concurrent LLM inference
-        async def analyze_task():
-            return await analysis_service.analyze(request)
-
-        response = await analysis_task_queue.execute(analyze_task, task_id="analyze")
-        return response
+        # Extract device and incident info
+        data = request.data
+        device_id = data.get("device_id", "")
+        incident_type = data.get("type", "unknown")
+        severity = data.get("severity", "unknown")
+        
+        # Build RAG query from incident data
+        query_parts = [incident_type]
+        if device_id:
+            query_parts.append(device_id)
+        if data.get("description"):
+            query_parts.append(data["description"][:100])
+        
+        query = " ".join(query_parts)
+        
+        # Query RAG for relevant documentation
+        results = rag_engine.query(query, n_results=5)
+        
+        # Build structured response from RAG results
+        insights = []
+        sources = []
+        
+        if results:
+            for r in results:
+                relevance = r.get('relevance_score', 0)
+                if relevance > 0.2:  # Filter low-relevance results
+                    source = r['metadata'].get('source', 'Documentation')
+                    excerpt = r['text'][:500].strip()
+                    insights.append(f"**{source}** (relevance: {relevance:.0%}):\n{excerpt}")
+                    sources.append({
+                        "source": source,
+                        "relevance": relevance,
+                        "type": r['metadata'].get('type', 'unknown')
+                    })
+        
+        if not insights:
+            insights = [
+                "No device-specific documentation found in knowledge base.",
+                "Try asking a question in the chat for AI-powered troubleshooting."
+            ]
+        
+        # Build analysis summary
+        analysis = f"Found {len(sources)} relevant documents for {incident_type}"
+        if device_id:
+            analysis += f" on device {device_id}"
+        
+        return AnalyzeResponse(
+            analysis=analysis,
+            insights=insights,
+            actions=[
+                "Review the documentation excerpts above",
+                "Ask follow-up questions in chat for specific troubleshooting",
+                "Check device knowledge base for more details"
+            ],
+            metadata={
+                "type": incident_type,
+                "severity": severity,
+                "device_id": device_id,
+                "sources": sources,
+                "documentation_available": len(sources) > 0
+            }
+        )
     except Exception as e:
         logger.error(f"Analysis error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -637,40 +687,63 @@ async def handle_incident_event(event: dict, background_tasks: BackgroundTasks):
 
 async def analyze_incident_background(incident_data: dict, callback_url: Optional[str] = None):
     """
-    Analyze incident in background and save results to Go backend database
-
-    This allows the UI to retrieve pre-computed analysis instead of
-    waiting for LLM inference when the user expands the incident.
+    Analyze incident in background using RAG document retrieval.
+    
+    Queries RAG for relevant device documentation and saves results
+    to Go backend database for the UI to display.
     """
     import httpx
-    import time
 
     incident_id = incident_data.get("id")
 
-    if not incident_id or not analysis_service:
+    if not incident_id or not rag_engine:
         return
 
     try:
         logger.info(f"Starting background analysis for incident {incident_id}")
 
-        # Create analysis request
-        request = AnalyzeRequest(
-            type="incident",
-            data={
-                "id": incident_id,
-                "type": incident_data.get("title", "Unknown incident"),
-                "severity": incident_data.get("severity", "unknown"),
-                "device_id": incident_data.get("device_id"),
-                "description": incident_data.get("description", "")
-            },
-            context={
-                "incident_id": incident_id,
-                "device_id": incident_data.get("device_id")
-            }
-        )
-
-        # Perform analysis
-        result = await analysis_service.analyze(request)
+        # Build query from incident data
+        incident_type = incident_data.get("title", "Unknown incident")
+        device_id = incident_data.get("device_id", "")
+        description = incident_data.get("description", "")
+        severity = incident_data.get("severity", "unknown")
+        
+        query_parts = [incident_type]
+        if device_id:
+            query_parts.append(device_id)
+        if description:
+            query_parts.append(description[:100])
+        
+        query = " ".join(query_parts)
+        
+        # Query RAG for relevant documentation
+        results = rag_engine.query(query, n_results=5)
+        
+        # Build structured response
+        insights = []
+        sources = []
+        
+        if results:
+            for r in results:
+                relevance = r.get('relevance_score', 0)
+                if relevance > 0.2:
+                    source = r['metadata'].get('source', 'Documentation')
+                    excerpt = r['text'][:500].strip()
+                    insights.append(f"**{source}** (relevance: {relevance:.0%}):\n{excerpt}")
+                    sources.append({"source": source, "relevance": relevance})
+        
+        if not insights:
+            insights = [
+                "No device-specific documentation found.",
+                "Ask in chat for AI-powered troubleshooting."
+            ]
+        
+        analysis = f"Found {len(sources)} relevant documents for {incident_type}"
+        actions = [
+            "Review documentation above",
+            "Ask follow-up questions in chat",
+            "Check device knowledge base"
+        ]
 
         logger.info(f"✅ Completed analysis for incident {incident_id}")
 
@@ -683,10 +756,14 @@ async def analyze_incident_background(incident_data: dict, callback_url: Optiona
                     f"{go_backend_url}/api/incidents/{incident_id}/analysis",
                     json={
                         "analysis_status": "completed",
-                        "analysis": result.analysis,
-                        "insights": result.insights,
-                        "actions": result.actions,
-                        "analysis_data": result.metadata,
+                        "analysis": analysis,
+                        "insights": insights,
+                        "actions": actions,
+                        "analysis_data": {
+                            "sources": sources,
+                            "severity": severity,
+                            "device_id": device_id
+                        },
                     }
                 )
             logger.info(f"✅ Saved analysis for incident {incident_id} to database")
