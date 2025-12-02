@@ -153,14 +153,13 @@ func (s *SQLiteDB) initSchema() error {
 			FOREIGN KEY (zone_id) REFERENCES zones(id)
 		);
 
-		CREATE TABLE IF NOT EXISTS knowledge_base_articles (
+		CREATE TABLE IF NOT EXISTS knowledge_base (
 			id TEXT PRIMARY KEY,
 			device_id TEXT NOT NULL,
-			title TEXT NOT NULL,
-			type TEXT,
+			manufacturer TEXT,
+			model TEXT,
+			content TEXT,
 			source TEXT,
-			description TEXT,
-			available BOOLEAN DEFAULT 1,
 			created_at DATETIME NOT NULL,
 			updated_at DATETIME NOT NULL,
 			FOREIGN KEY (device_id) REFERENCES devices(id)
@@ -170,7 +169,8 @@ func (s *SQLiteDB) initSchema() error {
 		CREATE INDEX IF NOT EXISTS idx_incidents_device ON incidents(device_id);
 		CREATE INDEX IF NOT EXISTS idx_devices_zone ON devices(zone_id);
 		CREATE INDEX IF NOT EXISTS idx_sensors_device ON sensors(device_id);
-		CREATE INDEX IF NOT EXISTS idx_knowledge_base_device ON knowledge_base_articles(device_id);
+		CREATE INDEX IF NOT EXISTS idx_kb_device ON knowledge_base(device_id);
+		CREATE INDEX IF NOT EXISTS idx_kb_model ON knowledge_base(manufacturer, model);
 		CREATE INDEX IF NOT EXISTS idx_zones_type ON zones(type);
 	`
 
@@ -591,38 +591,58 @@ func NewKnowledgeBaseRepo(db *SQLiteDB) *KnowledgeBaseRepo {
 	return &KnowledgeBaseRepo{db: db.db}
 }
 
-func (r *KnowledgeBaseRepo) GetByDevice(ctx context.Context, deviceID string) ([]KnowledgeBaseArticle, error) {
-	rows, err := r.db.QueryContext(ctx,
-		`SELECT id, device_id, title, type, source, description, available, created_at, updated_at
-		 FROM knowledge_base_articles WHERE device_id = ? ORDER BY created_at`, deviceID)
+func (r *KnowledgeBaseRepo) GetByDevice(ctx context.Context, deviceID string) (*KnowledgeBase, error) {
+	row := r.db.QueryRowContext(ctx,
+		`SELECT id, device_id, manufacturer, model, content, source, created_at, updated_at
+		 FROM knowledge_base WHERE device_id = ?`, deviceID)
+
+	var kb KnowledgeBase
+	err := row.Scan(&kb.ID, &kb.DeviceID, &kb.Manufacturer, &kb.Model, &kb.Content, &kb.Source, &kb.CreatedAt, &kb.UpdatedAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-
-	var articles []KnowledgeBaseArticle
-	for rows.Next() {
-		var article KnowledgeBaseArticle
-		err := rows.Scan(&article.ID, &article.DeviceID, &article.Title, &article.Type, &article.Source,
-			&article.Description, &article.Available, &article.CreatedAt, &article.UpdatedAt)
-		if err != nil {
-			return nil, err
-		}
-		articles = append(articles, article)
-	}
-	return articles, rows.Err()
+	return &kb, nil
 }
 
-func (r *KnowledgeBaseRepo) Upsert(ctx context.Context, article *KnowledgeBaseArticle) error {
+// GetByManufacturerModel finds KB from any device with the same manufacturer/model.
+// This enables model-level KB deduplication - generate once per model, share across all devices.
+func (r *KnowledgeBaseRepo) GetByManufacturerModel(ctx context.Context, manufacturer, model string) (*KnowledgeBase, error) {
+	row := r.db.QueryRowContext(ctx,
+		`SELECT id, device_id, manufacturer, model, content, source, created_at, updated_at
+		 FROM knowledge_base 
+		 WHERE manufacturer = ? AND model = ?
+		 LIMIT 1`, manufacturer, model)
+
+	var kb KnowledgeBase
+	err := row.Scan(&kb.ID, &kb.DeviceID, &kb.Manufacturer, &kb.Model, &kb.Content, &kb.Source, &kb.CreatedAt, &kb.UpdatedAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &kb, nil
+}
+
+func (r *KnowledgeBaseRepo) Upsert(ctx context.Context, kb *KnowledgeBase) error {
 	_, err := r.db.ExecContext(ctx,
-		`INSERT OR REPLACE INTO knowledge_base_articles (id, device_id, title, type, source, description, available, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		article.ID, article.DeviceID, article.Title, article.Type, article.Source,
-		article.Description, article.Available, article.CreatedAt, article.UpdatedAt)
+		`INSERT OR REPLACE INTO knowledge_base (id, device_id, manufacturer, model, content, source, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		kb.ID, kb.DeviceID, kb.Manufacturer, kb.Model, kb.Content, kb.Source, kb.CreatedAt, kb.UpdatedAt)
 	return err
 }
 
 func (r *KnowledgeBaseRepo) DeleteByDevice(ctx context.Context, deviceID string) error {
-	_, err := r.db.ExecContext(ctx, `DELETE FROM knowledge_base_articles WHERE device_id = ?`, deviceID)
+	_, err := r.db.ExecContext(ctx, `DELETE FROM knowledge_base WHERE device_id = ?`, deviceID)
+	return err
+}
+
+// DeleteByManufacturerModel deletes all KB entries for a given manufacturer/model.
+// Used when force-regenerating KB to prevent deduplication from copying old content.
+func (r *KnowledgeBaseRepo) DeleteByManufacturerModel(ctx context.Context, manufacturer, model string) error {
+	_, err := r.db.ExecContext(ctx, `DELETE FROM knowledge_base WHERE manufacturer = ? AND model = ?`, manufacturer, model)
 	return err
 }

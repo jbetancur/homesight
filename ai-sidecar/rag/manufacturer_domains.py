@@ -197,7 +197,7 @@ def _infer_primary_domain(manufacturer: str) -> Optional[str]:
         "aqara": "aqara.com",
         "homeseer": "homeseer.com",
         "inovelli": "inovelli.com",
-        "zooz": "zooz.com",
+        "zooz": "getzooz.com",  # Zooz uses getzooz.com as primary domain
         "ge": "byjasco.com",  # GE smart home is now Jasco
         "jasco": "byjasco.com",
     }
@@ -349,59 +349,11 @@ def register_discovered_domain(manufacturer: str, url: str):
         logger.debug(f"Failed to register domain from {url}: {e}")
 
 
-# Pre-populated known manufacturer domains (seed data)
-# This provides a starting point before auto-discovery kicks in
-KNOWN_MANUFACTURER_DOMAINS = {
-    "Zooz": [
-        "zooz.com",
-        "support.zooz.com",
-        "cdn.shopify.com",
-    ],
-    "Aqara": [
-        "aqara.com",
-        "support.aqara.com",
-        "cdn.aqara.cn",
-    ],
-    "Shelly": [
-        "shelly.cloud",
-        "kb.shelly.cloud",
-        "support.shelly.cloud",
-    ],
-    "Ring": [
-        "ring.com",
-        "support.ring.com",
-    ],
-    "Philips Hue": [
-        "philips-hue.com",
-        "www2.meethue.com",
-        "developers.meethue.com",
-    ],
-    "Samsung SmartThings": [
-        "smartthings.com",
-        "support.smartthings.com",
-    ],
-    "Sonoff": [
-        "sonoff.tech",
-        "support.sonoff.tech",
-    ],
-    "TP-Link": [
-        "tp-link.com",
-        "www.tp-link.com",
-        "support.tp-link.com",
-    ],
-}
-
-
 def initialize_known_domains():
     """
-    Initialize the registry with pre-populated known domains.
-
-    Call this once at startup to seed the domain registry.
+    No-op function for backwards compatibility.
+    
+    The system now learns domains dynamically from successful discoveries
+    rather than relying on hardcoded seed data.
     """
-    registry = get_registry()
-
-    for manufacturer, domains in KNOWN_MANUFACTURER_DOMAINS.items():
-        for domain in domains:
-            registry.add_domain(manufacturer, domain)
-
-    logger.info(f"Initialized domain registry with {len(KNOWN_MANUFACTURER_DOMAINS)} known manufacturers")
+    logger.info("Domain registry initialized (dynamic discovery mode)")

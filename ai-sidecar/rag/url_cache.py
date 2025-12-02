@@ -80,6 +80,11 @@ class URLCache:
         key = self.get_device_key(manufacturer, model)
         return key in self._cache
 
+    def get_entry(self, manufacturer: str, model: str) -> Optional[Dict[str, Any]]:
+        """Retrieve full cached entry including URL and metadata"""
+        key = self.get_device_key(manufacturer, model)
+        return self._cache.get(key)
+
     def stats(self) -> Dict[str, Any]:
         """Get cache statistics"""
         return {

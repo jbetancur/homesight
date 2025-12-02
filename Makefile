@@ -53,11 +53,11 @@ web-build:
 	@cd web-ui && npm run build
 
 # Docker commands - API
-docker-build-api: web-build
+docker-build-api:
 	@echo "Building API Docker image..."
 	@docker compose build api
 
-docker-rebuild-api: web-build
+docker-rebuild-api:
 	@echo "Rebuilding API Docker image (no cache)..."
 	@docker compose build --no-cache api
 

@@ -66,22 +66,28 @@ type TaskRepository interface {
 	Delete(ctx context.Context, id string) error
 }
 
-// KnowledgeBaseArticle represents a knowledge base article
-type KnowledgeBaseArticle struct {
-	ID          string
-	DeviceID    string
-	Title       string
-	Type        string
-	Source      string
-	Description string
-	Available   bool
-	CreatedAt   time.Time
-	UpdatedAt   time.Time
+// KnowledgeBase represents a single knowledge base document for a device
+// Simplified from multiple articles to one comprehensive document per device model
+type KnowledgeBase struct {
+	ID           string
+	DeviceID     string
+	Manufacturer string // For model-level deduplication
+	Model        string // For model-level deduplication
+	Content      string // Markdown content with all sections
+	Source       string // e.g., "Official Zooz Documentation + AI Summary"
+	CreatedAt    time.Time
+	UpdatedAt    time.Time
 }
 
-// KnowledgeBaseRepository manages knowledge base article persistence
+// KnowledgeBaseRepository manages knowledge base persistence
 type KnowledgeBaseRepository interface {
-	GetByDevice(ctx context.Context, deviceID string) ([]KnowledgeBaseArticle, error)
-	Upsert(ctx context.Context, article *KnowledgeBaseArticle) error
+	GetByDevice(ctx context.Context, deviceID string) (*KnowledgeBase, error)
+	// GetByManufacturerModel finds KB from any device with the same manufacturer/model
+	// Used for model-level deduplication - generate KB once per model, share across devices
+	GetByManufacturerModel(ctx context.Context, manufacturer, model string) (*KnowledgeBase, error)
+	Upsert(ctx context.Context, kb *KnowledgeBase) error
 	DeleteByDevice(ctx context.Context, deviceID string) error
+	// DeleteByManufacturerModel deletes all KB entries for a given manufacturer/model
+	// Used when force-regenerating KB to prevent deduplication from copying old content
+	DeleteByManufacturerModel(ctx context.Context, manufacturer, model string) error
 }

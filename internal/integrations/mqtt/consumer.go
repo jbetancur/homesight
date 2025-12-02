@@ -231,17 +231,25 @@ func (c *Consumer) handleDiscovery(integration, deviceID string, payload []byte)
 		UpdatedAt:   time.Now(),
 	}
 
-	// Preserve existing metadata (e.g., battery_level, firmware_version from Z-Wave integration)
-	if existingDevice != nil && existingDevice.Metadata != nil {
-		for k, v := range existingDevice.Metadata {
-			device.Metadata[k] = v
-		}
+	// Preserve existing device state (zone_id, asset_id, metadata, docs status, etc.)
+	if existingDevice != nil {
+		// Preserve zone and asset assignments (user-defined)
+		device.ZoneID = existingDevice.ZoneID
+		device.AssetID = existingDevice.AssetID
+		// Preserve alias (user-defined name)
+		device.Alias = existingDevice.Alias
 		// Preserve existing created_at
 		device.CreatedAt = existingDevice.CreatedAt
 		// Preserve docs ingestion status
 		device.DocsIngested = existingDevice.DocsIngested
 		device.DocsIngestedAt = existingDevice.DocsIngestedAt
 		device.DocsStatus = existingDevice.DocsStatus
+		// Preserve existing metadata (e.g., battery_level, firmware_version from Z-Wave integration)
+		if existingDevice.Metadata != nil {
+			for k, v := range existingDevice.Metadata {
+				device.Metadata[k] = v
+			}
+		}
 	}
 
 	if device.Name == "" {

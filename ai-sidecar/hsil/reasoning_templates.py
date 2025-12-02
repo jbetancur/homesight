@@ -592,8 +592,19 @@ class ScenarioDetector:
         if signature.temporal_conditions:
             for key, values in signature.temporal_conditions.items():
                 temporal_value = self._get_temporal_value(key, context)
-                if temporal_value and temporal_value in values:
-                    matched_conditions.append(f"temporal_{key}")
+                # Handle case where values might be bool or list
+                if temporal_value is not None:
+                    if isinstance(values, bool):
+                        # Boolean temporal condition
+                        if bool(temporal_value) == values:
+                            matched_conditions.append(f"temporal_{key}")
+                    elif isinstance(values, (list, tuple, set)):
+                        # List-based temporal condition
+                        if temporal_value in values:
+                            matched_conditions.append(f"temporal_{key}")
+                    elif temporal_value == values:
+                        # Direct value comparison
+                        matched_conditions.append(f"temporal_{key}")
 
         # Calculate confidence
         total_conditions = len(signature.threshold_conditions)

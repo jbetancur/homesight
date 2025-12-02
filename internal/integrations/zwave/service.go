@@ -107,6 +107,28 @@ func (s *Service) initialSync() {
 		// Map node to device
 		device := MapNodeToDevice(node, homeID)
 
+		// Check if device already exists to preserve user settings
+		deviceID := fmt.Sprintf("zwave-%d", node.NodeID)
+		existingDevice, _ := s.deviceRepo.Get(s.ctx, deviceID)
+		if existingDevice != nil {
+			// Preserve user-defined settings
+			device.ZoneID = existingDevice.ZoneID
+			device.AssetID = existingDevice.AssetID
+			device.Alias = existingDevice.Alias
+			device.CreatedAt = existingDevice.CreatedAt
+			device.DocsIngested = existingDevice.DocsIngested
+			device.DocsIngestedAt = existingDevice.DocsIngestedAt
+			device.DocsStatus = existingDevice.DocsStatus
+			// Preserve existing metadata entries
+			if existingDevice.Metadata != nil {
+				for k, v := range existingDevice.Metadata {
+					if _, exists := device.Metadata[k]; !exists {
+						device.Metadata[k] = v
+					}
+				}
+			}
+		}
+
 		// Set timestamps for initial discovery
 		now := time.Now()
 		device.LastSeen = now

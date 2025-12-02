@@ -22,7 +22,13 @@ prometheus:
 search:
   # Background vendor documentation indexer (crawls manufacturer sites weekly)
   enable_vendor_indexer: true
-  vendor_refresh_days: 7  # Days between full index refreshes
+  vendor_refresh_days: 7       # Days between full index refreshes
+  
+  # Search API settings
+  max_results: 10              # Max search results per query
+  search_timeout_seconds: 15   # HTTP timeout for search APIs
+  download_timeout_seconds: 30 # HTTP timeout for downloading PDFs
+  rate_limit_cooldown_seconds: 65  # Cooldown after rate limit (429) error
 
 rag:
   # Document ingestion batch sizes - tune these to balance between throughput and CPU usage
@@ -30,23 +36,15 @@ rag:
   # Larger batches = faster ingestion but higher CPU spike
   batch_size_documents: 3      # For PDF/official documentation ingestion
   batch_size_community: 2      # For community source (forum/reddit/etc) ingestion
-
-  # Known manufacturer documentation URL patterns
-  # These are checked before LLM to ensure reliability and provide direct access to official manuals
-  # Add more manufacturers here as needed - format is manufacturer_name -> base_url and product models
-  manufacturers:
-    Aqara:
-      base_url: "https://cdn.aqara.com/cdn/website/mainland/static/docs"
-      patterns:
-        # Maps product model IDs to known PDF filenames
-        "SJCGQ11LM": "Water-Leak-Sensor_Manuals_EU.pdf"
-        # Add more models as discovered:
-        # "MODEL_ID": "filename.pdf"
-    # Add more manufacturers below:
-    Zooz:
-      base_url: "https://manufacturer.com/path/to/docs"
-      patterns:
-        "ZSE42": "https://www.support.getzooz.com/kb/article/2240-zse42-water-leak-xs-sensor-user-manual"
+  
+  # Document processing
+  chunk_size: 2000             # Max characters per text chunk for embedding
+  min_document_length: 100     # Minimum chars for a document to be considered valid
+  
+  # Cache and performance
+  query_cache_max_size: 100    # Max number of cached query results
+  query_cache_ttl_seconds: 300 # Query cache TTL (5 minutes)
+  max_workers: 8               # Thread pool workers for async ingestion
 
 # Task queue configuration for background operations
 queues:

@@ -56,13 +56,27 @@ class RAGConfig(BaseModel):
     embedding_model: str = Field(default="BAAI/bge-small-en-v1.5")
     batch_size_documents: int = Field(default=3, description="Batch size for PDF/official documentation ingestion")
     batch_size_community: int = Field(default=2, description="Batch size for community source ingestion")
-    manufacturers: Dict[str, Dict[str, Any]] = Field(default_factory=dict, description="Known manufacturer documentation URL patterns")
+    
+    # Document processing
+    chunk_size: int = Field(default=2000, description="Max characters per text chunk for embedding")
+    min_document_length: int = Field(default=100, description="Minimum chars for a document to be valid")
+    
+    # Cache settings  
+    query_cache_max_size: int = Field(default=100, description="Max cached query results")
+    query_cache_ttl_seconds: int = Field(default=300, description="Query cache TTL in seconds")
+    max_workers: int = Field(default=8, description="Thread pool workers for async ingestion")
 
 
 class SearchConfig(BaseModel):
     """Web search API configuration"""
     enable_vendor_indexer: bool = Field(default=True, description="Enable background vendor documentation indexing")
     vendor_refresh_days: int = Field(default=7, description="Days between vendor index refreshes")
+    
+    # Search parameters
+    max_results: int = Field(default=10, description="Max search results per query")
+    search_timeout_seconds: float = Field(default=15.0, description="HTTP timeout for search APIs")
+    download_timeout_seconds: float = Field(default=30.0, description="HTTP timeout for downloading documents")
+    rate_limit_cooldown_seconds: int = Field(default=65, description="Cooldown after rate limit (429)")
 
     @property
     def brave_api_key(self) -> Optional[str]:
@@ -209,8 +223,16 @@ class Config(BaseModel):
                 rag_config_data['batch_size_documents'] = rag_section['batch_size_documents']
             if 'batch_size_community' in rag_section:
                 rag_config_data['batch_size_community'] = rag_section['batch_size_community']
-            if 'manufacturers' in rag_section:
-                rag_config_data['manufacturers'] = rag_section['manufacturers']
+            if 'chunk_size' in rag_section:
+                rag_config_data['chunk_size'] = rag_section['chunk_size']
+            if 'min_document_length' in rag_section:
+                rag_config_data['min_document_length'] = rag_section['min_document_length']
+            if 'query_cache_max_size' in rag_section:
+                rag_config_data['query_cache_max_size'] = rag_section['query_cache_max_size']
+            if 'query_cache_ttl_seconds' in rag_section:
+                rag_config_data['query_cache_ttl_seconds'] = rag_section['query_cache_ttl_seconds']
+            if 'max_workers' in rag_section:
+                rag_config_data['max_workers'] = rag_section['max_workers']
 
             # Build Search config
             search_config_data = {}
@@ -219,6 +241,14 @@ class Config(BaseModel):
                 search_config_data['enable_vendor_indexer'] = search_section['enable_vendor_indexer']
             if 'vendor_refresh_days' in search_section:
                 search_config_data['vendor_refresh_days'] = search_section['vendor_refresh_days']
+            if 'max_results' in search_section:
+                search_config_data['max_results'] = search_section['max_results']
+            if 'search_timeout_seconds' in search_section:
+                search_config_data['search_timeout_seconds'] = search_section['search_timeout_seconds']
+            if 'download_timeout_seconds' in search_section:
+                search_config_data['download_timeout_seconds'] = search_section['download_timeout_seconds']
+            if 'rate_limit_cooldown_seconds' in search_section:
+                search_config_data['rate_limit_cooldown_seconds'] = search_section['rate_limit_cooldown_seconds']
 
             # Build Weather config
             weather_config_data = {}

@@ -128,3 +128,108 @@
 .chat-markdown h3 {
   font-size: 1em;
 }
+
+/* Markdown content styling (Knowledge Base) */
+.markdown-content h1 {
+  font-size: 1.5em;
+  font-weight: 600;
+  margin: 1em 0 0.5em 0;
+  border-bottom: 1px solid var(--mantine-color-gray-3);
+  padding-bottom: 0.3em;
+}
+
+.markdown-content h2 {
+  font-size: 1.3em;
+  font-weight: 600;
+  margin: 1em 0 0.5em 0;
+  color: var(--mantine-color-blue-7);
+}
+
+.markdown-content h3 {
+  font-size: 1.1em;
+  font-weight: 600;
+  margin: 0.8em 0 0.4em 0;
+}
+
+.markdown-content h4 {
+  font-size: 1em;
+  font-weight: 600;
+  margin: 0.6em 0 0.3em 0;
+}
+
+.markdown-content p {
+  margin: 0.5em 0;
+}
+
+.markdown-content ul,
+.markdown-content ol {
+  margin: 0.5em 0;
+  padding-left: 1.5em;
+}
+
+.markdown-content li {
+  margin: 0.3em 0;
+}
+
+.markdown-content table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 1em 0;
+  font-size: 0.9em;
+}
+
+.markdown-content th,
+.markdown-content td {
+  border: 1px solid var(--mantine-color-gray-3);
+  padding: 0.5em 0.75em;
+  text-align: left;
+}
+
+.markdown-content th {
+  background-color: var(--mantine-color-gray-1);
+  font-weight: 600;
+}
+
+.markdown-content tr:nth-child(even) {
+  background-color: var(--mantine-color-gray-0);
+}
+
+.markdown-content tr:hover {
+  background-color: var(--mantine-color-blue-0);
+}
+
+.markdown-content code {
+  background: var(--mantine-color-gray-1);
+  padding: 0.1em 0.3em;
+  border-radius: 3px;
+  font-size: 0.9em;
+}
+
+.markdown-content pre {
+  background: var(--mantine-color-gray-1);
+  padding: 1em;
+  border-radius: 4px;
+  overflow-x: auto;
+  margin: 0.5em 0;
+}
+
+.markdown-content pre code {
+  background: none;
+  padding: 0;
+}
+
+.markdown-content blockquote {
+  border-left: 3px solid var(--mantine-color-blue-5);
+  margin: 0.5em 0;
+  padding-left: 1em;
+  color: var(--mantine-color-gray-7);
+}
+
+.markdown-content a {
+  color: var(--mantine-color-blue-6);
+  text-decoration: none;
+}
+
+.markdown-content a:hover {
+  text-decoration: underline;
+}

@@ -362,18 +362,30 @@ async def analyze(request: AnalyzeRequest):
         device_id = data.get("device_id", "")
         incident_type = data.get("type", "unknown")
         severity = data.get("severity", "unknown")
+        manufacturer = data.get("manufacturer", "")
+        model = data.get("model", "")
         
-        # Build RAG query from incident data
-        query_parts = [incident_type]
-        if device_id:
+        # Build RAG query from incident data - include manufacturer/model for better matching
+        query_parts = []
+        if manufacturer:
+            query_parts.append(manufacturer)
+        if model:
+            query_parts.append(model)
+        query_parts.append(incident_type)
+        if device_id and not model:  # Only add device_id if no model provided
             query_parts.append(device_id)
         if data.get("description"):
             query_parts.append(data["description"][:100])
         
         query = " ".join(query_parts)
         
-        # Query RAG for relevant documentation
-        results = rag_engine.query(query, n_results=5)
+        # Build manufacturer filter for ChromaDB if manufacturer specified
+        where_filter = None
+        if manufacturer:
+            where_filter = {"manufacturer": manufacturer.title()}
+        
+        # Query RAG for relevant documentation with manufacturer filter
+        results = rag_engine.query(query, n_results=5, where=where_filter)
         
         # Build structured response from RAG results
         insights = []
@@ -430,8 +442,7 @@ async def chat(request: ChatRequest):
     """
     Simple OpenAI chat endpoint for knowledge base generation.
     
-    This is a lightweight chat endpoint that uses OpenAI directly
-    for generating device knowledge base articles and similar tasks.
+    This endpoint uses RAG to ground responses in actual device documentation.
     For conversational AI with context, use /hsil/chat instead.
     """
     if not llm_provider:
@@ -441,18 +452,115 @@ async def chat(request: ChatRequest):
         raise HTTPException(status_code=503, detail="OpenAI client not available")
     
     try:
-        # Build simple message list
+        # Extract device info from context or message for RAG lookup
+        rag_context = ""
+        if rag_engine:
+            message_lower = request.message.lower()
+            
+            # Get device info from context if provided
+            ctx = request.context or {}
+            manufacturer_filter = ctx.get("manufacturer")
+            model_filter = ctx.get("model")
+            device_name = ctx.get("device_name")  # Often contains actual model number
+            
+            # Fall back to extracting from message if not in context
+            if not manufacturer_filter:
+                manufacturers = ["zooz", "aqara", "philips", "hue", "lutron", "honeywell", "ecobee", "ring", "nest", "yale", "schlage", "kwikset"]
+                for mfg in manufacturers:
+                    if mfg in message_lower:
+                        manufacturer_filter = mfg.title()
+                        break
+            
+            # Build RAG query from message
+            rag_query = request.message
+            
+            # Query RAG for relevant documentation
+            # Try multiple filter strategies to find best match
+            try:
+                rag_results = None
+                filter_used = None
+                
+                # Strategy 1: Try model match first
+                if model_filter and manufacturer_filter:
+                    where_filter = {"$and": [
+                        {"manufacturer": manufacturer_filter},
+                        {"model": model_filter}
+                    ]}
+                    rag_results = rag_engine.query(rag_query, n_results=5, where=where_filter)
+                    if rag_results:
+                        filter_used = f"model={model_filter}"
+                
+                # Strategy 2: Try device_name as model (often contains actual model number like ZST39)
+                if not rag_results and device_name and manufacturer_filter:
+                    where_filter = {"$and": [
+                        {"manufacturer": manufacturer_filter},
+                        {"model": device_name}
+                    ]}
+                    rag_results = rag_engine.query(rag_query, n_results=5, where=where_filter)
+                    if rag_results:
+                        filter_used = f"device_name={device_name}"
+                        logger.info(f"Found RAG results using device_name '{device_name}' as model")
+                
+                # Strategy 3: Try manufacturer only
+                if not rag_results and manufacturer_filter:
+                    logger.info(f"No results with model filters, trying manufacturer only")
+                    where_filter = {"manufacturer": manufacturer_filter}
+                    rag_results = rag_engine.query(rag_query, n_results=5, where=where_filter)
+                    if rag_results:
+                        filter_used = f"manufacturer={manufacturer_filter}"
+                
+                if rag_results:
+                    # Build context from RAG results
+                    rag_docs = []
+                    for r in rag_results:
+                        # RAG engine returns 'text' key, not 'content'
+                        content = r.get("text", "") or r.get("content", "")
+                        source = r.get("metadata", {}).get("source", "Unknown")
+                        if content:
+                            rag_docs.append(f"[Source: {source}]\n{content}")
+                    
+                    if rag_docs:
+                        rag_context = "\n\n---\n\n".join(rag_docs[:3])  # Use top 3 results
+                        logger.info(f"RAG context found: {len(rag_docs)} documents, {len(rag_context)} chars (filter={filter_used}, device_name={device_name})")
+            except Exception as e:
+                logger.warning(f"RAG query failed (continuing without context): {e}")
+        
+        # Build system prompt with RAG context
+        system_prompt = """You are a helpful assistant for home automation and device documentation.
+
+CRITICAL RULES:
+1. ONLY use information from the provided documentation context below.
+2. NEVER invent or guess specifications like battery types, dimensions, or technical details.
+3. If information is not in the provided documentation, say "Specification not available from manufacturer documentation."
+4. Be precise and factual - accuracy is more important than completeness.
+"""
+        
+        if rag_context:
+            system_prompt += f"""
+--- OFFICIAL DOCUMENTATION CONTEXT ---
+The following is extracted from official manufacturer documentation. Use ONLY this information:
+
+{rag_context}
+
+--- END DOCUMENTATION ---
+"""
+        else:
+            system_prompt += """
+Note: No official documentation was found in the knowledge base. Generate a minimal response and clearly indicate that specifications should be verified with official manufacturer documentation.
+"""
+        
+        # Build message list
         messages = [
-            {"role": "system", "content": "You are a helpful assistant for home automation and device documentation."},
+            {"role": "system", "content": system_prompt},
             {"role": "user", "content": request.message}
         ]
         
-        # Use OpenAI directly for this simple chat (knowledge generation)
+        # Use OpenAI for KB generation
         response_text, _ = llm_provider.chat(
             messages=messages,
             tools=None,
-            temperature=0.7,
-            max_tokens=1000,
+            temperature=0.3,  # Lower temperature for more factual responses
+            max_tokens=1500,
             override_mode='cloud'  # Always use OpenAI for KB generation
         )
         
@@ -559,11 +667,13 @@ async def update_device_docs_status(device_id: str, discovery_result: dict):
         update_payload = {
             "status": status,
             "ingested": ingested,
-            "ingested_at": None  # Let the Go backend set the timestamp
+            "ingested_at": None,  # Let the Go backend set the timestamp
+            "kb_content": discovery_result.get("kb_content"),  # Pass generated KB content
+            "source_urls": discovery_result.get("source_urls", []),  # Pass source URLs
         }
 
         url = f"{config.backend_url}/api/devices/{device_id}/docs-status"
-        logger.info(f"Posting to {url} with payload: {update_payload}")
+        logger.info(f"Posting to {url} with payload: status={status}, ingested={ingested}, kb_content={'yes' if update_payload['kb_content'] else 'no'}")
 
         async with httpx.AsyncClient(timeout=15) as client:
             response = await client.post(url, json=update_payload)

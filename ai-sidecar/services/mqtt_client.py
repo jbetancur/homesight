@@ -9,10 +9,39 @@ import json
 import logging
 from typing import Callable, Optional, Dict, Any
 from datetime import datetime
+from urllib.parse import urlparse
 
 import paho.mqtt.client as mqtt
 
 logger = logging.getLogger(__name__)
+
+
+def parse_mqtt_url(url: str, default_port: int = 1883) -> tuple[str, int]:
+    """
+    Parse MQTT broker URL to extract hostname and port.
+    
+    Handles formats:
+    - tcp://hostname:port
+    - mqtt://hostname:port
+    - hostname:port
+    - hostname
+    
+    Args:
+        url: MQTT broker URL
+        default_port: Default port if not specified
+    
+    Returns:
+        Tuple of (hostname, port)
+    """
+    # Add scheme if missing for urlparse to work
+    if "://" not in url:
+        url = f"tcp://{url}"
+    
+    parsed = urlparse(url)
+    hostname = parsed.hostname or "localhost"
+    port = parsed.port or default_port
+    
+    return hostname, port
 
 
 class HomeSightMQTTClient:
@@ -30,14 +59,16 @@ class HomeSightMQTTClient:
         Initialize MQTT client.
 
         Args:
-            broker_url: MQTT broker hostname/IP
-            broker_port: MQTT broker port (default: 1883)
+            broker_url: MQTT broker URL (supports tcp://host:port, mqtt://host:port, host:port, host)
+            broker_port: MQTT broker port (default: 1883, overridden if URL contains port)
             client_id: MQTT client ID
             username: Optional MQTT username
             password: Optional MQTT password
         """
-        self.broker_url = broker_url
-        self.broker_port = broker_port
+        # Parse URL to extract hostname and port
+        self.broker_url, url_port = parse_mqtt_url(broker_url, broker_port)
+        # Use port from URL if present, otherwise use provided port
+        self.broker_port = url_port
 
         self.client = mqtt.Client(client_id=client_id)
 
@@ -111,13 +142,19 @@ class HomeSightMQTTClient:
         # Parse topic: homesight/<integration>/<deviceId>/<messageType>
         parts = topic.split("/")
 
-        if len(parts) < 4 or parts[0] != "homesight":
+        if len(parts) < 2 or parts[0] != "homesight":
             return
 
-        # Handle incident messages
+        # Handle incident messages (homesight/incidents/# - can be 3+ parts)
         if parts[1] == "incidents":
+            logger.debug(f"Received incident message on {topic}")
             if self._incident_callback:
                 self._incident_callback(payload)
+            return
+
+        # For device messages, need at least 4 parts
+        if len(parts) < 4:
+            logger.debug(f"Ignoring message with unexpected topic format: {topic}")
             return
 
         integration = parts[1]

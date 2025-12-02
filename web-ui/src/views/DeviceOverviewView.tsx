@@ -9,6 +9,7 @@ import {
   AlertCircle, CheckCircle, Battery, Zap, Power, Eye, Edit2
 } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import { useEventSubscription } from '../useEventSubscription';
 import { API_BASE_WITH_PATHS } from '../apiConfig';
 import { CapabilityWidget } from '../components/DeviceCapabilityWidgets';
@@ -50,17 +51,13 @@ interface Device {
 interface KnowledgeBase {
   device_id: string;
   device_name: string;
-  search_query: string;
   docs_status: string;
   docs_ingested: boolean;
   ingested_at?: string;
-  articles: Array<{
-    title: string;
-    type: string;
-    source: string;
-    description: string;
-    available: boolean;
-  }>;
+  content?: string;
+  source?: string;
+  manufacturer?: string;
+  model?: string;
 }
 
 function getSensorIcon(type: string) {
@@ -949,33 +946,25 @@ export function DeviceOverviewView() {
               </Text>
             </div>
 
-            {knowledgeBase && knowledgeBase.articles.length > 0 && (
+            {knowledgeBase && knowledgeBase.content && (
               <div>
-                <Title order={5} mb="md">
-                  Knowledge Base Articles
-                </Title>
-                <Stack gap="md">
-                  {knowledgeBase.articles.map((article, idx) => (
-                    <Paper key={idx} p="md" withBorder bg={article.available ? 'blue.0' : 'gray.0'}>
-                      <Group justify="space-between" align="flex-start" mb="xs">
-                        <div style={{ flex: 1 }}>
-                          <Text size="sm" fw={600}>{article.title}</Text>
-                          <Text size="xs" c="dimmed" mt="xs">
-                            {article.source}
-                          </Text>
-                        </div>
-                        <Badge size="sm" variant={article.available ? 'light' : 'outline'} color={article.available ? 'green' : 'gray'}>
-                          {article.available ? 'Available' : 'Pending'}
-                        </Badge>
-                      </Group>
-                      <div style={{ fontSize: '0.875rem', lineHeight: 1.5 }}>
-                        <ReactMarkdown>{article.description}</ReactMarkdown>
-                      </div>
-                    </Paper>
-                  ))}
-                </Stack>
+                <Group justify="space-between" align="center" mb="md">
+                  <Title order={5}>Knowledge Base</Title>
+                  {knowledgeBase.source && (
+                    <Text size="xs" c="dimmed">{knowledgeBase.source}</Text>
+                  )}
+                </Group>
+                <Paper p="md" withBorder>
+                  <div style={{ fontSize: '0.875rem', lineHeight: 1.6 }} className="markdown-content">
+                    <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                      {knowledgeBase.content
+                        .replace(/^```(?:markdown)?\s*\n?/i, '')
+                        .replace(/\n?```\s*$/i, '')}
+                    </ReactMarkdown>
+                  </div>
+                </Paper>
                 <Text size="sm" c="dimmed" mt="md">
-                  You can use the AI chat feature to ask questions about this device based on these knowledge base articles.
+                  You can use the AI chat feature to ask questions about this device based on this knowledge base.
                 </Text>
               </div>
             )}

@@ -22,6 +22,12 @@ logger = logging.getLogger(__name__)
 # Import metrics
 from metrics.metrics import rag_retrieval_duration, rag_retrievals
 
+# Import document ranker for source-aware relevance scoring
+from rag.document_ranker import DocumentRanker, get_ranker
+
+# Import shared utilities for consistent normalization
+from rag.utils import normalize_manufacturer, build_chromadb_where
+
 
 class RAGEngine:
     """RAG engine using ChromaDB with FastEmbed for fully offline operation"""
@@ -106,6 +112,10 @@ class RAGEngine:
         self._ingestion_lock = threading.Lock()
         self._ingestion_queue: asyncio.Queue = None
         self._ingestion_worker_task = None
+
+        # Initialize document ranker for source-aware relevance scoring
+        # This ranks fresher HTML sources higher than outdated PDFs
+        self._document_ranker = get_ranker()
 
         logger.info(f"RAG engine initialized with local embeddings (offline mode, {max_workers} workers)")
     
@@ -212,16 +222,25 @@ class RAGEngine:
         self,
         query_text: str,
         n_results: int = 5,
-        where: Optional[Dict[str, Any]] = None
+        where: Optional[Dict[str, Any]] = None,
+        apply_ranking: bool = True
     ) -> List[Dict[str, Any]]:
         """
-        Query for relevant documents with caching
+        Query for relevant documents with caching and source-aware ranking
 
         Returns documents with relevance scores (1 - distance).
         Higher relevance scores are better (closer to 1 = more relevant).
 
+        When apply_ranking=True (default), results are re-ranked based on:
+        - Semantic relevance (50% weight)
+        - Source quality: official_pdf > manufacturer_html > ai_generated (30% weight)
+        - Freshness: newer documents ranked higher (20% weight)
+
+        This means fresher HTML sources may rank above older PDFs when their
+        semantic relevance is comparable.
+
         Caching Strategy:
-        - Cache key: (query_text, n_results, where_clause_hash)
+        - Cache key: (query_text, n_results, where_clause_hash, apply_ranking)
         - TTL: 5 minutes
         - Max size: 100 queries
         - Thread-safe
@@ -231,7 +250,7 @@ class RAGEngine:
 
         # Generate cache key
         where_hash = hashlib.md5(str(where).encode()).hexdigest() if where else "none"
-        cache_key = (query_text, n_results, where_hash)
+        cache_key = (query_text, n_results, where_hash, apply_ranking)
 
         # Check cache
         with self._query_cache_lock:
@@ -250,9 +269,11 @@ class RAGEngine:
 
         try:
             # Cache miss - query collection (ChromaDB handles query embedding automatically)
+            # Fetch more results for ranking to work effectively
+            fetch_n = n_results * 3 if apply_ranking else n_results
             results = self.collection.query(
                 query_texts=[query_text],
-                n_results=n_results,
+                n_results=fetch_n,
                 where=where
             )
 
@@ -272,6 +293,19 @@ class RAGEngine:
                     'distance': distance,
                     'relevance_score': relevance,
                 })
+
+            # Apply source-aware ranking if enabled
+            if apply_ranking and formatted_results:
+                scored_results = self._document_ranker.rank_results(formatted_results)
+                # Convert DocumentScore objects back to dict format
+                formatted_results = []
+                for scored in scored_results[:n_results]:
+                    doc = scored.document.copy()
+                    doc['ranked_score'] = scored.total_score
+                    doc['source_type_score'] = scored.source_type_score
+                    doc['freshness_score'] = scored.freshness_score
+                    doc['inferred_source_type'] = scored.source_type
+                    formatted_results.append(doc)
 
             # Track status based on results
             if len(formatted_results) == 0:
@@ -304,8 +338,8 @@ class RAGEngine:
     def delete_device_docs(self, manufacturer: str, model: str) -> bool:
         """Delete all documents for a specific device from the RAG database"""
         try:
-            # Use ChromaDB where clause to find and delete documents for this device
-            where = {"$and": [{"manufacturer": manufacturer.title()}, {"model": model}]}
+            # Use shared utility for consistent ChromaDB where clause
+            where = build_chromadb_where(manufacturer, model)
             # Get IDs to delete
             results = self.collection.get(where=where)
             if results and results.get('ids'):

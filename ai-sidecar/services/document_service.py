@@ -114,6 +114,7 @@ class DocumentService:
             "manufacturer": manufacturer,
             "model": model,
             "sources_found": [],
+            "source_urls": [],  # Track documentation source URLs
             "force_refresh": force
         }
 
@@ -126,8 +127,11 @@ class DocumentService:
             # 1. PRIMARY: Fetch official documentation PDFs if available
             # This provides the authoritative source we want OpenAI to ground against.
             doc_path = None
+            source_url = None
+            logger.info(f"Starting doc fetch for {manufacturer} {model}")
             try:
                 official_success = await self.fetcher.fetch_for_device(device, force=force)
+                logger.info(f"Fetch result for {manufacturer} {model}: official_success={official_success}")
                 tracker.set_pdf_status(manufacturer, model, official_success)
                 if official_success:
                     results["sources_found"].append("official_pdf_manual")
@@ -139,12 +143,26 @@ class DocumentService:
                             cached = f._is_cached(model)
                             if cached:
                                 doc_path = cached
+                                logger.info(f"Found cached PDF via specialized fetcher: {doc_path}")
                                 break
 
                         # Fallback to generic cache
                         if not doc_path:
                             doc_path = self.fetcher.generic_fetcher._is_cached(model)
-                    except Exception:
+                            logger.info(f"generic_fetcher._is_cached({model}) returned: {doc_path}")
+                            if doc_path:
+                                logger.info(f"Found cached PDF via generic fetcher: {doc_path}")
+                        
+                        if not doc_path:
+                            logger.warning(f"PDF fetch succeeded but cache lookup failed for model: {model}")
+                        
+                        # Get source URL for documentation references
+                        source_url = self.fetcher.get_source_url(manufacturer, model)
+                        if source_url:
+                            results["source_urls"].append(source_url)
+                            logger.info(f"Source URL for {manufacturer} {model}: {source_url}")
+                    except Exception as e:
+                        logger.warning(f"Cache lookup exception for {model}: {e}")
                         doc_path = None
             except Exception as e:
                 logger.debug(f"Official PDF fetch failed (optional): {e}")
@@ -166,9 +184,17 @@ class DocumentService:
                         documentation_text = None
 
                 if self.openai_api_key:
-                    content_len = await self._generate_comprehensive_knowledge(device, documentation_text=documentation_text)
-                    tracker.set_ai_generation(manufacturer, model, True, content_len)
-                    results["sources_found"].append("ai_generated_knowledge")
+                    kb_content = await self._generate_comprehensive_knowledge(
+                        device, 
+                        documentation_text=documentation_text,
+                        source_urls=results.get("source_urls", [])
+                    )
+                    if kb_content:
+                        tracker.set_ai_generation(manufacturer, model, True, len(kb_content))
+                        results["sources_found"].append("ai_generated_knowledge")
+                        results["kb_content"] = kb_content  # Include generated content for Go backend
+                    else:
+                        tracker.set_ai_generation(manufacturer, model, False, 0)
             except Exception as e:
                 logger.error(f"Knowledge generation failed: {e}")
                 tracker.set_ai_generation(manufacturer, model, False, 0)
@@ -217,7 +243,12 @@ class DocumentService:
             logger.error(f"Error adding documents to RAG: {e}")
 
 
-    async def _generate_comprehensive_knowledge(self, device: Dict[str, Any], documentation_text: Optional[str] = None) -> int:
+    async def _generate_comprehensive_knowledge(
+        self, 
+        device: Dict[str, Any], 
+        documentation_text: Optional[str] = None,
+        source_urls: Optional[List[str]] = None
+    ) -> Optional[str]:
         """
         Generate structured knowledge base entry using OpenAI.
 
@@ -232,12 +263,18 @@ class DocumentService:
         - Maintenance
         - Integration & compatibility
         - Warranty & support
+        - Source references (links to official documentation)
+
+        Args:
+            device: DeviceProfile with device metadata
+            documentation_text: Optional PDF/manual text to ground against
+            source_urls: Optional list of source URLs to include as references
 
         Returns:
-            Length of generated content in characters
+            Generated KB content as string, or None if generation failed
         """
         if not self.openai_api_key:
-            return 0
+            return None
 
         try:
             from openai import AsyncOpenAI
@@ -252,6 +289,9 @@ class DocumentService:
             if documentation_text:
                 # Limit to first ~30k chars to keep prompt reasonable
                 doc_text_snippet = documentation_text[:30000]
+
+            # Build source references section instruction
+            # NOTE: Source URLs are now appended directly to generated content, not via prompt
 
             prompt = f"""You are a technical documentation expert. You will generate a COMPREHENSIVE, DETAILED knowledge base entry for a device using ONLY verifiable information from the provided input text and publicly known manufacturer data.
 
@@ -285,80 +325,79 @@ Source Documentation:
 OUTPUT STRUCTURE
 Generate a Markdown document with the following sections.
 
-1. DEVICE SPECIFICATIONS
-- Exact model number & variants
-- Physical dimensions & weight
-- Communication protocol(s)
-- Battery type (EXACT model only if confirmed)
+## Overview
+- Device description and primary purpose
+- Key features (list ALL from documentation)
+- Typical use cases
+- Placement recommendations (indoor/outdoor, IP rating if applicable)
+
+## Installation
+- Step-by-step physical installation
+- Battery installation (EXACT battery type, how to access battery compartment)
+- Initial LED indicator behavior
+- QR code/SmartStart information if applicable
+
+## Configuration
+- Pairing/inclusion procedure (EXACT button sequences and timing, step by step)
+- Exclusion procedure (EXACT steps)
+- Factory reset procedure (EXACT button sequence and timing)
+- Wake-up mode (default interval, how to manually wake, how to adjust)
+- Association groups (list ALL groups with group numbers, purposes, max devices)
+- **Advanced Parameters Table** - Create a COMPLETE table with ALL parameters:
+  | Parameter | Description | Values | Default | Size |
+  Include EVERY parameter from the documentation, not just important ones
+- Command class details and supported features
+- LED indicator patterns and meanings (all colors, blink patterns)
+
+## Troubleshooting
+- Device not pairing/responding (specific solutions)
+- LED indicator not working
+- False alerts or missed detections
+- Connectivity/range issues
+- Battery issues
+- Include EXACT troubleshooting steps from documentation
+
+## Specifications
+- Model number (exact, including all variants like 800LR)
+- Power source (EXACT battery type: e.g., CR2450, not just "coin cell")
 - Expected battery life
 - Operating temperature range
-- Wireless range
+- Storage temperature range
+- Wireless range (normal and Long Range if applicable)
+- Physical dimensions (L x W x H)
+- Weight
+- IP rating (if applicable)
+- Supported command classes (list ALL with versions, e.g., ASSOCIATION_V3)
+- Z-Wave frequency
+- Certification information
+- Compatibility information
+- Warranty details
 
 For any unavailable spec, write:
 "Specification not available from manufacturer documentation."
 
 ---
 
-2. SETUP & PAIRING
-- Step-by-step pairing instructions
-- Factory reset instructions
-- LED indicator chart
-- Troubleshooting for failed pairing
-
-If missing, write:
-"Procedure not available from manufacturer documentation."
-
----
-
-3. COMMON ISSUES & SOLUTIONS
-- Known issues
-- Confirmed troubleshooting procedures
-- Signal problems
-- Battery-related behaviors
-
-Do NOT fabricate issues or fixes.
-
----
-
-4. MAINTENANCE
-- Cleaning
-- Battery replacement
-- Firmware update availability
-- Long-term reliability notes
-
-If not documented, note:
-"Information not available from manufacturer documentation."
-
----
-
-5. INTEGRATION & COMPATIBILITY
-- Confirmed compatible hubs/platforms
-- Protocol details
-- Automation examples based ONLY on known behavior
-
-If compatibility is unknown, state so.
-
----
-
-6. WARRANTY & SUPPORT
-- Warranty length (if known)
-- Manufacturer support links
-- Documentation links
-
----
-
 STYLE REQUIREMENTS
-- Use precise, technical language.
-- NEVER assume or guess missing information.
-- If unsure, explicitly mark the data as unavailable.
-- Use tables where appropriate.
-- Keep formatting structured and consistent for ingestion into a knowledge base."""
+- Extract ALL specific values, procedures, and technical details from the documentation
+- Use precise, technical language
+- NEVER assume or guess missing information
+- If unsure, explicitly mark the data as unavailable
+- Use bullet points and numbered lists for procedures
+- Keep formatting structured and consistent for ingestion into a knowledge base
+- For tables, use PROPER markdown table format with each row on its own line:
+  ```
+  | Column 1 | Column 2 |
+  |----------|----------|
+  | Value 1  | Value 2  |
+  ```
+- NEVER put multiple table rows on the same line"""
 
             # Build messages; include documentation_text if present and instruct model to use it
             messages = [
                 {
                     "role": "system",
-                    "content": """You are an expert technical writer generating device documentation.
+                    "content": """You are an expert technical writer generating EXHAUSTIVE device documentation.
 Follow these rules STRICTLY:
 
 1. USE ONLY information explicitly provided in the user prompt or the provided documentation text.
@@ -368,7 +407,16 @@ Follow these rules STRICTLY:
 5. ALWAYS write in third-person factual style: "Specification not available", "Documentation not provided", etc.
 6. If no documentation is provided, generate a minimal template with all sections marked as unavailable.
 7. Output must be structured Markdown suitable for knowledge base ingestion.
-8. Accuracy is more important than completeness.
+8. EXTRACT EVERYTHING - do not summarize. Include ALL details, ALL parameters, ALL steps.
+9. Generate LONG, COMPREHENSIVE documentation. Aim for 3000-5000 words when source documentation is provided.
+10. Include COMPLETE parameter tables with every parameter number, description, values, and defaults.
+11. CRITICAL: For markdown tables, put EACH ROW on its own line. Never combine rows.
+
+TABLE FORMAT EXAMPLE (follow exactly):
+| Parameter | Description | Default |
+|-----------|-------------|---------|
+| 1         | LED on/off  | 1       |
+| 2         | Report time | 0       |
 
 UNACCEPTABLE OUTPUT EXAMPLES (NEVER USE):
 ❌ "I couldn't find specific information about..."
@@ -385,9 +433,22 @@ ACCEPTABLE OUTPUT EXAMPLES:
 
             user_payload = f"Manufacturer: {manufacturer}\nModel: {model}\nType: {device_type}\n\n"
             if doc_text_snippet:
+                logger.info(f"KB generation for {manufacturer} {model}: using {len(doc_text_snippet)} chars of documentation")
                 user_payload += f"Source Documentation:\n\n{doc_text_snippet}\n\n"
-                user_payload += "Please generate the structured knowledge base entry as described, using ONLY information from the documentation above."
+                user_payload += """Generate an EXHAUSTIVE and COMPREHENSIVE knowledge base entry. This should be a LONG, DETAILED document.
+
+CRITICAL REQUIREMENTS:
+- Extract EVERY piece of information from the documentation - do not summarize or abbreviate
+- Include ALL parameter numbers, ALL values, ALL button sequences verbatim
+- List EVERY command class, EVERY association group, EVERY specification
+- Copy exact wording for procedures - do not paraphrase
+- Include ALL troubleshooting steps, not just a summary
+- The output should be 3000-5000 words minimum
+- Better to include too much detail than too little
+
+Include ALL sections: Overview, Installation, Configuration (with FULL parameter tables), Troubleshooting, and Specifications."""
             else:
+                logger.info(f"KB generation for {manufacturer} {model}: NO documentation available")
                 user_payload += "Source Documentation: NOT PROVIDED\n\n"
                 user_payload += """Since no official documentation was provided, generate a minimal knowledge base template with the required sections.
 For each section, state: "Specification not available from manufacturer documentation."
@@ -409,13 +470,21 @@ Do NOT attempt to fill in details from general knowledge. Keep entries factual a
                 # GPT-5-mini uses reasoning_tokens extensively, need much higher limits
                 kwargs["max_completion_tokens"] = 16000
             else:
-                kwargs["max_tokens"] = 2000
+                kwargs["max_tokens"] = 8000  # High limit for exhaustive KB extraction
 
             response = await client.chat.completions.create(**kwargs)
 
             content = response.choices[0].message.content
 
+            # Append source URLs section if available (don't rely on model to include them)
+            if source_urls:
+                sources_section = "\n\n## Sources\n"
+                for url in source_urls:
+                    sources_section += f"- [{url}]({url})\n"
+                content = content + sources_section
+
             # Ingest generated content into RAG (use helper for compatibility)
+            import datetime
             metadata = {
                 "source": f"{manufacturer} {model} - Comprehensive Knowledge Base (AI)",
                 "manufacturer": manufacturer,
@@ -424,13 +493,16 @@ Do NOT attempt to fill in details from general knowledge. Keep entries factual a
                 "category": "comprehensive_knowledge",
                 "auto_generated": True,
                 "generation_method": "openai_curated",
+                # Source-aware ranking metadata (AI-generated has lower source quality)
+                "source_type": "ai_generated",
+                "fetched_at": datetime.datetime.now().isoformat(),
             }
 
             documents = [{"text": content, "metadata": metadata}]
             await self._rag_add_documents(documents, batch_size=1)
             logger.info(f"✅ Generated comprehensive knowledge for {manufacturer} {model} ({len(content)} chars)")
-            return len(content)
+            return content
 
         except Exception as e:
             logger.error(f"Comprehensive knowledge generation failed: {e}")
-            return 0
+            return None

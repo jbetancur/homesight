@@ -35,7 +35,9 @@ import urllib.parse
 
 from .url_cache import URLCache
 from .search_api import SearchAPI, SearchResult
-from .manufacturer_domains import get_manufacturer_domains, register_discovered_domain
+from .manufacturer_domains import get_manufacturer_domains, register_discovered_domain, get_registry
+from .http_client import url_exists, download_content, get_client, Timeouts
+from .utils import normalize_manufacturer, build_chromadb_where
 from vendor_indexer import VendorDocumentStorage, VendorIndexScheduler, get_scheduler
 
 logger = logging.getLogger(__name__)
@@ -297,46 +299,6 @@ The ranked_indices should be result numbers (1-based) in order of best to worst.
 
 
 # --------------------------------------------------------------------------------------
-# Shared HTTP utilities
-# --------------------------------------------------------------------------------------
-
-
-async def url_exists(url: str) -> bool:
-    """Check if a URL is accessible."""
-    try:
-        async with httpx.AsyncClient(timeout=5.0, follow_redirects=True) as client:
-            resp = await client.head(url)
-            if resp.status_code == 200:
-                return True
-    except Exception:
-        pass
-
-    # Fallback to GET
-    try:
-        async with httpx.AsyncClient(timeout=8.0, follow_redirects=True) as client:
-            resp = await client.get(url)
-            return resp.status_code == 200
-    except Exception:
-        return False
-
-
-async def download_url_to_path(url: str, dest_path: Path) -> bool:
-    """Download content from URL and write to dest path."""
-    try:
-        async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
-            resp = await client.get(url)
-            if resp.status_code != 200:
-                logger.warning(f"Failed to download from {url}: HTTP {resp.status_code}")
-                return False
-            dest_path.parent.mkdir(parents=True, exist_ok=True)
-            dest_path.write_bytes(resp.content)
-            return True
-    except Exception as e:
-        logger.error(f"Error downloading {url}: {e}")
-        return False
-
-
-# --------------------------------------------------------------------------------------
 # Manufacturer fetcher base + Generic fetcher
 # --------------------------------------------------------------------------------------
 
@@ -400,7 +362,8 @@ class GenericFetcher(ManufacturerFetcher):
         self,
         model: str,
         manufacturer: Optional[str] = None,
-        device_type: Optional[str] = None
+        device_type: Optional[str] = None,
+        device_name: Optional[str] = None
     ) -> Optional[Path]:
 
         # -------------------------------
@@ -430,6 +393,17 @@ class GenericFetcher(ManufacturerFetcher):
             for doc in indexed_docs[:3]:
                 downloaded = await self._download_from_url(model, doc.url)
                 if downloaded:
+                    # Validate the downloaded document matches the device
+                    if not self._validate_document_matches_device(downloaded, manufacturer, model, device_type, device_name):
+                        logger.warning(f"[Tier 1] Document from vendor index failed validation: {doc.url}")
+                        # Remove the invalid document
+                        try:
+                            downloaded.unlink()
+                            downloaded.parent.rmdir()
+                        except Exception:
+                            pass
+                        continue
+                    
                     self.vendor_storage.update_last_verified(doc.url)
                     logger.info(f"✅ [Tier 1] Downloaded from vendor index: {doc.url}")
                     return downloaded
@@ -437,42 +411,74 @@ class GenericFetcher(ManufacturerFetcher):
             logger.info("[Tier 1] Indexed URLs failed, continuing → Tier 2")
 
         # -------------------------------
-        # TIER 2 — Unified Web Search
+        # TIER 2 — Unified Web Search (Discovery Mode)
         # -------------------------------
         logger.info(f"[Tier 2] Searching web for {manufacturer} {model}")
 
-        # Manufacturer domains for scoping
-        domains = get_manufacturer_domains(manufacturer)
-        logger.debug(f"[Tier 2] Manufacturer domains: {domains[:5]}")
+        # Extract model identifier from device_name if available (e.g., "ZST39" from "ZST39 LR")
+        model_identifier = None
+        if device_name:
+            import re
+            match = re.search(r'[A-Z]{2,4}\d{2,3}', device_name.upper())
+            if match:
+                model_identifier = match.group()
+                logger.debug(f"[Tier 2] Extracted model identifier: {model_identifier}")
 
-        # Keyword generation (LLM or fallback)
-        if self.llm_finder and self.llm_finder.enabled:
-            keywords = await self.llm_finder.generate_search_keywords(
-                manufacturer, model, device_type
-            )
+        # Check if we have previously discovered domains for this manufacturer
+        known_domains = get_manufacturer_domains(manufacturer)
+        # Filter to only use domains that were actually discovered (not generated)
+        registry = get_registry()
+        discovered_domains = registry.get_known_domains(manufacturer)
+        
+        # Build effective search keywords
+        # Strategy: Use simple, direct queries that combine model identifier with description
+        # e.g., "zooz ZST39 documentation" or "zooz ZST39 800 Series USB Controller manual"
+        keywords = []
+        
+        if model_identifier:
+            # Best query: manufacturer + model identifier + "documentation"
+            keywords.append(f"{manufacturer} {model_identifier} documentation")
+            # Second: manufacturer + model identifier + short description
+            keywords.append(f"{manufacturer} {model_identifier} {model} manual")
+            # Third: just model identifier + manual pdf
+            keywords.append(f"{manufacturer} {model_identifier} manual pdf")
         else:
-            keywords = [
-                f"{manufacturer} {model} manual pdf",
-                f"{manufacturer} {model} user guide",
-                f"{manufacturer} {model} documentation"
-            ]
+            # Fallback if no model identifier extracted
+            keywords.append(f"{manufacturer} {model} documentation")
+            keywords.append(f"{manufacturer} {model} manual pdf")
 
         all_results: List[SearchResult] = []
 
-        # Limit to 2 keyword searches to reduce API usage
-        for keyword in keywords[:2]:
+        # Search strategy:
+        # 1. First search: UNRESTRICTED (no site: filter) to discover domains organically
+        # 2. Subsequent searches: Use discovered domains if any
+        for idx, keyword in enumerate(keywords[:2]):
             try:
+                # Add delay between searches (not before first one)
+                if idx > 0:
+                    logger.info("[Tier 2] Waiting 2s between searches to respect rate limits")
+                    await asyncio.sleep(2)
+
                 logger.info(f"[Tier 2] Query → {keyword}")
 
+                # First search is unrestricted to discover domains
+                # Subsequent searches can use discovered domains
+                use_domains = discovered_domains[:5] if idx > 0 and discovered_domains else None
+                
                 results = await self.search_api.search(
                     query=keyword,
                     max_results=10,
-                    domains=domains[:5],
+                    domains=use_domains,
                     keywords=["manual", "pdf", "user", "guide", "datasheet", "installation", "troubleshooting"]
                 )
 
                 if results:
-                    logger.info(f"[Tier 2] {len(results)} results from SearchAPI for '{keyword}'")
+                    logger.info(f"[Tier 2] {len(results)} results from SearchAPI for '{keyword}'" + 
+                               (" (unrestricted)" if not use_domains else f" (scoped to {len(use_domains)} domains)"))
+                    # If we got good results on first search, may not need second
+                    if len(results) >= 5:
+                        all_results.extend(results)
+                        break
                 else:
                     logger.info(f"[Tier 2] No results found for '{keyword}'")
 
@@ -503,7 +509,19 @@ class GenericFetcher(ManufacturerFetcher):
 
             downloaded = await self._download_from_url(model, result.url)
             if downloaded:
-                logger.info(f"✅ [Tier 3] Downloaded: {result.url}")
+                # Validate that the downloaded content actually matches this device
+                if not self._validate_document_matches_device(downloaded, manufacturer, model, device_type, device_name):
+                    logger.warning(f"❌ [Tier 3] Content mismatch - PDF doesn't match {model}, skipping {result.url}")
+                    # Clean up the mismatched file
+                    try:
+                        downloaded.unlink()
+                        if downloaded.parent.exists() and not any(downloaded.parent.iterdir()):
+                            downloaded.parent.rmdir()
+                    except Exception as e:
+                        logger.debug(f"Failed to clean up mismatched file: {e}")
+                    continue
+                
+                logger.info(f"✅ [Tier 3] Downloaded and validated: {result.url}")
 
                 # Register domain for future manufacturer scoping
                 register_discovered_domain(manufacturer, result.url)
@@ -610,6 +628,162 @@ class GenericFetcher(ManufacturerFetcher):
             logger.error(f"HTML→text conversion failed: {e}")
             return None
 
+    def _validate_document_matches_device(
+        self, 
+        doc_path: Path, 
+        manufacturer: str, 
+        model: str, 
+        device_type: str,
+        device_name: Optional[str] = None
+    ) -> bool:
+        """
+        Validate that downloaded document actually matches the target device.
+        
+        Uses configurable validation rules from validation_config to avoid
+        hardcoding device-specific terms.
+        
+        Args:
+            doc_path: Path to downloaded document
+            manufacturer: Expected manufacturer
+            model: Expected model name/number
+            device_type: Expected device type (e.g., "controller", "sensor")
+            device_name: Device name (may contain model identifier like "ZST39 LR")
+            
+        Returns:
+            True if document appears to match the device, False otherwise
+        """
+        from .validation_config import get_validation_config
+        
+        try:
+            config = get_validation_config()
+            
+            # Extract text from document
+            if doc_path.suffix.lower() == ".pdf":
+                text = self._extract_pdf_text(doc_path)
+            else:
+                text = doc_path.read_text(encoding='utf-8', errors='ignore')
+            
+            if not text or len(text) < 100:
+                logger.warning(f"Document too short to validate: {len(text) if text else 0} chars")
+                return False
+            
+            text_lower = text.lower()
+            text_upper = text.upper()
+            
+            # Get device category from config
+            category = config.get_category_for_model(model, device_name)
+            if category:
+                logger.debug(f"Device category detected: {category.name}")
+            
+            # Extract expected model identifiers using config patterns
+            model_identifiers = config.extract_model_identifiers(model, device_name, manufacturer)
+            
+            # Check if any of our expected identifiers are in the document
+            model_found = any(mid in text_upper for mid in model_identifiers)
+            
+            if model_identifiers:
+                logger.debug(f"Looking for model identifiers: {model_identifiers}, found={model_found}")
+            
+            # Category-based validation
+            if category:
+                # Count conflicting content keywords
+                conflicting_count = sum(
+                    1 for kw in category.conflicting_content_keywords 
+                    if kw in text_lower
+                )
+                
+                logger.debug(f"Conflicting indicators for {category.name}: {conflicting_count}")
+                
+                # Reject if too many conflicting terms
+                if conflicting_count >= category.conflicting_threshold:
+                    logger.warning(
+                        f"✗ Document REJECTED: Model '{model}' is {category.name} "
+                        f"but document contains {conflicting_count} conflicting terms"
+                    )
+                    return False
+                
+                # Check for required content (at least one must be present)
+                if category.required_content_keywords:
+                    required_found = sum(
+                        1 for kw in category.required_content_keywords 
+                        if kw in text_lower
+                    )
+                    if required_found == 0 and conflicting_count >= 1:
+                        logger.warning(
+                            f"✗ Document REJECTED: Model '{model}' is {category.name} "
+                            f"but no relevant content found and some conflicting terms present"
+                        )
+                        return False
+            
+            # If we found our model identifier, accept
+            if model_found and model_identifiers:
+                logger.info(f"✓ Document validated: found model identifier {model_identifiers} in text")
+                return True
+            
+            # Check if document mentions DIFFERENT model numbers
+            all_model_numbers = config.find_model_numbers_in_text(text_upper, manufacturer)
+            if all_model_numbers:
+                logger.debug(f"Model numbers found in document: {all_model_numbers}")
+                
+                if model_identifiers:
+                    # Check if any of our expected identifiers match what's in the document
+                    if not any(mid in all_model_numbers for mid in model_identifiers):
+                        logger.warning(
+                            f"✗ Document REJECTED: Document is about models {all_model_numbers} "
+                            f"but we're looking for {model_identifiers}"
+                        )
+                        return False
+            
+            # Verify manufacturer appears in document
+            if not config.manufacturer_found_in_text(manufacturer, text_lower):
+                logger.warning(f"✗ Document REJECTED: Manufacturer '{manufacturer}' not found in document")
+                return False
+            
+            # Default: if no strong mismatch signals, cautiously accept
+            logger.info(f"✓ Document tentatively accepted: no strong mismatch indicators")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Document validation error: {e}")
+            # On error, cautiously reject to avoid bad data
+            return False
+
+    def _extract_pdf_text(self, pdf_path: Path) -> str:
+        """Extract text from PDF using multiple methods with fallbacks."""
+        text = ""
+        
+        # Try PyMuPDF first (fastest)
+        try:
+            doc = fitz.open(str(pdf_path))
+            for page in doc:
+                text += page.get_text()
+            doc.close()
+            if text.strip():
+                return text
+        except Exception as e:
+            logger.debug(f"PyMuPDF extraction failed: {e}")
+        
+        # Fallback to pdfminer
+        try:
+            text = pdfminer_extract_text(str(pdf_path))
+            if text.strip():
+                return text
+        except Exception as e:
+            logger.debug(f"pdfminer extraction failed: {e}")
+        
+        # Last resort: pypdf
+        try:
+            reader = pypdf.PdfReader(str(pdf_path))
+            text = ""
+            for page in reader.pages:
+                text += page.extract_text() or ""
+            if text.strip():
+                return text
+        except Exception as e:
+            logger.debug(f"pypdf extraction failed: {e}")
+        
+        return text
+
 
 # --------------------------------------------------------------------------------------
 # DocumentAutoFetcher: main orchestration entrypoint
@@ -704,12 +878,14 @@ class DocumentAutoFetcher:
             manufacturer = device.manufacturer
             model = device.model
             device_type = device.device_type if isinstance(device.device_type, str) else device.device_type.value
+            device_name = getattr(device, 'name', None)
             device_dict = device.to_dict()
         else:
             # Legacy dict format
             manufacturer = (device.get("manufacturer") or "").strip()
             model = (device.get("model") or "").strip()
             device_type = device.get("type", "")
+            device_name = device.get("name", "")
             device_dict = device
 
         if not manufacturer or not model:
@@ -754,7 +930,8 @@ class DocumentAutoFetcher:
         doc_path = await self.generic_fetcher.fetch(
             model=model,
             manufacturer=manufacturer,
-            device_type=device_type
+            device_type=device_type,
+            device_name=device_name
         )
 
         if doc_path:
@@ -766,11 +943,34 @@ class DocumentAutoFetcher:
         # Tier 4 (AI-generated fallback) is handled by document_service
         return False
 
+    def get_source_url(self, manufacturer: str, model: str) -> Optional[str]:
+        """
+        Get the source URL for a device's documentation.
+
+        Checks in order:
+        1. URL cache (fastest)
+        2. Vendor index (indexed documents)
+
+        Returns:
+            Source URL string or None if not found
+        """
+        # Check URL cache
+        cache_entry = self.url_cache.get_entry(manufacturer, model)
+        if cache_entry and cache_entry.get("url"):
+            return cache_entry["url"]
+
+        # Check vendor index
+        indexed_docs = self.generic_fetcher.vendor_storage.lookup_docs(manufacturer, model)
+        if indexed_docs:
+            return indexed_docs[0].url
+
+        return None
+
     def _is_indexed(self, manufacturer: str, model: str) -> bool:
         """Check if device docs are already in RAG."""
         try:
-            # ChromaDB expects a single operator in the `where` clause (e.g. $and/$or).
-            where = {"$and": [{"manufacturer": manufacturer.title()}, {"model": model}]}
+            # Use shared utility for consistent ChromaDB where clause building
+            where = build_chromadb_where(manufacturer, model)
             results = self.rag.query(
                 query_text=f"{manufacturer} {model}",
                 n_results=1,
@@ -785,21 +985,41 @@ class DocumentAutoFetcher:
         try:
             if doc_path.suffix.lower() == ".pdf":
                 text = self._extract_pdf_text(doc_path)
+                source_type = "official_pdf"
             else:
                 text = doc_path.read_text(encoding="utf-8")
+                # Determine source type from file extension or content
+                if doc_path.suffix.lower() in [".html", ".htm"]:
+                    source_type = "manufacturer_html"
+                elif doc_path.suffix.lower() in [".txt", ".md"]:
+                    # Could be AI-generated or scraped HTML converted to text
+                    source_type = "manufacturer_html"
+                else:
+                    source_type = "unknown"
 
             if not text or len(text) < 100:
                 logger.warning(f"Document too short or empty: {doc_path}")
                 return
 
+            # Get file modification time for freshness scoring
+            import datetime
+            file_mtime = doc_path.stat().st_mtime
+            fetched_at = datetime.datetime.fromtimestamp(file_mtime).isoformat()
+
+            # Use shared utility for consistent manufacturer normalization
+            mfr = normalize_manufacturer(device["manufacturer"])
+            
             metadata = {
-                "source": f"{device['manufacturer']} {device['model']} Manual",
-                "manufacturer": device["manufacturer"].title(),
+                "source": f"{mfr} {device['model']} Manual",
+                "manufacturer": mfr,
                 "model": device["model"],
                 "device_type": device.get("type", "unknown"),
                 "category": "device_manual",
                 "auto_fetched": True,
                 "file_path": str(doc_path),
+                # Source-aware ranking metadata
+                "source_type": source_type,
+                "fetched_at": fetched_at,
             }
 
             chunk_size = 2000
