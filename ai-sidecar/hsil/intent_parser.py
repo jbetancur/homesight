@@ -68,6 +68,19 @@ class IntentParser:
             # Anomaly/alert queries
             (r'\b(any|show|check).*\b(alert|alarm|warning|problem|issue)\b', 'query_alerts', 0.9),
             (r'\b(what\'s wrong|whats wrong|anything wrong)\b', 'query_problems', 0.85),
+
+            # Troubleshooting intents (trigger RAG queries)
+            (r'\b(how do i|how to|how can i).*\b(replace|change|swap).*\b(battery|batteries)\b', 'troubleshoot_battery', 0.95),
+            (r'\b(how do i|how to|how can i).*\b(reset|reboot|restart)\b', 'troubleshoot_reset', 0.9),
+            (r'\b(how do i|how to|how can i).*\b(pair|connect|add|include)\b', 'troubleshoot_pairing', 0.9),
+            (r'\b(how do i|how to|how can i).*\b(fix|repair|troubleshoot|solve)\b', 'troubleshoot_general', 0.85),
+            (r'\b(not working|stopped working|won\'t work|doesn\'t work|broken|offline|unresponsive)\b', 'troubleshoot_not_working', 0.85),
+            (r'\b(blinking|flashing).*\b(light|led)\b', 'troubleshoot_indicator', 0.9),
+            (r'\b(what does|what\'s).*\b(error|code|beep|flash|blink).*\b(mean)\b', 'troubleshoot_error_code', 0.9),
+            (r'\b(manual|documentation|instructions|guide|specs|specifications)\b', 'request_documentation', 0.85),
+            (r'\b(model number|model|part number|serial)\b', 'query_device_info', 0.85),
+            (r'\b(battery type|what battery|which battery)\b', 'query_battery_type', 0.9),
+            (r'\b(warranty|support|contact|help)\b', 'request_support', 0.8),
         ]
 
         # Room name patterns
@@ -179,3 +192,24 @@ class IntentParser:
     def get_all_intents(self) -> List[str]:
         """Return list of all recognized intents"""
         return list(set(intent for _, intent, _ in self.patterns))
+
+    def is_troubleshooting_intent(self, intent: Optional['Intent']) -> bool:
+        """Check if the intent requires RAG document lookup"""
+        if not intent:
+            return False
+        
+        troubleshooting_intents = {
+            'troubleshoot_battery',
+            'troubleshoot_reset',
+            'troubleshoot_pairing',
+            'troubleshoot_general',
+            'troubleshoot_not_working',
+            'troubleshoot_indicator',
+            'troubleshoot_error_code',
+            'request_documentation',
+            'query_device_info',
+            'query_battery_type',
+            'request_support',
+        }
+        
+        return intent.intent in troubleshooting_intents

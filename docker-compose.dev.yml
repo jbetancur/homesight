@@ -1,0 +1,26 @@
+# Development overrides for hot-reloading
+# Usage: docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d
+#
+# For AI Sidecar:
+#   Python changes auto-reload via uvicorn --reload (no restart needed)
+#
+# For Go API:
+#   Still requires rebuild: make rebuild-api && make dev-restart-api
+#
+# Quick commands:
+#   make dev        - Start all services in dev mode
+#   make dev-stop   - Stop dev mode
+
+services:
+  ai-sidecar:
+    # Mount source code for hot-reloading (Python changes apply automatically)
+    volumes:
+      - ./ai-sidecar:/app:rw
+      - ./config.yaml:/app/config.yaml:ro
+      - /var/lib/homesight/manuals:/root/homesight/manuals:rw
+      - /var/lib/homesight/rag:/var/lib/homesight/rag:rw
+      - /home/homesight/models:/home/homesight/models:rw
+      - /etc/localtime:/etc/localtime:ro
+      - /home/homesight/logs:/app/log:rw
+    # Enable uvicorn reload mode for auto-restart on code changes
+    command: ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8001", "--reload"]

@@ -27,7 +27,8 @@ run: build
 install: build
 	sudo ./scripts/install.sh
 
-dev:
+# Legacy dev script (deprecated - use 'make dev' instead)
+dev-legacy:
 	./scripts/dev.sh
 
 deps:
@@ -142,3 +143,42 @@ restart:
 
 status:
 	@./scripts/homesight.sh status
+
+# ==============================================================================
+# Development Mode (Hot-reload for AI sidecar, quick rebuild for Go API)
+# ==============================================================================
+
+# Start all services in dev mode (AI sidecar with hot-reload)
+dev:
+	@echo "🔧 Starting HomeSight in development mode..."
+	@docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d
+	@echo ""
+	@echo "✅ Dev mode running!"
+	@echo "   📝 Python changes: Auto-reload (no action needed)"
+	@echo "   🔨 Go changes:     Run 'make rebuild-api && make dev-restart-api'"
+	@echo "   📊 Status:         make status"
+	@echo "   📜 Logs:           make dev-logs"
+
+# Start only AI sidecar in dev mode
+dev-ai:
+	@echo "Starting AI sidecar in development mode (hot-reload enabled)..."
+	@docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d ai-sidecar
+	@echo "✅ AI sidecar running with hot-reload"
+	@echo "   Edit files in ai-sidecar/ and changes apply automatically"
+	@echo "   View logs: docker compose logs -f ai-sidecar"
+
+# Stop dev mode
+dev-stop:
+	@echo "Stopping dev mode containers..."
+	@docker compose -f docker-compose.yml -f docker-compose.dev.yml down
+
+# View logs in dev mode
+dev-logs:
+	@docker compose -f docker-compose.yml -f docker-compose.dev.yml logs -f
+
+# Restart a specific service in dev mode
+dev-restart-api:
+	@docker compose -f docker-compose.yml -f docker-compose.dev.yml restart api
+
+dev-restart-ai:
+	@docker compose -f docker-compose.yml -f docker-compose.dev.yml restart ai-sidecar

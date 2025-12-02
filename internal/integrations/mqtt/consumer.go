@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -131,7 +132,12 @@ func (c *Consumer) forwardToHSIL(deviceID, sensorID, eventType string, value int
 	// Fire and forget - don't block MQTT processing
 	go func() {
 		client := &http.Client{Timeout: 2 * time.Second}
-		resp, err := client.Post("http://localhost:8001/hsil/events", "application/json", bytes.NewBuffer(jsonData))
+		// Use AI sidecar URL from environment (set by Docker compose)
+		aiURL := os.Getenv("AI_SERVICE_URL")
+		if aiURL == "" {
+			aiURL = "http://ai-sidecar:8001" // Docker network default
+		}
+		resp, err := client.Post(aiURL+"/hsil/events", "application/json", bytes.NewBuffer(jsonData))
 		if err != nil {
 			// Only log first few failures to avoid spam
 			return
@@ -209,6 +215,9 @@ func (c *Consumer) handleDiscovery(integration, deviceID string, payload []byte)
 
 	log.Printf("[MQTT-CONSUMER] Discovery: %s (%s) - %s %s", msg.DeviceID, msg.Integration, msg.Manufacturer, msg.Model)
 
+	// Try to fetch existing device to preserve metadata (e.g., battery_level from Z-Wave)
+	existingDevice, _ := c.deviceRepo.Get(c.ctx, msg.DeviceID)
+
 	// Convert to model.Device
 	device := &model.Device{
 		ID:          msg.DeviceID,
@@ -222,11 +231,24 @@ func (c *Consumer) handleDiscovery(integration, deviceID string, payload []byte)
 		UpdatedAt:   time.Now(),
 	}
 
+	// Preserve existing metadata (e.g., battery_level, firmware_version from Z-Wave integration)
+	if existingDevice != nil && existingDevice.Metadata != nil {
+		for k, v := range existingDevice.Metadata {
+			device.Metadata[k] = v
+		}
+		// Preserve existing created_at
+		device.CreatedAt = existingDevice.CreatedAt
+		// Preserve docs ingestion status
+		device.DocsIngested = existingDevice.DocsIngested
+		device.DocsIngestedAt = existingDevice.DocsIngestedAt
+		device.DocsStatus = existingDevice.DocsStatus
+	}
+
 	if device.Name == "" {
 		device.Name = msg.DeviceID
 	}
 
-	// Populate metadata
+	// Update metadata from discovery message (overwrite with new values if present)
 	if msg.Manufacturer != "" {
 		device.Metadata["manufacturer"] = msg.Manufacturer
 	}

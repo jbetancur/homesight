@@ -5,11 +5,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"log"
 	"net/http"
 	"strconv"
 	"sync"
 	"time"
 
+	"github.com/go-chi/chi/v5"
 	"github.com/homesight/homesight/internal/ai"
 	"github.com/homesight/homesight/internal/db"
 	"github.com/homesight/homesight/internal/discovery"
@@ -226,8 +229,8 @@ func (s *Server) handleTestDiscovery(w http.ResponseWriter, r *http.Request) {
 			Manufacturer: "AO Smith",
 			Model:        "EG12-50R-055D",
 			Metadata: map[string]string{
-				"capacity":     "50 gallons",
-				"power":        "4500W",
+				"capacity": "50 gallons",
+				"power":    "4500W",
 			},
 			DiscoveredAt: now,
 		},
@@ -239,8 +242,8 @@ func (s *Server) handleTestDiscovery(w http.ResponseWriter, r *http.Request) {
 			Manufacturer: "Zoeller",
 			Model:        "M53",
 			Metadata: map[string]string{
-				"hp":           "1/3",
-				"flow_rate":    "43 GPM",
+				"hp":        "1/3",
+				"flow_rate": "43 GPM",
 			},
 			DiscoveredAt: now,
 		},
@@ -281,8 +284,8 @@ func (s *Server) handleTestDiscovery(w http.ResponseWriter, r *http.Request) {
 			Manufacturer: "Ecobee",
 			Model:        "EB-STATE5-01",
 			Metadata: map[string]string{
-				"stages_heat":  "2",
-				"stages_cool":  "2",
+				"stages_heat": "2",
+				"stages_cool": "2",
 			},
 			DiscoveredAt: now,
 		},
@@ -294,8 +297,8 @@ func (s *Server) handleTestDiscovery(w http.ResponseWriter, r *http.Request) {
 			Manufacturer: "Trane",
 			Model:        "S9V2-VS100",
 			Metadata: map[string]string{
-				"btu":          "100000",
-				"efficiency":   "96% AFUE",
+				"btu":        "100000",
+				"efficiency": "96% AFUE",
 			},
 			DiscoveredAt: now,
 		},
@@ -318,7 +321,7 @@ func (s *Server) handleTestDiscovery(w http.ResponseWriter, r *http.Request) {
 			Manufacturer: "Emporia",
 			Model:        "Vue-002",
 			Metadata: map[string]string{
-				"circuits":     "16",
+				"circuits": "16",
 			},
 			DiscoveredAt: now,
 		},
@@ -330,7 +333,7 @@ func (s *Server) handleTestDiscovery(w http.ResponseWriter, r *http.Request) {
 			Manufacturer: "Shelly",
 			Model:        "Plug S",
 			Metadata: map[string]string{
-				"max_load":     "2500W",
+				"max_load": "2500W",
 			},
 			DiscoveredAt: now,
 		},
@@ -473,20 +476,36 @@ func (s *Server) notifyAIDeviceCreated(device model.Device, force ...bool) {
 	// Send event to AI sidecar asynchronously
 	reqBody, err := json.Marshal(eventPayload)
 	if err != nil {
+		log.Printf("[AI] Failed to marshal device event: %v", err)
 		return
 	}
 
 	// POST to AI sidecar with timeout
+	// Use the configured AI service URL (from environment, defaults to Docker network address)
+	aiURL := "http://ai-sidecar:8001/events/device" // Default to Docker network
+	if httpClient, ok := s.aiClient.(*ai.HTTPClient); ok {
+		aiURL = httpClient.GetBaseURL() + "/events/device"
+	}
+	log.Printf("[AI] Sending device event to: %s", aiURL)
+
 	client := &http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Post(
-		"http://localhost:8001/events/device",
+		aiURL,
 		"application/json",
 		bytes.NewBuffer(reqBody),
 	)
 	if err != nil {
+		log.Printf("[AI] Failed to send device event: %v", err)
 		return
 	}
 	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		log.Printf("[AI] Device event returned status %d: %s", resp.StatusCode, string(body))
+	} else {
+		log.Printf("[AI] Device event sent successfully for %s", device.ID)
+	}
 }
 
 // handleReingestDeviceDocs re-triggers document discovery for an existing device
@@ -496,8 +515,8 @@ func (s *Server) handleReingestDeviceDocs(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	// Extract device ID from URL
-	deviceID := r.PathValue("id")
+	// Extract device ID from URL (chi router)
+	deviceID := chi.URLParam(r, "id")
 	if deviceID == "" {
 		http.Error(w, "Device ID required", http.StatusBadRequest)
 		return
@@ -542,16 +561,16 @@ func (s *Server) handleUpdateDeviceDocsStatus(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	// Extract device ID from URL
-	deviceID := r.PathValue("id")
+	// Extract device ID from URL (chi router)
+	deviceID := chi.URLParam(r, "id")
 	if deviceID == "" {
 		http.Error(w, "Device ID required", http.StatusBadRequest)
 		return
 	}
 
 	var updateReq struct {
-		Status    string `json:"status"`    // success/partial/error
-		Ingested  bool   `json:"ingested"`  // whether docs were successfully ingested
+		Status     string     `json:"status"`   // success/partial/error
+		Ingested   bool       `json:"ingested"` // whether docs were successfully ingested
 		IngestedAt *time.Time `json:"ingested_at"`
 	}
 

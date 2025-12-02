@@ -101,7 +101,8 @@ class VendorDocumentStorage:
     """
 
     def __init__(self, db_path: Optional[Path] = None):
-        self.db_path = db_path or (Path.home() / "homesight" / "vendor_index.db")
+        # Use /var/lib/homesight for persistence (same volume as other DBs)
+        self.db_path = db_path or Path("/var/lib/homesight/vendor_index.db")
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
 
         self._init_db()

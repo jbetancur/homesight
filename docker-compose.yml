@@ -33,7 +33,8 @@ services:
       - ZWAVE_WEBSOCKET_URL=ws://zwavejs:3000
     volumes:
       - ./config.yaml:/app/config.yaml:ro
-      - /var/lib/homesight:/var/lib/homesight:rw
+      # Database persisted on host to survive container rebuilds
+      - /home/homesight/homesight/data:/var/lib/homesight:rw
       - /etc/localtime:/etc/localtime:ro
     depends_on:
       - mosquitto

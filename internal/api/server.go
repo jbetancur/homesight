@@ -1279,9 +1279,9 @@ func getValue(ch <-chan string, defaultValue string) string {
 
 // notifyAIIncidentCreated sends an incident creation event to the AI sidecar for background analysis
 func (s *Server) notifyAIIncidentCreated(incident model.Incident) {
-	aiSidecarURL := os.Getenv("AI_SIDECAR_URL")
+	aiSidecarURL := os.Getenv("AI_SERVICE_URL") // Use same env var as other places
 	if aiSidecarURL == "" {
-		aiSidecarURL = "http://localhost:8001"
+		aiSidecarURL = "http://ai-sidecar:8001" // Docker network default
 	}
 
 	url := fmt.Sprintf("%s/events/incident", aiSidecarURL)

@@ -29,7 +29,6 @@ from models.device_profile import DeviceProfile
 
 # Services
 from services.session_service import SessionService
-from services.chat_service import ChatService
 from services.analysis_service import AnalysisService
 from services.document_service import DocumentService
 from services.mqtt_service import initialize_mqtt_service, shutdown_mqtt_service, get_mqtt_service
@@ -81,10 +80,9 @@ logger = logging.getLogger(__name__)
 llm_provider = None
 rag_engine = None
 session_service = None
-chat_service = None
 analysis_service = None
 document_service = None
-hsil_service = None  # HSIL service
+hsil_service = None  # HSIL service (handles all chat)
 
 # Task queues
 discovery_queue = None
@@ -150,12 +148,6 @@ async def lifespan(app: FastAPI):
 
         # Initialize services
         session_service = SessionService(session_timeout_minutes=60)
-        chat_service = ChatService(
-            llm_provider=llm_provider,
-            session_service=session_service,
-            rag_engine=rag_engine,
-            backend_url=config.backend_url
-        )
         analysis_service = AnalysisService(
             llm_provider=llm_provider,
             rag_engine=rag_engine
@@ -235,6 +227,7 @@ async def lifespan(app: FastAPI):
                 chroma_client=chroma_client,
                 llm_provider=llm_provider,
                 mqtt_client=mqtt_client,
+                rag_engine=rag_engine,  # Pass full RAGEngine for troubleshooting queries
                 backend_url=config.backend_url,
                 db_path="/var/lib/homesight/hsil_memory.db"
             )
@@ -355,39 +348,6 @@ async def metrics():
     return Response(content=get_metrics(), media_type="text/plain; charset=utf-8")
 
 
-# Chat endpoint with multi-turn conversation and function calling
-@app.post("/chat", response_model=ChatResponse)
-async def chat(request: ChatRequest):
-    """
-    Chat with the AI assistant
-
-    Supports:
-    - Multi-turn conversations (pass session_id)
-    - Function calling (device actions)
-    - RAG-enhanced responses
-    """
-    import time
-    start_time = time.time()
-    status = "error"
-
-    if not chat_service:
-        raise HTTPException(status_code=503, detail="Chat service not initialized")
-
-    try:
-        response = await chat_service.chat(request)
-        logger.info(f"Chat response - session_id: {response.session_id}, actions: {response.actions_taken}")
-        status = "success"
-        return response
-    except Exception as e:
-        logger.error(f"Chat error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-    finally:
-        # Track chat metrics
-        duration = time.time() - start_time
-        chat_response_time.observe(duration)
-        chat_requests.labels(status=status).inc()
-
-
 # Analysis endpoint (AI-powered, no hard-coded rules!)
 @app.post("/analyze", response_model=AnalyzeResponse)
 async def analyze(request: AnalyzeRequest):
@@ -411,6 +371,48 @@ async def analyze(request: AnalyzeRequest):
         return response
     except Exception as e:
         logger.error(f"Analysis error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# Simple chat endpoint (OpenAI-based, used for KB generation)
+@app.post("/chat", response_model=ChatResponse)
+async def chat(request: ChatRequest):
+    """
+    Simple OpenAI chat endpoint for knowledge base generation.
+    
+    This is a lightweight chat endpoint that uses OpenAI directly
+    for generating device knowledge base articles and similar tasks.
+    For conversational AI with context, use /hsil/chat instead.
+    """
+    if not llm_provider:
+        raise HTTPException(status_code=503, detail="LLM provider not initialized")
+    
+    if not llm_provider.openai_client:
+        raise HTTPException(status_code=503, detail="OpenAI client not available")
+    
+    try:
+        # Build simple message list
+        messages = [
+            {"role": "system", "content": "You are a helpful assistant for home automation and device documentation."},
+            {"role": "user", "content": request.message}
+        ]
+        
+        # Use OpenAI directly for this simple chat (knowledge generation)
+        response_text, _ = llm_provider.chat(
+            messages=messages,
+            tools=None,
+            temperature=0.7,
+            max_tokens=1000,
+            override_mode='cloud'  # Always use OpenAI for KB generation
+        )
+        
+        return ChatResponse(
+            response=response_text,
+            session_id=request.session_id or "single-turn",
+            actions_taken=None
+        )
+    except Exception as e:
+        logger.error(f"Chat error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -870,6 +872,7 @@ async def hsil_chat(request: dict):
     - Current home state
     - Memory/history
     - Policy engine for actions
+    - Conditional RAG for troubleshooting intents
     """
     if not hsil_service:
         raise HTTPException(status_code=503, detail="HSIL not initialized")

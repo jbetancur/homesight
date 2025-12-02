@@ -52,6 +52,7 @@ class ConversationalAgentService:
         feedback_learning,
         policy_engine,
         weather_service=None,
+        rag_engine=None,
         backend_url: str = "http://localhost:8080"
     ):
         self.llm = llm_provider
@@ -59,6 +60,7 @@ class ConversationalAgentService:
         self.feedback_learning = feedback_learning
         self.policy = policy_engine
         self.weather = weather_service
+        self.rag_engine = rag_engine
 
         # Production safety features
         self.intent_parser = IntentParser()
@@ -151,7 +153,11 @@ class ConversationalAgentService:
         intent = self.intent_parser.parse(message)
         if intent and intent.confidence > 0.85:
             logger.info(f"High-confidence intent: {intent.intent} ({intent.confidence:.2f})")
-            # Intent handling could be added here for direct responses
+
+        # Check if this is a troubleshooting intent - query RAG if so
+        if self.intent_parser.is_troubleshooting_intent(intent):
+            logger.info(f"Troubleshooting intent detected, querying RAG...")
+            # RAG will be queried in _build_context with the intent
 
         # Check if this is a room/zone query - handle directly for better responses
         room_query = self._detect_room_query(message)
@@ -163,7 +169,7 @@ class ConversationalAgentService:
                 self._add_to_memory("assistant", room_response.reply, session_id)
                 return room_response
 
-        context = await self._build_context(message, event_context, home_state)
+        context = await self._build_context(message, event_context, home_state, intent)
 
         system_prompt = await self._build_system_prompt(context)
         llm_response = await self._call_llm(system_prompt, message, session_id)
@@ -384,7 +390,8 @@ class ConversationalAgentService:
         self,
         message: str,
         event_context: Optional[EventContext],
-        home_state: Optional[Dict[str, Any]]
+        home_state: Optional[Dict[str, Any]],
+        intent: Optional[Any] = None
     ) -> Dict[str, Any]:
 
         context = {
@@ -467,19 +474,53 @@ class ConversationalAgentService:
         except Exception as e:
             logger.warning(f"Failed prefs: {e}")
 
-        # RAG context
-        if hasattr(self, "rag_engine") and self.rag_engine:
+        # RAG context - ONLY query for troubleshooting intents to keep prompts lean
+        if self.rag_engine and self.intent_parser.is_troubleshooting_intent(intent):
             try:
-                rag = self.rag_engine.query(message, n_results=3)
-                docs = [
-                    f"[{r['metadata'].get('source','Unknown')}]: {r['text'][:150]}"
-                    for r in rag
-                    if r.get("relevance_score", 0) > 0.25
-                ]
+                # Build device-aware query for better RAG results
+                rag_query = message
+                
+                # If we have device ontology, enrich the query with device info
+                if self.ontology._loaded and intent and intent.target_device:
+                    # Try to find the device in ontology
+                    for device in self.ontology.devices:
+                        if intent.target_device.lower() in device.name.lower():
+                            manufacturer = device.manufacturer or ""
+                            model = device.model or ""
+                            rag_query = f"{message} {manufacturer} {model}".strip()
+                            break
+                
+                # Also check conversation for device context
+                session_memory = self._get_session_memory()
+                for msg in reversed(session_memory[-4:]):
+                    # Look for device mentions in recent conversation
+                    content_lower = msg["content"].lower()
+                    for device in self.ontology.devices if self.ontology._loaded else []:
+                        if device.name.lower() in content_lower:
+                            manufacturer = device.manufacturer or ""
+                            model = device.model or ""
+                            rag_query = f"{rag_query} {manufacturer} {model}".strip()
+                            break
+                
+                logger.info(f"RAG query for troubleshooting: {rag_query[:100]}...")
+                rag_results = self.rag_engine.query(rag_query, n_results=3)
+                
+                docs = []
+                for r in rag_results:
+                    if r.get("relevance_score", 0) > 0.25:
+                        source = r['metadata'].get('source', 'Unknown')
+                        # Include more text for troubleshooting context
+                        text = r['text'][:500]
+                        docs.append(f"[{source}]: {text}")
+                
                 if docs:
                     context["rag_context"] = docs
+                    logger.info(f"RAG returned {len(docs)} relevant documents")
+                else:
+                    logger.info("RAG returned no relevant documents")
+                    
             except Exception as e:
-                logger.warning(f"RAG failure: {e}")
+                logger.warning(f"RAG query failed: {e}")
 
         # Session history
         if hasattr(self, "session_history") and self.session_history:

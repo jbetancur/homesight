@@ -6,11 +6,19 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 )
 
 // HSIL proxy handlers - forward requests to ai-sidecar HSIL endpoints
 
-const hsilBaseURL = "http://localhost:8001/hsil"
+// getHSILBaseURL returns the HSIL base URL from environment or default
+func getHSILBaseURL() string {
+	aiServiceURL := os.Getenv("AI_SERVICE_URL")
+	if aiServiceURL == "" {
+		aiServiceURL = "http://ai-sidecar:8001" // Docker network default
+	}
+	return aiServiceURL + "/hsil"
+}
 
 // hsilProcessEvent forwards sensor events to HSIL
 func (s *Server) hsilProcessEvent(w http.ResponseWriter, r *http.Request) {
@@ -45,7 +53,7 @@ func (s *Server) hsilGetPreferences(w http.ResponseWriter, r *http.Request) {
 // proxyToHSIL is a generic proxy helper for HSIL endpoints
 func (s *Server) proxyToHSIL(w http.ResponseWriter, r *http.Request, path string) {
 	// Build target URL
-	targetURL := hsilBaseURL + path
+	targetURL := getHSILBaseURL() + path
 
 	// Read request body
 	var body []byte
@@ -126,7 +134,7 @@ func (s *Server) ForwardEventToHSIL(deviceID, sensorID, eventType string, value 
 		return fmt.Errorf("failed to marshal event: %w", err)
 	}
 
-	resp, err := http.Post(hsilBaseURL+"/events", "application/json", bytes.NewBuffer(jsonData))
+	resp, err := http.Post(getHSILBaseURL()+"/events", "application/json", bytes.NewBuffer(jsonData))
 	if err != nil {
 		return fmt.Errorf("failed to forward to HSIL: %w", err)
 	}

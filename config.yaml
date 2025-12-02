@@ -3,16 +3,16 @@ database:
 
 mqtt:
   # MQTT broker URL for internal message bus
-  # This is used for all integration communication (discovery, state, commands, incidents)
-  # Default: tcp://localhost:1883 (assumes Mosquitto running locally)
-  broker_url: "tcp://localhost:1883"
+  # Docker: tcp://mosquitto:1883
+  # Local:  tcp://localhost:1883
+  broker_url: "tcp://mosquitto:1883"
 
   # MQTT authentication (optional)
   username: ""
   password: ""
 
 prometheus:
-  url: http://localhost:9090
+  url: http://prometheus:9090
 
 # Web Search Configuration (for document discovery)
 # API Keys: Set via environment variables:
@@ -72,6 +72,11 @@ queues:
     memory_threshold: 0.90     # Don't limit based on memory
 
 ai:
+  # AI Sidecar service URL
+  # Docker: http://ai-sidecar:8001
+  # Local:  http://localhost:8001
+  service_url: "http://ai-sidecar:8001"
+
   # LLM Configuration
   llm:
     # Chat mode: explicit config for user-facing chat
@@ -128,6 +133,6 @@ backend_url: "http://10.0.20.175:8080"
 # Z-Wave Integration (via MQTT bridge)
 zwave:
   enabled: true                          # Enable Z-Wave MQTT bridge
-  websocket_url: "ws://localhost:3001"  # Z-Wave JS WebSocket API
+  websocket_url: "ws://zwavejs:3000"     # Docker: ws://zwavejs:3000, Local: ws://localhost:3001
   # Note: Z-Wave events are published to homesight/zwave/+/discovery, state, etc.
   # Commands are consumed from homesight/cmd/zwave-+

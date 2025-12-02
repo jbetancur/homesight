@@ -64,6 +64,7 @@ class HSILService:
         chroma_client=None,
         llm_provider=None,
         mqtt_client=None,
+        rag_engine=None,
         backend_url: str = "http://localhost:8080",
         db_path: str = "/var/lib/homesight/hsil_memory.db"
     ):
@@ -74,11 +75,13 @@ class HSILService:
             chroma_client: Shared ChromaDB client from RAG engine
             llm_provider: Shared LLM provider from ai-sidecar
             mqtt_client: Shared MQTT client
+            rag_engine: Full RAGEngine instance for document retrieval
             backend_url: HomeSight backend API URL
             db_path: Path to HSIL SQLite database
         """
         self.backend_url = backend_url
         self.db_path = db_path
+        self.rag_engine = rag_engine
 
         # Initialize all sub-services
         logger.info("Initializing HSIL services...")
@@ -121,6 +124,7 @@ class HSILService:
             feedback_learning=self.feedback_learning,
             policy_engine=self.policy_engine,
             weather_service=self.weather_service,
+            rag_engine=self.rag_engine,  # Pass full RAGEngine for troubleshooting queries
             backend_url=backend_url
         )
 

@@ -30,6 +30,7 @@ homesightd
 # AI Models (too large for git)
 ai-sidecar/models/*.gguf
 ai-sidecar/models/*.bin
+ai-sidecar/models/fastembed/*
 *.gguf
 
 # Python

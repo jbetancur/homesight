@@ -17,7 +17,7 @@ func (s *Server) initZWave() {
 
 	wsURL := s.cfg.ZWave.WebSocketURL
 	if wsURL == "" {
-		wsURL = "ws://localhost:3000"
+		wsURL = "ws://zwavejs:3000" // Docker network default
 	}
 
 	s.zwaveClient = zwave.NewClient(wsURL)
