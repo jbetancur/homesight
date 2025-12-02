@@ -87,10 +87,16 @@ class HSILService:
         logger.info("Initializing HSIL services...")
 
         # Weather & Environmental (initialize first)
-        self.weather_service = WeatherService()
+        # Get weather config from main config
+        from config import get_config
+        config = get_config()
+        self.weather_service = WeatherService(
+            zip_code=config.weather.zip_code,
+            location_name=config.weather.location_name
+        )
         self.weather_sync = WeatherSyncService(
             weather_service=self.weather_service,
-            refresh_interval_minutes=90
+            refresh_interval_minutes=config.weather.refresh_interval_minutes
         )
 
         # Core data processing

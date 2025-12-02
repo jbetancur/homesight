@@ -16,7 +16,7 @@ services:
     # Mount source code for hot-reloading (Python changes apply automatically)
     volumes:
       - ./ai-sidecar:/app:rw
-      - ./config.yaml:/app/config.yaml:ro
+      - ./config.yaml:/etc/homesight/config.yaml:ro
       - /var/lib/homesight/manuals:/root/homesight/manuals:rw
       - /var/lib/homesight/rag:/var/lib/homesight/rag:rw
       - /home/homesight/models:/home/homesight/models:rw

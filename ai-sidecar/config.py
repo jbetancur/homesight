@@ -88,6 +88,14 @@ class SingleQueueConfig(BaseModel):
     memory_threshold: float = Field(default=0.85, description="Memory threshold (0-1)")
 
 
+class WeatherConfig(BaseModel):
+    """Weather service configuration"""
+    zip_code: str = Field(default="94102", description="ZIP code for weather location")
+    location_name: Optional[str] = Field(default=None, description="Location name (auto-detected from ZIP if not set)")
+    cache_duration_minutes: int = Field(default=15, description="How long to cache weather data")
+    refresh_interval_minutes: int = Field(default=90, description="Background refresh interval")
+
+
 class QueuesConfig(BaseModel):
     """Task queue configurations"""
     discovery: SingleQueueConfig = Field(default_factory=SingleQueueConfig)
@@ -102,6 +110,7 @@ class Config(BaseModel):
     search: SearchConfig = Field(default_factory=SearchConfig)
     document_fetcher: DocumentFetcherConfig = Field(default_factory=DocumentFetcherConfig)
     queues: QueuesConfig = Field(default_factory=QueuesConfig)
+    weather: WeatherConfig = Field(default_factory=WeatherConfig)
     backend_url: str = Field(
         default_factory=lambda: os.getenv('BACKEND_URL', 'http://localhost:8080'),
         description="HomeSight Go backend API URL"
@@ -211,10 +220,23 @@ class Config(BaseModel):
             if 'vendor_refresh_days' in search_section:
                 search_config_data['vendor_refresh_days'] = search_section['vendor_refresh_days']
 
+            # Build Weather config
+            weather_config_data = {}
+            weather_section = yaml_data.get('weather', {})
+            if 'zip_code' in weather_section:
+                weather_config_data['zip_code'] = str(weather_section['zip_code'])
+            if 'location_name' in weather_section:
+                weather_config_data['location_name'] = weather_section['location_name']
+            if 'cache_duration_minutes' in weather_section:
+                weather_config_data['cache_duration_minutes'] = weather_section['cache_duration_minutes']
+            if 'refresh_interval_minutes' in weather_section:
+                weather_config_data['refresh_interval_minutes'] = weather_section['refresh_interval_minutes']
+
             return cls(
                 llm=LLMConfig(**llm_config_data),
                 rag=RAGConfig(**rag_config_data),
                 search=SearchConfig(**search_config_data),
+                weather=WeatherConfig(**weather_config_data),
                 document_fetcher=DocumentFetcherConfig(),
                 backend_url=backend_url
             )

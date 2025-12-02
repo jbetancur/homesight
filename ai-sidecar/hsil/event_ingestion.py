@@ -84,7 +84,7 @@ class EventIngestionService:
 
         logger.debug(
             f"Ingested event: device={device_id}, sensor={sensor_id}, "
-            f"type={event_type}, value={value}, anomaly={anomaly_score:.2f if anomaly_score else 0}"
+            f"type={event_type}, value={value}, anomaly={(f'{anomaly_score:.2f}' if anomaly_score is not None else 'N/A')}"
         )
 
         return context

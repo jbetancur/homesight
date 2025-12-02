@@ -88,12 +88,12 @@ services:
       - LLAMA_VULKAN=1
       - BACKEND_URL=http://api:8080
       - MQTT_BROKER_URL=tcp://mosquitto:1883
+      - HOMESIGHT_CONFIG=/etc/homesight/config.yaml
       - BRAVE_SEARCH_API_KEY=${BRAVE_SEARCH_API_KEY}
       - BING_SEARCH_API_KEY=${BING_SEARCH_API_KEY}
       - OPENAI_API_KEY=${OPENAI_API_KEY}
-      - NOAA_API_KEY=${NOAA_API_KEY}
     volumes:
-      - ./config.yaml:/app/config.yaml:ro
+      - ./config.yaml:/etc/homesight/config.yaml:ro
       - /var/lib/homesight/manuals:/root/homesight/manuals:rw
       # Persist RAG database and downloaded models on the host so data
       # survives container recreation and large files need not be baked into

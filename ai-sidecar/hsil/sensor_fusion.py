@@ -3,7 +3,7 @@ Sensor Fusion Engine
 
 Combines multiple signal sources into unified context for reasoning:
 - Z-Wave sensors (temp, humidity, leak, motion)
-- Weather data (NOAA)
+- Weather data (Met.no)
 - Time/temporal context
 - Behavioral patterns
 - Historical baselines

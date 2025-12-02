@@ -127,6 +127,12 @@ api:
 # For network: use your actual IP like 10.0.20.175:8080
 backend_url: "http://10.0.20.175:8080"
 
+# Weather Service Configuration
+# Uses Met.no API (same as Home Assistant) - no API key required!
+weather:
+  zip_code: "10803"           # Your ZIP code for weather data
+  refresh_interval_minutes: 90  # How often to refresh weather data
+
 # Integration Configuration
 # All integrations now communicate via MQTT (see docs/INTEGRATIONS_MQTT.md)
 
