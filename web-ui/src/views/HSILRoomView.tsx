@@ -20,6 +20,7 @@ import {
   NumberInput,
   MultiSelect,
   ActionIcon,
+  Tabs,
 } from '@mantine/core';
 import {
   Thermometer,
@@ -37,10 +38,15 @@ import {
   Settings,
   Battery,
   BatteryLow,
+  LayoutGrid,
+  TrendingUp,
+  Activity,
 } from 'lucide-react';
 import { API_BASE } from '../apiConfig';
 import { useEventSubscription } from '../useEventSubscription';
 import ReactMarkdown from 'react-markdown';
+import WeatherCorrelationChart from '../components/WeatherCorrelationChart';
+import LearningProgressChart from '../components/LearningProgressChart';
 
 interface Device {
   id: string;
@@ -159,6 +165,7 @@ export default function HSILRoomView() {
   const [weather, setWeather] = useState<any>(null);
   const [editingZone, setEditingZone] = useState<Room | null>(null);
   const [editedAttributes, setEditedAttributes] = useState<ZoneAttributes | null>(null);
+  const [activeTab, setActiveTab] = useState<string>('rooms');
   const chatEndRef = useRef<HTMLDivElement>(null);
   
   // Generate a persistent session ID for this browser tab
@@ -477,14 +484,29 @@ export default function HSILRoomView() {
           </Paper>
         )}
 
-        {/* Room Grid */}
-        <Grid>
-          {rooms.map((room) => {
-            const hasCritical = room.devices.some(d => d.state === 'critical' || d.active);
-            const hasWarning = room.devices.some(d => d.state === 'warning');
+        {/* Tabs for different views */}
+        <Tabs value={activeTab} onChange={(value) => setActiveTab(value || 'rooms')}>
+          <Tabs.List>
+            <Tabs.Tab value="rooms" leftSection={<LayoutGrid size={16} />}>
+              Room Grid
+            </Tabs.Tab>
+            <Tabs.Tab value="correlation" leftSection={<TrendingUp size={16} />}>
+              Weather Correlation
+            </Tabs.Tab>
+            <Tabs.Tab value="learning" leftSection={<Activity size={16} />}>
+              Learning Progress
+            </Tabs.Tab>
+          </Tabs.List>
 
-            return (
-              <Grid.Col key={room.id} span={{ base: 12, sm: 6, md: 4 }}>
+          <Tabs.Panel value="rooms" pt="md">
+            {/* Room Grid */}
+            <Grid>
+              {rooms.map((room) => {
+                const hasCritical = room.devices.some(d => d.state === 'critical' || d.active);
+                const hasWarning = room.devices.some(d => d.state === 'warning');
+
+                return (
+                  <Grid.Col key={room.id} span={{ base: 12, sm: 6, md: 4 }}>
                 <Card
                   shadow="sm"
                   padding="lg"
@@ -641,9 +663,19 @@ export default function HSILRoomView() {
                 </Stack>
               </Card>
             </Grid.Col>
-            );
-          })}
-        </Grid>
+                );
+              })}
+            </Grid>
+          </Tabs.Panel>
+
+          <Tabs.Panel value="correlation" pt="md">
+            <WeatherCorrelationChart rooms={rooms} weather={weather} />
+          </Tabs.Panel>
+
+          <Tabs.Panel value="learning" pt="md">
+            <LearningProgressChart />
+          </Tabs.Panel>
+        </Tabs>
 
         {/* AI Chat Panel */}
         <Paper shadow="md" p="lg" radius="md" withBorder>
