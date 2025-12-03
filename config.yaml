@@ -86,7 +86,7 @@ ai:
     # 3B: Fast, smaller, lower quality
     # 8B: Slower, larger, much better quality (recommended for privacy-first chat)
     local:
-      model_path: "/home/homesight/models/llama-3.1-8b-instruct.gguf"
+      model_path: /home/homesight/models/qwen2.5-7b-instruct.gguf # "/home/homesight/models/llama-3.1-8b-instruct.gguf"
       # Pre-download model with: scripts/download-model.sh
 
       # Runtime settings

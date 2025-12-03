@@ -28,13 +28,15 @@ echo ""
 echo "  1) Llama 3.2 3B (Q4_K_M, ~2GB) - GPU OPTIMAL (Recommended)"
 echo "  2) Phi-2 (2.7B Fast Instruct, ~1.8GB) - GPU FASTEST"
 echo "  3) Llama 3.1 1B (Q4_K_M, ~800MB) - Tiny / Edge"
-echo "  4) Llama 3.1 8B (Q4_K_M, ~4.9GB) - CPU ONLY (Too large for 780M GPU)"
-echo "  5) DeepSeek R1 Distill Qwen 7B (Q4_K_M, ~4.7GB) - BEST REASONING"
-echo "  6) DeepSeek R1 Distill Llama 8B (Q4_K_M, ~4.9GB) - CPU ONLY"
-echo "  7) Qwen2.5 7B Instruct (Q4_K_M, ~4.7GB) - GREAT ALL-ROUNDER"
-echo "  8) Custom model (enter repo ID manually)"
+echo "  4) Llama 3.1 8B (Q4_K_M, ~4.9GB) - Good Quality"
+echo "  5) Llama 3.1 8B (Q8_0, ~8.5GB) - HIGH QUALITY (fits in 11GB VRAM)"
+echo "  6) DeepSeek R1 Distill Qwen 7B (Q4_K_M, ~4.7GB) - BEST REASONING"
+echo "  7) DeepSeek R1 Distill Llama 8B (Q4_K_M, ~4.9GB) - Reasoning + Llama base"
+echo "  8) Qwen2.5 7B Instruct (Q4_K_M, ~4.7GB) - GREAT ALL-ROUNDER"
+echo "  9) Qwen2.5 14B Instruct (Q4_K_M, ~8.9GB) - SMARTEST (fits in 11GB VRAM)"
+echo " 10) Custom model (enter repo ID manually)"
 echo ""
-read -p "Enter choice [1-8]: " choice
+read -p "Enter choice [1-10]: " choice
 
 case $choice in
     1)
@@ -59,7 +61,6 @@ case $choice in
         ;;
 
     4)
-        echo -e "${YELLOW}⚠️ WARNING: 8B models do NOT fit on the 780M GPU (CPU fallback only)${NC}"
         REPO_ID="bartowski/Meta-Llama-3.1-8B-Instruct-GGUF"
         FILENAME="Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf"
         OUTPUT_NAME="llama-3.1-8b-instruct.gguf"
@@ -67,6 +68,14 @@ case $choice in
         ;;
 
     5)
+        echo -e "${GREEN}🎯 Llama 3.1 8B Q8 - Higher quality, fits in 11GB VRAM${NC}"
+        REPO_ID="bartowski/Meta-Llama-3.1-8B-Instruct-GGUF"
+        FILENAME="Meta-Llama-3.1-8B-Instruct-Q8_0.gguf"
+        OUTPUT_NAME="llama-3.1-8b-instruct-q8.gguf"
+        REQUIRES_TOKEN=false
+        ;;
+
+    6)
         echo -e "${GREEN}🧠 DeepSeek R1 Distill Qwen 7B - Excellent reasoning & conversational${NC}"
         REPO_ID="bartowski/DeepSeek-R1-Distill-Qwen-7B-GGUF"
         FILENAME="DeepSeek-R1-Distill-Qwen-7B-Q4_K_M.gguf"
@@ -74,15 +83,14 @@ case $choice in
         REQUIRES_TOKEN=false
         ;;
 
-    6)
-        echo -e "${YELLOW}⚠️ WARNING: 8B DeepSeek models do NOT fit on the 780M GPU (CPU fallback only)${NC}"
+    7)
         REPO_ID="bartowski/DeepSeek-R1-Distill-Llama-8B-GGUF"
         FILENAME="DeepSeek-R1-Distill-Llama-8B-Q4_K_M.gguf"
         OUTPUT_NAME="deepseek-r1-distill-llama-8b.gguf"
         REQUIRES_TOKEN=false
         ;;
 
-    7)
+    8)
         echo -e "${GREEN}🌟 Qwen2.5 7B - Great all-around instruct model${NC}"
         REPO_ID="bartowski/Qwen2.5-7B-Instruct-GGUF"
         FILENAME="Qwen2.5-7B-Instruct-Q4_K_M.gguf"
@@ -90,7 +98,15 @@ case $choice in
         REQUIRES_TOKEN=false
         ;;
 
-    8)
+    9)
+        echo -e "${GREEN}🧠 Qwen2.5 14B - Smartest model that fits in 11GB VRAM${NC}"
+        REPO_ID="bartowski/Qwen2.5-14B-Instruct-GGUF"
+        FILENAME="Qwen2.5-14B-Instruct-Q4_K_M.gguf"
+        OUTPUT_NAME="qwen2.5-14b-instruct.gguf"
+        REQUIRES_TOKEN=false
+        ;;
+
+    10)
         read -p "Enter HuggingFace repo ID (e.g. author/model-name): " REPO_ID
         read -p "Enter filename: " FILENAME
         read -p "Enter output name: " OUTPUT_NAME
