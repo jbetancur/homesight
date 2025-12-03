@@ -180,7 +180,7 @@ class HSILService:
                     )
 
             # 5. Check erratic behavior (from frequency tracking)
-            erratic_data = await self.learning.get_erratic_devices()
+            erratic_data = await self.learning.get_all_erratic_devices()
             is_erratic = any(d["device_id"] == device_id and d["is_erratic"] for d in erratic_data)
 
             return {

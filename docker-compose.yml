@@ -33,8 +33,8 @@ services:
       - ZWAVE_WEBSOCKET_URL=ws://zwavejs:3000
     volumes:
       - ./config.yaml:/app/config.yaml:ro
-      # Database persisted on host to survive container rebuilds
-      - /home/homesight/homesight/data:/var/lib/homesight:rw
+      # All databases persisted in ./data directory
+      - ./data:/var/lib/homesight:rw
       - /etc/localtime:/etc/localtime:ro
     depends_on:
       - mosquitto
@@ -100,13 +100,10 @@ services:
       - OPENAI_API_KEY=${OPENAI_API_KEY}
     volumes:
       - ./config.yaml:/etc/homesight/config.yaml:ro
-      - /var/lib/homesight/manuals:/root/homesight/manuals:rw
-      # Persist RAG database and downloaded models on the host so data
-      # survives container recreation and large files need not be baked into
-      # the image.
-      - /var/lib/homesight/rag:/var/lib/homesight/rag:rw
-      # Mount host models directory for Llama 3.2 3B model (~2GB)
-      # Pre-download model to /home/homesight/models/ to avoid re-downloading on container restarts
+      - ./data/manuals:/root/homesight/manuals:rw
+      # Persist all databases in ./data directory
+      - ./data:/var/lib/homesight:rw
+      # Mount host models directory for Llama model
       - /home/homesight/models:/home/homesight/models:rw
       - /etc/localtime:/etc/localtime:ro
       - /home/homesight/logs:/app/log:rw
