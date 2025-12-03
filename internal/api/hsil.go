@@ -50,6 +50,11 @@ func (s *Server) hsilGetPreferences(w http.ResponseWriter, r *http.Request) {
 	s.proxyToHSIL(w, r, "/preferences")
 }
 
+// handleWeather gets weather data from AI sidecar
+func (s *Server) handleWeather(w http.ResponseWriter, r *http.Request) {
+	s.proxyToHSIL(w, r, "/weather")
+}
+
 // proxyToHSIL is a generic proxy helper for HSIL endpoints
 func (s *Server) proxyToHSIL(w http.ResponseWriter, r *http.Request, path string) {
 	// Build target URL

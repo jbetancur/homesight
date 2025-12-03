@@ -198,7 +198,11 @@ func (s *Server) setupRoutes() {
 			r.Get("/state", s.hsilGetState)
 			r.Get("/stats", s.hsilGetStats)
 			r.Get("/preferences", s.hsilGetPreferences)
+			r.Get("/weather", s.handleWeather)
 		})
+
+		// Weather (also available at /api/weather for convenience)
+		r.Get("/weather", s.handleWeather)
 
 		// Events
 		r.Get("/events", s.handleEvents)
