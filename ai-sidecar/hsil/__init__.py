@@ -1,24 +1,18 @@
 """
-HomeSight Intelligence Layer (HSIL)
+HomeSight Intelligence Layer (HSIL) - Simplified
 
-This package provides the intelligence layer that sits above the HomeSight core,
-offering:
-- Event ingestion and context building
-- Feature extraction (trends, patterns, context)
-- Home memory graph (preferences, history)
-- Behavior models (comfort, water, HVAC, solar)
-- Policy engine (safety & comfort rules)
-- Conversational agent integration
+Architecture: ML data → LLM → response
 
-HIL Evolution (v2.0):
-- Sensor fusion engine (multi-source data fusion)
-- Safety guardian (safe autonomy framework)
-- Reasoning templates (chain-of-thought reasoning)
-- Intelligence pipeline (unified ML + LLM coordinator)
-- Incident generator (auto-incident creation)
+Core components:
+- Event ingestion
+- ML learning (River)
+- Device ontology
+- Weather service
+- Conversational agent (LLM reasons from data)
+- Action dispatcher
 """
 
-__version__ = "2.0.0"
+__version__ = "3.0.0-simplified"
 
 # Core types
 from .types import (
@@ -30,7 +24,7 @@ from .types import (
     ActionCommand
 )
 
-# HIL Evolution types
+# HIL types (still useful for data structures)
 from .hil_types import (
     SensorSignal,
     SignalType,
@@ -40,37 +34,17 @@ from .hil_types import (
     WeatherContext,
     BehavioralContext,
     TemporalContext,
-    ReasoningResult,
-    ReasoningChain,
-    ReasoningStep,
-    Insight,
-    SafetyDecision,
-    SafetyRule,
-    ActionProposal,
-    ActionResult,
-    PipelineResult,
-    PipelineStage,
-    ScenarioMatch,
-    ScenarioSignature,
-    ScenarioCategory,
-    ReasoningTemplate,
     Severity,
     ConfidenceLevel,
-    ActionMode,
 )
 
-# HIL Evolution components
-from .sensor_fusion import SensorFusionEngine
-from .safety_guardian import SafetyGuardian
-from .reasoning_templates import ScenarioDetector, ReasoningEngine
-from .intelligence_pipeline import IntelligencePipeline
-from .incident_generator import IncidentGenerator, IncidentCorrelator
+# Core components
+from .incident_generator import IncidentGenerator
 
 # Main service
 from .service import HSILService
 
 __all__ = [
-    # Version
     "__version__",
     
     # Core types
@@ -90,32 +64,11 @@ __all__ = [
     "WeatherContext",
     "BehavioralContext",
     "TemporalContext",
-    "ReasoningResult",
-    "ReasoningChain",
-    "ReasoningStep",
-    "Insight",
-    "SafetyDecision",
-    "SafetyRule",
-    "ActionProposal",
-    "ActionResult",
-    "PipelineResult",
-    "PipelineStage",
-    "ScenarioMatch",
-    "ScenarioSignature",
-    "ScenarioCategory",
-    "ReasoningTemplate",
     "Severity",
     "ConfidenceLevel",
-    "ActionMode",
     
-    # HIL components
-    "SensorFusionEngine",
-    "SafetyGuardian",
-    "ScenarioDetector",
-    "ReasoningEngine",
-    "IntelligencePipeline",
+    # Components
     "IncidentGenerator",
-    "IncidentCorrelator",
     
     # Service
     "HSILService",

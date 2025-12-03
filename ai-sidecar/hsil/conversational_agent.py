@@ -1,11 +1,9 @@
 """
-Conversational Agent (Production-safe)
+Conversational Agent - Simplified
 
-- Safe for local LLMs (prompt truncation, formatting, no special-token conflicts)
-- Robust JSON parsing (regex-based, trailing comma cleanup)
-- Action validation for safety
-- Lean, LLM-friendly event + weather formatting
-- Avoids huge prompt expansion
+Philosophy: Gather data, pass to LLM, let it reason.
+No hardcoded intent detection or response generation.
+The LLM does the work.
 """
 
 import logging
@@ -14,17 +12,12 @@ import re
 from typing import Optional, Dict, Any, List
 
 from .types import (
-    ConversationRequest,
     ConversationResponse,
     ActionCommand,
     EventContext,
-    MemoryEntry
 )
-from .intent_parser import IntentParser
 from .device_ontology import DeviceOntology
 from .home_health_engine import HomeHealthEngine
-from .temperature_preference_model import TemperaturePreferenceModel
-from .temperature_intent import TemperatureIntent
 
 logger = logging.getLogger(__name__)
 
@@ -41,16 +34,18 @@ SAFE_ACTIONS = {
 
 class ConversationalAgentService:
     """
-    Conversational interface to HSIL using cloud or local LLMs.
-    Production-safe version.
+    Simplified conversational agent.
+    
+    Gathers all relevant data and passes it to the LLM.
+    The LLM reasons about what to say - no hardcoded handlers.
     """
 
     def __init__(
         self,
         llm_provider,
-        memory_service,
-        feedback_learning,
-        policy_engine,
+        memory_service=None,
+        feedback_learning=None,
+        policy_engine=None,
         weather_service=None,
         rag_engine=None,
         backend_url: str = "http://localhost:8080"
@@ -61,73 +56,36 @@ class ConversationalAgentService:
         self.policy = policy_engine
         self.weather = weather_service
         self.rag_engine = rag_engine
+        self.backend_url = backend_url
 
-        # Production safety features
-        self.intent_parser = IntentParser()
+        # Core services
         self.ontology = DeviceOntology(backend_url=backend_url)
-
-        # Home intelligence features
         self.health_engine = HomeHealthEngine(backend_url=backend_url)
-        self.temp_model = TemperaturePreferenceModel()
-        self.temp_intent = TemperatureIntent()
 
-        # Session-based conversation memory {session_id: [messages]}
+        # Session memory
         self._session_memories: Dict[str, List[Dict[str, str]]] = {}
-        # Default session for backwards compatibility
-        self._default_session = "default"
-        # Current session (set per chat call)
         self._current_session: Optional[str] = None
 
-        # Get all chat settings from LLM provider config (with defaults)
-        if hasattr(llm_provider, 'config') and llm_provider.config:
-            cfg = llm_provider.config
-            self.max_system_prompt_chars = getattr(cfg, 'chat_max_system_prompt_chars', 6000)
-            self.max_user_message_chars = getattr(cfg, 'chat_max_user_message_chars', 2000)
-            self.max_memory_turns = getattr(cfg, 'chat_max_memory_turns', 20)
-            self.llm_context_turns = getattr(cfg, 'chat_context_turns', 10)
-            self.chat_temperature = getattr(cfg, 'chat_temperature', 0.3)
-            self.chat_max_tokens = getattr(cfg, 'chat_max_tokens', 400)
-        else:
-            # Defaults if no config available
-            self.max_system_prompt_chars = 6000
-            self.max_user_message_chars = 2000
-            self.max_memory_turns = 20
-            self.llm_context_turns = 10
-            self.chat_temperature = 0.3
-            self.chat_max_tokens = 400
+        # Config from LLM provider
+        cfg = getattr(llm_provider, 'config', None)
+        self.max_system_prompt_chars = getattr(cfg, 'chat_max_system_prompt_chars', 10000) if cfg else 10000
+        self.max_user_message_chars = getattr(cfg, 'chat_max_user_message_chars', 2000) if cfg else 2000
+        self.max_memory_turns = getattr(cfg, 'chat_max_memory_turns', 20) if cfg else 20
+        self.llm_context_turns = getattr(cfg, 'chat_context_turns', 10) if cfg else 10
+        self.chat_temperature = getattr(cfg, 'chat_temperature', 0.3) if cfg else 0.3
+        self.chat_max_tokens = getattr(cfg, 'chat_max_tokens', 500) if cfg else 500
 
-        logger.info(
-            f"ConversationalAgentService initialized "
-            f"(temp={self.chat_temperature}, max_tokens={self.chat_max_tokens}, "
-            f"context_turns={self.llm_context_turns}, memory_turns={self.max_memory_turns})"
-        )
-
-    def _get_session_memory(self, session_id: Optional[str] = None) -> List[Dict[str, str]]:
-        """Get memory for a specific session, creating if needed."""
-        sid = session_id or self._current_session or self._default_session
-        if sid not in self._session_memories:
-            self._session_memories[sid] = []
-        return self._session_memories[sid]
-
-    def _add_to_memory(self, role: str, content: str, session_id: Optional[str] = None):
-        """Add a message to the session memory."""
-        memory = self._get_session_memory(session_id)
-        memory.append({"role": role, "content": content})
-        # Keep last N turns per session
-        if len(memory) > self.max_memory_turns:
-            self._session_memories[session_id or self._current_session or self._default_session] = memory[-self.max_memory_turns:]
-
-    # ---------------------------------------------------------------------
-    # Public API
-    # ---------------------------------------------------------------------
+        logger.info(f"ConversationalAgentService initialized (simplified)")
 
     async def initialize(self):
-        """Initialize device ontology (call after construction)"""
+        """Load device ontology."""
         success = await self.ontology.load()
         if success:
             logger.info(f"Device ontology loaded: {len(self.ontology.devices)} devices")
-        else:
-            logger.warning("Failed to load device ontology")
+
+    # -------------------------------------------------------------------------
+    # Main Chat Entry Point
+    # -------------------------------------------------------------------------
 
     async def chat(
         self,
@@ -136,129 +94,153 @@ class ConversationalAgentService:
         home_state: Optional[Dict[str, Any]] = None,
         session_id: Optional[str] = None
     ) -> ConversationResponse:
+        """
+        Main chat method.
         
-        # Set current session for this chat
-        self._current_session = session_id or self._default_session
-
-        # Handle temperature intents BEFORE LLM (prevent "What temperature?" questions)
-        if self.temp_intent.is_temperature_related(message):
-            temp_response = await self._handle_temperature_request(message, home_state)
-            if temp_response:
-                # Add to conversation memory
-                self._add_to_memory("user", message, session_id)
-                self._add_to_memory("assistant", temp_response.reply, session_id)
-                return temp_response
-
-        # Try intent parser for other intents
-        intent = self.intent_parser.parse(message)
-        if intent and intent.confidence > 0.85:
-            logger.info(f"High-confidence intent: {intent.intent} ({intent.confidence:.2f})")
-
-        # Check if this is a troubleshooting intent - query RAG if so
-        if self.intent_parser.is_troubleshooting_intent(intent):
-            logger.info(f"Troubleshooting intent detected, querying RAG...")
-            # RAG will be queried in _build_context with the intent
-
-        # Check if user is asking about incidents (historical or current)
-        incident_query = self._detect_incident_query(message)
-        if incident_query:
-            logger.info(f"Incident query detected: {incident_query}")
-            incident_response = await self._handle_incident_query(incident_query, home_state, session_id)
-            if incident_response:
-                self._add_to_memory("user", message, session_id)
-                self._add_to_memory("assistant", incident_response.reply, session_id)
-                return incident_response
-
-        # Check if this is a room/zone query - handle directly for better responses
-        room_query = self._detect_room_query(message)
-        logger.info(f"Room query detection: message='{message}', detected_zone={room_query}, ontology_loaded={self.ontology._loaded}")
-        if room_query:
-            room_response = await self._handle_room_query(room_query, home_state)
-            if room_response:
-                self._add_to_memory("user", message, session_id)
-                self._add_to_memory("assistant", room_response.reply, session_id)
-                return room_response
-
-        context = await self._build_context(message, event_context, home_state, intent)
-
-        system_prompt = await self._build_system_prompt(context)
-        llm_response = await self._call_llm(system_prompt, message, session_id)
-
-        parsed = await self._parse_llm_response(llm_response, context)
-
-        # Add to conversation memory for this session
-        self._add_to_memory("user", message, session_id)
-        self._add_to_memory("assistant", parsed.reply, session_id)
-
-        return parsed
-
-    def _detect_room_query(self, message: str) -> Optional[str]:
-        """Detect if user is asking about a specific room/zone."""
-        message_lower = message.lower()
+        1. Gather all relevant data
+        2. Build prompt with that data
+        3. Let LLM reason and respond
+        """
+        self._current_session = session_id or "default"
         
-        # Common patterns for room queries
-        room_patterns = [
-            "tell me about", "what's in", "whats in", "what is in",
-            "how is", "how's", "status of", "check on", "check the",
-            "about my", "about the"
-        ]
+        # Gather ALL data the LLM needs
+        context = await self._gather_context(message, event_context, home_state)
         
-        # Check if message matches a room query pattern
-        is_room_query = any(pattern in message_lower for pattern in room_patterns)
+        # Build system prompt with all context
+        system_prompt = self._build_system_prompt(context)
         
-        if is_room_query and self.ontology._loaded:
-            # Find which room they're asking about
-            for zone_id in self.ontology.zone_ids:
-                zone = self.ontology.zones.get(zone_id)
-                if zone:
-                    zone_name_lower = zone.name.lower()
-                    zone_id_lower = zone_id.lower().replace("-", " ").replace("_", " ")
-                    if zone_name_lower in message_lower or zone_id_lower in message_lower:
-                        return zone_id
+        # Call LLM
+        llm_response = await self._call_llm(system_prompt, message)
         
-        return None
+        # Parse response
+        result = self._parse_response(llm_response)
+        
+        # Update memory
+        self._add_to_memory("user", message)
+        self._add_to_memory("assistant", result.reply)
+        
+        return result
 
-    async def _handle_room_query(
+    # -------------------------------------------------------------------------
+    # Context Gathering - Get ALL data upfront
+    # -------------------------------------------------------------------------
+
+    async def _gather_context(
         self,
-        zone_id: str,
+        message: str,
+        event_context: Optional[EventContext],
         home_state: Optional[Dict[str, Any]]
-    ) -> Optional[ConversationResponse]:
-        """Handle a query about a specific room with comprehensive response."""
-        zone = self.ontology.zones.get(zone_id)
-        if not zone:
-            return None
+    ) -> Dict[str, Any]:
+        """Gather all relevant data for the LLM."""
+        import httpx
+        from datetime import datetime
         
-        devices = self.ontology.devices_by_zone.get(zone_id, [])
-        attrs = zone.attributes
+        context = {
+            "timestamp": datetime.now().isoformat(),
+            "user_message": message,
+        }
         
-        # Build comprehensive response
-        parts = []
+        # 1. Device Ontology - what sensors exist and where
+        if self.ontology._loaded:
+            context["devices"] = []
+            for device in self.ontology.devices.values():
+                # Extract manufacturer/model from metadata if available
+                meta = device.metadata or {}
+                context["devices"].append({
+                    "id": device.device_id,
+                    "name": device.name,
+                    "type": device.type,  # e.g., "sensor", "leak_sensor", "thermostat"
+                    "zone": device.zone_id,
+                    "manufacturer": meta.get("manufacturer", "Unknown"),
+                    "model": meta.get("model", device.name),
+                })
+            
+            context["zones"] = []
+            for zone_id, zone in self.ontology.zones.items():
+                zone_devices = self.ontology.devices_by_zone.get(zone_id, [])
+                context["zones"].append({
+                    "id": zone_id,
+                    "name": zone.name,
+                    "type": zone.type,
+                    "devices": [d.name for d in zone_devices],
+                    "device_types": [d.type for d in zone_devices],
+                    "features": self._get_zone_features(zone),
+                })
         
-        # 1. Intro with device overview
-        if devices:
-            device_list = [f"{d.name} ({d.type})" for d in devices]
-            if len(devices) == 1:
-                parts.append(f"Your {zone.name.lower()} has a {device_list[0]} sensor.")
-            else:
-                parts.append(f"Your {zone.name.lower()} has {len(devices)} devices: {', '.join(device_list)}.")
-        else:
-            parts.append(f"Your {zone.name.lower()} doesn't have any sensors installed yet.")
+        # 2. Home Health - current status
+        try:
+            health = await self.health_engine.evaluate(home_state=home_state)
+            context["health"] = {
+                "status": health.status.value,
+                "score": health.health_score,
+                "has_leak": health.has_leak,
+                "has_smoke": health.has_smoke,
+                "has_co": health.has_co,
+                "active_alarms": health.active_alarms,
+                "issues": [d.message for d in health.details[:5]],
+            }
+        except Exception as e:
+            logger.warning(f"Health check failed: {e}")
         
-        # 2. Device status from home_state (if available)
-        if home_state and devices:
-            device_states = home_state.get("devices", []) if isinstance(home_state, dict) else []
-            for device in devices:
-                for ds in device_states:
-                    if isinstance(ds, dict) and ds.get("id") == device.device_id:
-                        state = ds.get("state", "normal")
-                        if state == "normal":
-                            parts.append(f"The {device.name} is reporting normal status (no alerts).")
-                        else:
-                            parts.append(f"⚠️ The {device.name} status: {state}")
-                        break
+        # 3. ML Erratic Data - learned patterns
+        try:
+            async with httpx.AsyncClient(timeout=2.0) as client:
+                resp = await client.get("http://localhost:8001/hsil/erratic")
+                if resp.status_code == 200:
+                    data = resp.json()
+                    if data.get("erratic_devices"):
+                        context["ml_erratic"] = data["erratic_devices"]
+        except Exception as e:
+            logger.debug(f"ML erratic fetch failed: {e}")
         
-        # 3. Room features
+        # 4. Recent Incidents - historical problems
+        try:
+            async with httpx.AsyncClient(timeout=2.0) as client:
+                resp = await client.get(f"{self.backend_url}/api/incidents")
+                if resp.status_code == 200:
+                    incidents = resp.json()
+                    # Summarize - don't dump all 100+ incidents
+                    if incidents:
+                        context["incidents"] = {
+                            "total_count": len(incidents),
+                            "recent": incidents[:5],  # Last 5
+                            "by_device": self._count_by_field(incidents, "device_id"),
+                            "by_type": self._count_by_field(incidents, "title"),
+                        }
+        except Exception as e:
+            logger.debug(f"Incidents fetch failed: {e}")
+        
+        # 5. Weather
+        if self.weather and self.weather.cached_context:
+            try:
+                context["weather"] = self.weather.format_for_llm()
+            except Exception as e:
+                logger.debug(f"Weather format failed: {e}")
+        
+        # 6. Event Context (if triggered by an event)
+        if event_context:
+            context["event"] = {
+                "device_id": event_context.device_id,
+                "type": event_context.event_type,
+                "value": event_context.event_value,
+                "location": event_context.location,
+            }
+        
+        # 7. Home State (live device readings)
+        if home_state:
+            context["home_state"] = home_state
+        
+        # 8. Conversation History
+        memory = self._get_session_memory()
+        if memory:
+            context["conversation"] = memory[-self.llm_context_turns:]
+        
+        return context
+
+    def _get_zone_features(self, zone) -> List[str]:
+        """Extract zone features as a list."""
         features = []
+        attrs = zone.attributes
         if attrs.floor_type:
             features.append(f"{attrs.floor_type} floor")
         if attrs.has_plumbing:
@@ -275,756 +257,218 @@ class ConversationalAgentService:
             features.append("HVAC vent")
         if attrs.has_windows:
             features.append("windows")
+        return features
+
+    def _count_by_field(self, items: List[Dict], field: str) -> Dict[str, int]:
+        """Count items by a field value."""
+        counts = {}
+        for item in items:
+            val = item.get(field, "unknown")
+            counts[val] = counts.get(val, 0) + 1
+        return counts
+
+    # -------------------------------------------------------------------------
+    # System Prompt - Tell LLM what data it has and how to use it
+    # -------------------------------------------------------------------------
+
+    def _build_system_prompt(self, context: Dict[str, Any]) -> str:
+        """Build system prompt with all context data."""
         
-        if features:
-            parts.append(f"Room features: {', '.join(features)}.")
-        
-        # 4. Follow-up offer
-        if devices:
-            parts.append("\nWould you like me to check the sensor's battery level, view recent history, or look for any past incidents in this room?")
-        else:
-            parts.append("\nWould you like to add sensors to this room for monitoring?")
-        
-        reply = " ".join(parts)
-        
-        return ConversationResponse(reply=reply, action=None)
-
-    # ---------------------------------------------------------------------
-    # Incident Query Handling
-    # ---------------------------------------------------------------------
-
-    def _detect_incident_query(self, message: str) -> Optional[Dict[str, Any]]:
-        """
-        Detect if user is asking about incidents, history, or problems.
-        
-        Also handles follow-up responses like "yes" or "yea" after 
-        being offered to check incidents.
-        """
-        message_lower = message.lower()
-        
-        # Direct incident keywords
-        incident_keywords = [
-            "incident", "incidents", "problem", "problems", "issue", "issues",
-            "alert", "alerts", "alarm", "alarms", "history", "past",
-            "erratic", "false positive", "malfunction"
-        ]
-        
-        # Check for direct incident query
-        for kw in incident_keywords:
-            if kw in message_lower:
-                # Try to extract room/zone context
-                zone_id = None
-                if self.ontology._loaded:
-                    for zid in self.ontology.zone_ids:
-                        zone = self.ontology.zones.get(zid)
-                        if zone and zone.name.lower() in message_lower:
-                            zone_id = zid
-                            break
-                
-                # Also check conversation history for zone context
-                if not zone_id:
-                    session_memory = self._get_session_memory()
-                    for msg in reversed(session_memory[-4:]):
-                        content_lower = msg["content"].lower()
-                        for zid in self.ontology.zone_ids if self.ontology._loaded else []:
-                            zone = self.ontology.zones.get(zid)
-                            if zone and zone.name.lower() in content_lower:
-                                zone_id = zid
-                                break
-                        if zone_id:
-                            break
-                
-                return {"type": "incident_query", "zone_id": zone_id}
-        
-        # Check for affirmative follow-up after incident offer
-        affirmative_patterns = ["yes", "yea", "yeah", "yep", "sure", "ok", "okay", "please"]
-        session_memory = self._get_session_memory()
-        
-        if any(pattern in message_lower for pattern in affirmative_patterns):
-            # Check if last assistant message offered incidents
-            for msg in reversed(session_memory[-2:]):
-                if msg["role"] == "assistant":
-                    if "incident" in msg["content"].lower():
-                        # Extract zone from that message
-                        zone_id = None
-                        if self.ontology._loaded:
-                            for zid in self.ontology.zone_ids:
-                                zone = self.ontology.zones.get(zid)
-                                if zone and zone.name.lower() in msg["content"].lower():
-                                    zone_id = zid
-                                    break
-                        return {"type": "incident_followup", "zone_id": zone_id}
-                    break
-        
-        return None
-
-    async def _handle_incident_query(
-        self, 
-        query_info: Dict[str, Any],
-        home_state: Optional[Dict[str, Any]],
-        session_id: Optional[str]
-    ) -> Optional[ConversationResponse]:
-        """
-        Handle incident queries by fetching historical incident data.
-        """
-        import httpx
-        
-        zone_id = query_info.get("zone_id")
-        
-        try:
-            # Fetch incidents from backend
-            async with httpx.AsyncClient(timeout=5.0) as client:
-                resp = await client.get(f"{self.ontology.backend_url}/api/incidents")
-                if resp.status_code != 200:
-                    return None
-                
-                incidents = resp.json()
-        except Exception as e:
-            logger.warning(f"Failed to fetch incidents: {e}")
-            return None
-        
-        if not incidents:
-            return ConversationResponse(
-                reply="Great news! There are no recorded incidents for your home.",
-                action=None
-            )
-        
-        # Filter by zone if specified
-        if zone_id:
-            zone = self.ontology.zones.get(zone_id) if self.ontology._loaded else None
-            zone_name = zone.name if zone else zone_id
-            
-            # Get devices in this zone
-            zone_devices = self.ontology.devices_by_zone.get(zone_id, []) if self.ontology._loaded else []
-            zone_device_ids = {d.device_id for d in zone_devices}
-            
-            incidents = [i for i in incidents if i.get("device_id") in zone_device_ids]
-            
-            if not incidents:
-                return ConversationResponse(
-                    reply=f"No incidents have been recorded for the {zone_name.lower()}.",
-                    action=None
-                )
-        
-        # Analyze incident patterns
-        parts = []
-        
-        # Count by type
-        type_counts: Dict[str, int] = {}
-        device_counts: Dict[str, int] = {}
-        resolved_count = 0
-        active_count = 0
-        
-        # Check for erratic patterns (rapid-fire incidents)
-        from collections import defaultdict
-        device_timestamps: Dict[str, list] = defaultdict(list)
-        
-        for inc in incidents:
-            inc_type = inc.get("type") or inc.get("title", "unknown")  # Use title if type is empty
-            device_id = inc.get("device_id", "unknown")
-            status = inc.get("status", "unknown")
-            created_at = inc.get("created_at", "")
-            
-            type_counts[inc_type] = type_counts.get(inc_type, 0) + 1
-            device_counts[device_id] = device_counts.get(device_id, 0) + 1
-            
-            if status == "resolved":
-                resolved_count += 1
-            elif status == "active":
-                active_count += 1
-            
-            if created_at:
-                device_timestamps[device_id].append(created_at)
-        
-        # Build summary
-        total = len(incidents)
-        if zone_id:
-            zone_name = self.ontology.zones.get(zone_id).name if self.ontology._loaded and zone_id in self.ontology.zones else zone_id
-            parts.append(f"📊 **{zone_name} Incident Summary:**")
-        else:
-            parts.append(f"📊 **Home Incident Summary:**")
-        
-        parts.append(f"- Total incidents: {total}")
-        parts.append(f"- Active: {active_count}, Resolved: {resolved_count}")
-        
-        # Type breakdown
-        if type_counts:
-            type_str = ", ".join([f"{t}: {c}" for t, c in sorted(type_counts.items(), key=lambda x: -x[1])[:5]])
-            parts.append(f"- By type: {type_str}")
-        
-        # Check for erratic patterns
-        erratic_devices = []
-        for device_id, timestamps in device_timestamps.items():
-            if len(timestamps) >= 5:
-                # Sort timestamps and check for rapid sequences
-                try:
-                    from datetime import datetime
-                    sorted_ts = sorted([
-                        datetime.fromisoformat(ts.replace("Z", "+00:00")) 
-                        for ts in timestamps
-                    ])
-                    
-                    # Count events within 1-minute windows
-                    rapid_count = 0
-                    for i in range(len(sorted_ts) - 1):
-                        delta = (sorted_ts[i+1] - sorted_ts[i]).total_seconds()
-                        if delta < 60:  # Less than 1 minute apart
-                            rapid_count += 1
-                    
-                    if rapid_count >= 3:
-                        erratic_devices.append({
-                            "device_id": device_id,
-                            "total": len(timestamps),
-                            "rapid_events": rapid_count
-                        })
-                except Exception as e:
-                    logger.warning(f"Error analyzing timestamps: {e}")
-        
-        if erratic_devices:
-            parts.append("")
-            parts.append("⚠️ **Erratic Behavior Detected:**")
-            for ed in erratic_devices:
-                device_id = ed["device_id"]
-                # Try to get device name
-                device_name = device_id
-                if self.ontology._loaded:
-                    for d in self.ontology.devices.values():  # Iterate dict values
-                        if d.device_id == device_id:
-                            device_name = d.name
-                            break
-                
-                parts.append(f"- {device_name}: {ed['total']} incidents with {ed['rapid_events']} rapid-fire events")
-                parts.append(f"  This pattern suggests possible sensor malfunction or environmental interference.")
-        
-        # Most recent incidents
-        recent = sorted(incidents, key=lambda x: x.get("created_at", ""), reverse=True)[:3]
-        if recent:
-            parts.append("")
-            parts.append("**Recent incidents:**")
-            for inc in recent:
-                inc_type = inc.get("type") or inc.get("title", "unknown")
-                title = inc.get("title", inc_type)
-                status = inc.get("status", "unknown")
-                created = inc.get("created_at", "")[:10]  # Just date
-                parts.append(f"- {title} ({status}) - {created}")
-        
-        reply = "\n".join(parts)
-        return ConversationResponse(reply=reply, action=None)
-
-    # ---------------------------------------------------------------------
-    # Temperature Intent Handling
-    # ---------------------------------------------------------------------
-
-    async def _handle_temperature_request(
-        self,
-        message: str,
-        home_state: Optional[Dict[str, Any]]
-    ) -> Optional[ConversationResponse]:
-        """
-        Handle temperature requests WITHOUT asking follow-up questions.
-
-        Resolves deltas automatically using ML or intent parsing.
-        """
-        # Get current temperature from home state
-        current_temp = None
-        if home_state:
-            # Handle both dict and HomeState object
-            devices_list = []
-            if isinstance(home_state, dict):
-                devices_list = home_state.get("devices", [])
-            elif hasattr(home_state, 'devices'):
-                devices_list = home_state.devices
-
-            for device in devices_list:
-                # Handle both dict and DeviceState object
-                if isinstance(device, dict):
-                    state = device.get("state", {})
-                else:
-                    state = device.state if hasattr(device, 'state') else {}
-
-                if isinstance(state, dict) and "temperature" in state:
-                    current_temp = state["temperature"]
-                    break
-
-        if current_temp is None:
-            return ConversationResponse(
-                reply="I don't have temperature sensor data right now.",
-                action=None
-            )
-
-        # Check for explicit target temperature
-        target_temp = self.temp_intent.extract_target_temperature(message)
-
-        if target_temp:
-            # Explicit target ("set to 72")
-            self.temp_model.learn_from_command(message, current_temp, target_temp=target_temp)
-
-            action = ActionCommand(
-                topic="homesight/hvac/command",
-                command="set_temperature",
-                value=target_temp
-            )
-
-            return ConversationResponse(
-                reply=f"Setting temperature to {target_temp}°F.",
-                action=action
-            )
-
-        # Check for delta intent ("make it warmer")
-        delta = self.temp_intent.parse(message)
-
-        if delta is not None:
-            # Intent parsed delta
-            new_temp = current_temp + delta
-            self.temp_model.learn_from_command(message, current_temp, delta=delta)
-
-            action = ActionCommand(
-                topic="homesight/hvac/command",
-                command="set_temperature",
-                value=new_temp
-            )
-
-            return ConversationResponse(
-                reply=f"Adjusting temperature by {delta:+d}°F to {new_temp:.0f}°F.",
-                action=action
-            )
-
-        # Use ML prediction
-        outdoor_temp = None
-        if self.weather and self.weather.cached_context:
-            outdoor_temp = self.weather.cached_context.weather.temperature
-
-        predicted_delta = self.temp_model.predict_adjustment(message, current_temp, outdoor_temp)
-
-        if predicted_delta:
-            new_temp = current_temp + predicted_delta
-            self.temp_model.learn_from_command(message, current_temp, delta=predicted_delta)
-
-            action = ActionCommand(
-                topic="homesight/hvac/command",
-                command="set_temperature",
-                value=new_temp
-            )
-
-            return ConversationResponse(
-                reply=f"Adjusting temperature by {predicted_delta:+d}°F to {new_temp:.0f}°F based on your preferences.",
-                action=action
-            )
-
-        # Fallback: no clear intent
-        return None
-
-    # ---------------------------------------------------------------------
-    # Context Builder
-    # ---------------------------------------------------------------------
-
-    async def _build_context(
-        self,
-        message: str,
-        event_context: Optional[EventContext],
-        home_state: Optional[Dict[str, Any]],
-        intent: Optional[Any] = None
-    ) -> Dict[str, Any]:
-
-        context = {
-            "user_message": message,
-            "timestamp": __import__("datetime").datetime.now().isoformat()
-        }
-
-        # Event context (flattened for LLMs)
-        if event_context:
-            context["event"] = {
-                "device_id": event_context.device_id,
-                "type": event_context.event_type,
-                "value": event_context.event_value,
-                "location": event_context.location,
-                "trend_1h": event_context.trend_1h,
-                "anomaly_score": event_context.anomaly_score,
-            }
-
-        # Home state (keep only essential fields)
-        if home_state:
-            # truncate large fields for local LLM
-            clipped_state = json.loads(json.dumps(home_state))  # deep copy
-            context["home_state"] = clipped_state
-
-        # Weather from cache (NEVER fetch during chat)
-        if self.weather and self.weather.cached_context:
-            try:
-                context["environment"] = self.weather.format_for_llm()
-            except Exception as e:
-                logger.warning(f"Weather formatting failed: {e}")
-
-        # Device ontology summary
-        if self.ontology._loaded:
-            summary = self.ontology.get_device_summary()
-            context["device_summary"] = summary
-            logger.info(f"Device summary zones: {list(summary.get('zone_details', {}).keys())}")
-        else:
-            logger.warning("Device ontology not loaded, skipping device_summary")
-
-        # Home health assessment (authoritative status)
-        home_health = await self.health_engine.evaluate(home_state=home_state)
-        context["home_health"] = {
-            "status": home_health.status.value,
-            "score": home_health.health_score,
-            "has_leak": home_health.has_leak,
-            "has_smoke": home_health.has_smoke,
-            "has_co": home_health.has_co,
-            "active_alarms": home_health.active_alarms,
-            "details": [d.message for d in home_health.details[:5]]  # Top 5 issues
-        }
-
-        # Temperature preference range
-        temp_range = self.temp_model.get_preferred_range()
-        context["temp_preferences"] = {
-            "min": temp_range[0],
-            "max": temp_range[1]
-        }
-
-        # Conversation memory for context building
-        session_memory = self._get_session_memory()
-        if session_memory:
-            context["conversation_history"] = session_memory[-self.llm_context_turns:]
-
-        # Memory search
-        try:
-            if self.memory:
-                mems = await self.memory.search_keyword(message, limit=3)
-                context["memories"] = [
-                    {"content": m.content, "type": m.type.value} for m in mems
-                ]
-        except Exception as e:
-            logger.warning(f"Memory retrieval failed: {e}")
-
-        # User feedback preferences
-        try:
-            if self.feedback_learning:
-                prefs = await self.feedback_learning.get_all_preferences(min_confidence=0.6)
-                if prefs:
-                    context["user_preferences"] = prefs
-        except Exception as e:
-            logger.warning(f"Failed prefs: {e}")
-
-        # RAG context - ONLY query for troubleshooting intents to keep prompts lean
-        if self.rag_engine and self.intent_parser.is_troubleshooting_intent(intent):
-            try:
-                # Build device-aware query for better RAG results
-                rag_query = message
-                
-                # If we have device ontology, enrich the query with device info
-                if self.ontology._loaded and intent and intent.target_device:
-                    # Try to find the device in ontology
-                    for device in self.ontology.devices:
-                        if intent.target_device.lower() in device.name.lower():
-                            manufacturer = device.manufacturer or ""
-                            model = device.model or ""
-                            rag_query = f"{message} {manufacturer} {model}".strip()
-                            break
-                
-                # Also check conversation for device context
-                session_memory = self._get_session_memory()
-                for msg in reversed(session_memory[-4:]):
-                    # Look for device mentions in recent conversation
-                    content_lower = msg["content"].lower()
-                    for device in self.ontology.devices if self.ontology._loaded else []:
-                        if device.name.lower() in content_lower:
-                            manufacturer = device.manufacturer or ""
-                            model = device.model or ""
-                            rag_query = f"{rag_query} {manufacturer} {model}".strip()
-                            break
-                
-                logger.info(f"RAG query for troubleshooting: {rag_query[:100]}...")
-                rag_results = self.rag_engine.query(rag_query, n_results=3)
-                
-                docs = []
-                for r in rag_results:
-                    if r.get("relevance_score", 0) > 0.25:
-                        source = r['metadata'].get('source', 'Unknown')
-                        # Include more text for troubleshooting context
-                        text = r['text'][:500]
-                        docs.append(f"[{source}]: {text}")
-                
-                if docs:
-                    context["rag_context"] = docs
-                    logger.info(f"RAG returned {len(docs)} relevant documents")
-                else:
-                    logger.info("RAG returned no relevant documents")
-                    
-            except Exception as e:
-                logger.warning(f"RAG query failed: {e}")
-
-        # Session history
-        if hasattr(self, "session_history") and self.session_history:
-            context["session_history"] = self.session_history[-4:]
-
-        return context
-
-    # ---------------------------------------------------------------------
-    # Prompt Builder
-    # ---------------------------------------------------------------------
-
-    async def _build_system_prompt(self, context: Dict[str, Any]) -> str:
-        """
-        Create a concise system prompt for local/cloud LLMs.
-        """
-
-        p = [
-            "You are HomeSight, a friendly home assistant that ONLY reports actual sensor data.",
+        parts = [
+            "You are HomeSight, a smart home assistant.",
             "",
-            "⚠️ STRICT ANTI-HALLUCINATION RULES - VIOLATIONS ARE UNACCEPTABLE:",
+            "## RULES",
+            "1. ONLY report data you have. If no sensor exists for something, say so.",
+            "2. Each device has a TYPE that defines what it can measure:",
+            "   - 'leak_sensor' or 'water_leak' or 'sensor': detects water leaks ONLY (NOT temperature/humidity)",
+            "   - 'temperature_sensor': measures temperature and sometimes humidity",
+            "   - 'thermostat': controls HVAC, shows temperature",
+            "   - 'motion_sensor': detects motion only",
+            "3. NEVER claim a sensor can measure something its type doesn't support.",
+            "4. If ml_erratic shows a device with erratic_score > 0.6, ALWAYS mention this is concerning.",
+            "5. 'features' are room (zone) attributes - NOT sensors. You CANNOT report their status.",
+            "6. Be conversational and helpful. Suggest what you CAN help with.",
             "",
-            "YOU HAVE NO INFORMATION ABOUT:",
-            "- Temperature (unless a temp sensor is listed)",
-            "- Sump pump status, water levels, or operation (NO sump pump sensor exists)",
-            "- Water heater status (NO water heater sensor exists)", 
-            "- Washer/dryer status (NO washer/dryer sensor exists)",
-            "- HVAC status (unless thermostat is listed)",
-            "- Any device NOT explicitly listed under 'SENSORS' in ZONE DETAILS",
-            "",
-            "When user asks about something you have NO sensor for, say:",
-            "'I don't have a sensor monitoring the [thing]. The basement has [thing] but I can't report its status.'",
-            "",
-            "ONLY REPORT:",
-            "- Devices listed under 'SENSORS (can report status)' in ZONE DETAILS",
-            "- Status/readings explicitly provided for those sensors",
-            "- Room features are just ATTRIBUTES describing what's in the room",
-            "",
-            "EXAMPLE - User asks 'how is the sump pump?'",
-            "CORRECT: 'The basement has a sump pump, but I don't have a sensor monitoring it so I can't report its status.'",
-            "WRONG: 'The sump pump is working normally' (HALLUCINATION - no sensor!)",
-            "",
-            "EXAMPLE - User asks 'what's the temperature?'", 
-            "CORRECT: 'I don't have a temperature sensor in that room.'",
-            "WRONG: 'It's 72°F' (HALLUCINATION - no temp sensor!)",
-            "",
-            "Be conversational and match the user's tone. Offer to help with what you CAN monitor.",
+            "## YOUR DATA",
             "",
         ]
-
-        # Home Health (AUTHORITATIVE - prevent contradictions)
-        if "home_health" in context:
-            hh = context["home_health"]
-            p.append(f"HOME STATUS (authoritative, DO NOT contradict):")
-            p.append(f"  Status: {hh['status'].upper()} (score: {hh['score']}/100)")
-
-            if hh["has_leak"]:
-                p.append(f"  ⚠️ WATER LEAK DETECTED")
-            if hh["has_smoke"]:
-                p.append(f"  ⚠️ SMOKE DETECTED")
-            if hh["has_co"]:
-                p.append(f"  ⚠️ CO DETECTED")
-
-            if hh["active_alarms"] > 0:
-                p.append(f"  Active Alarms: {hh['active_alarms']}")
-
-            if hh.get("details"):
-                p.append(f"  Issues:")
-                for detail in hh["details"]:
-                    p.append(f"    - {detail}")
-            elif hh["status"] == "good":
-                p.append(f"  ✓ All systems normal")
-
-            p.append("")
-
-        # Conversation history
-        if "conversation_history" in context:
-            p.append("Recent Conversation:")
-            for msg in context["conversation_history"]:
-                role = msg["role"]
-                content = msg["content"][:100]
-                p.append(f"  [{role}] {content}")
-            p.append("")
-
-        p.append("Current Context:")
-
-        # Device ontology summary with zone details
-        if "device_summary" in context:
-            summary = context["device_summary"]
-            p.append(f"Devices: {summary.get('total_devices', 0)} total")
-            p.append(f"Rooms: {', '.join(summary.get('rooms', []))}")
-            if summary.get('rooms_with_temperature'):
-                p.append(f"Temp sensors in: {', '.join(summary['rooms_with_temperature'])}")
-            if summary.get('rooms_with_leak_detection'):
-                p.append(f"Leak sensors in: {', '.join(summary['rooms_with_leak_detection'])}")
-            
-            # Include zone details with attributes and devices
-            zone_details = summary.get('zone_details', {})
-            if zone_details:
-                p.append("")
-                p.append("ZONE DETAILS (source of truth for what sensors exist):")
-                p.append("NOTE: 'Features' are room attributes, NOT sensors. You cannot report status of features.")
-                p.append("")
-                for zone_id, info in zone_details.items():
-                    p.append(f"  📍 {info.get('name', zone_id)} ({info.get('type', 'unknown')}):")
-                    
-                    # Devices with types - ONLY these have sensor data
-                    devices = info.get('devices', [])
-                    if devices:
-                        p.append(f"     SENSORS (can report status): {', '.join(devices)}")
-                    else:
-                        p.append(f"     SENSORS: None installed - NO sensor data available for this room")
-                    
-                    # Room features - NOT sensors, just attributes
-                    attrs = info.get('attributes', [])
-                    if attrs:
-                        p.append(f"     Features (room attributes, NOT monitored): {', '.join(attrs)}")
-
+        
+        # Devices
+        if "devices" in context:
+            parts.append("### Devices (these are your sensors)")
+            for d in context["devices"]:
+                parts.append(f"- {d['name']} (type: {d['type']}, model: {d.get('model', 'unknown')}) in {d['zone']}")
+            parts.append("")
+        
+        # Zones
+        if "zones" in context:
+            parts.append("### Zones")
+            for z in context["zones"]:
+                devices_str = ", ".join(z["devices"]) if z["devices"] else "no sensors"
+                types_str = ", ".join(set(z["device_types"])) if z["device_types"] else "none"
+                features_str = ", ".join(z["features"]) if z["features"] else "none"
+                parts.append(f"- {z['name']}: sensors=[{devices_str}] (types: {types_str}), features=[{features_str}]")
+            parts.append("")
+        
+        # Health
+        if "health" in context:
+            h = context["health"]
+            parts.append(f"### Home Health: {h['status'].upper()} (score: {h['score']}/100)")
+            if h["has_leak"]:
+                parts.append("⚠️ WATER LEAK DETECTED")
+            if h["has_smoke"]:
+                parts.append("⚠️ SMOKE DETECTED")
+            if h["issues"]:
+                for issue in h["issues"]:
+                    parts.append(f"- {issue}")
+            parts.append("")
+        
+        # ML Erratic - CRITICAL for health questions
+        if "ml_erratic" in context:
+            parts.append("### ⚠️ ML-Detected Erratic Behavior (IMPORTANT)")
+            parts.append("These sensors show unusual rapid-fire patterns. Mention this when discussing health!")
+            for e in context["ml_erratic"]:
+                parts.append(f"- {e['device_id']}: erratic_score={e['erratic_score']:.0%}, rate={e.get('recent_events_per_minute', 0)}/min, trend={e.get('trend', 'unknown')}")
+            parts.append("(High scores suggest sensor malfunction or false positives)")
+            parts.append("")
+        
+        # Incidents
+        if "incidents" in context:
+            inc = context["incidents"]
+            parts.append(f"### Incident History ({inc['total_count']} total)")
+            if inc["by_type"]:
+                types_str = ", ".join([f"{k}: {v}" for k, v in list(inc["by_type"].items())[:5]])
+                parts.append(f"By type: {types_str}")
+            parts.append("")
+        
+        # Weather
+        if "weather" in context:
+            parts.append(f"### Weather: {context['weather']}")
+            parts.append("")
+        
+        # Home State (live readings)
         if "home_state" in context:
-            p.append(f"Home State: {json.dumps(context['home_state'], indent=2)[:500]}")
-
-        if "event" in context:
-            ev = context["event"]
-            p.append(
-                f"Event: device={ev['device_id']} type={ev['type']} "
-                f"value={ev['value']} location={ev['location']} "
-                f"anomaly={ev['anomaly_score']}"
-            )
-
-        if "environment" in context:
-            p.append(f"Weather: {context['environment']}")
-
-        if "user_preferences" in context:
-            p.append("User Preferences:")
-            for k, v in context["user_preferences"].items():
-                p.append(f"- {k}: {v}")
-
-        if "memories" in context:
-            p.append("Relevant Past Interactions:")
-            for mem in context["memories"]:
-                p.append(f"- [{mem['type']}] {mem['content']}")
-
-        if "rag_context" in context:
-            p.append("Documentation:")
-            for d in context["rag_context"]:
-                p.append(f"- {d}")
-
-        if "session_history" in context:
-            p.append("Recent Conversation:")
-            for msg in context["session_history"]:
-                p.append(f"- [{msg['role']}] {msg['content'][:120]}")
-
-        # ML health summaries (if provided by River ML)
-        if "ml_room_health" in context:
-            p.append(f"Room Health (ML): {context['ml_room_health']}")
-
-        if "ml_home_health" in context:
-            p.append(f"Home Health (ML): {context['ml_home_health']}")
-
-        # Output format (no extra backticks)
-        p.append("""
-Respond ONLY with valid JSON:
-
+            parts.append("### Current Device Readings")
+            state_str = json.dumps(context["home_state"], indent=2)
+            if len(state_str) > 500:
+                state_str = state_str[:500] + "..."
+            parts.append(state_str)
+            parts.append("")
+        
+        # Conversation
+        if "conversation" in context:
+            parts.append("### Recent Conversation")
+            for msg in context["conversation"][-5:]:
+                content = msg["content"][:150] if len(msg["content"]) > 150 else msg["content"]
+                parts.append(f"[{msg['role']}]: {content}")
+            parts.append("")
+        
+        # Response format
+        parts.append("""
+## RESPONSE FORMAT
+Respond with JSON only:
 {
-  "reply": "Your full, helpful response here. Include all relevant details and a follow-up question or offer when appropriate.",
-  "action": {
-    "topic": "homesight/device/command",
-    "command": "cmd",
-    "value": 123
-  }
+  "reply": "Your conversational response here",
+  "action": null
 }
 
-If no action is needed, set:
-"action": null
-
-IMPORTANT: The "reply" field should be conversational and complete - include device status, room features, AND a helpful follow-up offer.
+For actions:
+{
+  "reply": "Your response",
+  "action": {"topic": "homesight/device/command", "command": "turn_on", "value": true}
+}
 """)
-
-        prompt = "\n".join(p)
+        
+        prompt = "\n".join(parts)
+        
+        # Truncate if needed
+        if len(prompt) > self.max_system_prompt_chars:
+            prompt = prompt[:self.max_system_prompt_chars]
+        
         return prompt
 
-    # ---------------------------------------------------------------------
+    # -------------------------------------------------------------------------
     # LLM Call
-    # ---------------------------------------------------------------------
+    # -------------------------------------------------------------------------
 
-    async def _call_llm(self, system_prompt: str, user_message: str, session_id: Optional[str] = None) -> str:
-
-        if self.llm.chat_mode == "local":
-            system_prompt = system_prompt[-self.max_system_prompt_chars:]
-            user_message = user_message[-self.max_user_message_chars:]
-
-        # Build messages with conversation history for proper context
+    async def _call_llm(self, system_prompt: str, user_message: str) -> str:
+        """Call the LLM."""
         messages = [
             {"role": "system", "content": system_prompt},
         ]
         
-        # Add conversation history as actual message turns
-        session_memory = self._get_session_memory(session_id)
-        for msg in session_memory[-self.llm_context_turns:]:
+        # Add conversation history
+        memory = self._get_session_memory()
+        for msg in memory[-self.llm_context_turns:]:
             messages.append({"role": msg["role"], "content": msg["content"]})
         
-        # Add current user message
         messages.append({"role": "user", "content": user_message})
         
-        logger.debug(f"LLM call with {len(messages)} messages (session={session_id or 'default'})")
-
         resp_text, _ = await self.llm.chat_async(
             messages=messages,
             temperature=self.chat_temperature,
             max_tokens=self.chat_max_tokens
         )
-
+        
         return resp_text
 
-    # ---------------------------------------------------------------------
-    # JSON Response Parsing (robust)
-    # ---------------------------------------------------------------------
+    # -------------------------------------------------------------------------
+    # Response Parsing
+    # -------------------------------------------------------------------------
 
-    async def _parse_llm_response(
-        self, llm_response: str, context: Dict[str, Any]
-    ) -> ConversationResponse:
-
+    def _parse_response(self, llm_response: str) -> ConversationResponse:
+        """Parse LLM response, extracting reply and optional action."""
         action = None
         reply = llm_response
-
+        
         try:
-            # Find any JSON object in the output
+            # Find JSON in response
             match = re.search(r"\{(?:[^{}]|(?:\{[^}]*\}))*\}", llm_response, re.DOTALL)
-
             if match:
                 raw = match.group(0)
-
-                # Remove trailing commas
+                # Clean trailing commas
                 cleaned = re.sub(r",\s*}", "}", raw)
                 cleaned = re.sub(r",\s*]", "]", cleaned)
-
+                
                 parsed = json.loads(cleaned)
                 reply = parsed.get("reply", reply)
-
+                
                 # Validate action
                 if parsed.get("action"):
                     a = parsed["action"]
-                    cmd = a.get("command")
-
-                    if cmd in SAFE_ACTIONS:
+                    if a.get("command") in SAFE_ACTIONS:
                         action = ActionCommand(
                             topic=a["topic"],
-                            command=cmd,
-                            value=a["value"]
+                            command=a["command"],
+                            value=a.get("value")
                         )
-                    else:
-                        logger.warning(f"Blocked unsafe action: {cmd}")
-
         except Exception as e:
             logger.warning(f"JSON parse failed: {e}")
-
-        # Use policy engine fallback
-        if not action and self.policy:
-            try:
-                decision = await self.policy.evaluate_user_intent(
-                    intent=context.get("user_message", ""),
-                    context=context.get("home_state", {})
-                )
-                if decision.action:
-                    action = decision.action
-                    if decision.reasoning:
-                        reply += f"\n({decision.reasoning})"
-            except Exception as e:
-                logger.warning(f"Policy engine error: {e}")
-
+        
         return ConversationResponse(reply=reply, action=action)
 
-    # ---------------------------------------------------------------------
+    # -------------------------------------------------------------------------
+    # Memory Management
+    # -------------------------------------------------------------------------
+
+    def _get_session_memory(self) -> List[Dict[str, str]]:
+        """Get memory for current session."""
+        sid = self._current_session or "default"
+        if sid not in self._session_memories:
+            self._session_memories[sid] = []
+        return self._session_memories[sid]
+
+    def _add_to_memory(self, role: str, content: str):
+        """Add message to session memory."""
+        memory = self._get_session_memory()
+        memory.append({"role": role, "content": content})
+        if len(memory) > self.max_memory_turns:
+            sid = self._current_session or "default"
+            self._session_memories[sid] = memory[-self.max_memory_turns:]
+
+    # -------------------------------------------------------------------------
+    # Feedback (kept for API compatibility)
+    # -------------------------------------------------------------------------
 
     async def provide_feedback(
         self,
@@ -1033,18 +477,13 @@ IMPORTANT: The "reply" field should be conversational and complete - include dev
         rating: Optional[int] = None,
         correction: Optional[str] = None
     ):
-        """Store user feedback for long-term learning."""
-        if not self.feedback_learning:
-            return
-
-        from .learning import UserFeedback, FeedbackType
-
-        fb = UserFeedback(
-            interaction_id=interaction_id,
-            feedback_type=FeedbackType(feedback_type),
-            rating=rating,
-            correction=correction
-        )
-
-        await self.feedback_learning.record_feedback(fb)
-        logger.info(f"Feedback recorded: {fb}")
+        """Store user feedback."""
+        if self.feedback_learning:
+            from .learning import UserFeedback, FeedbackType
+            fb = UserFeedback(
+                interaction_id=interaction_id,
+                feedback_type=FeedbackType(feedback_type),
+                rating=rating,
+                correction=correction
+            )
+            await self.feedback_learning.record_feedback(fb)
