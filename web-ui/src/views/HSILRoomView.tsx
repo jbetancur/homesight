@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import {
   Container,
   Grid,
@@ -7,12 +7,8 @@ import {
   Badge,
   Group,
   Stack,
-  Textarea,
-  Button,
   Paper,
-  Box,
   ThemeIcon,
-  rem,
   Modal,
   Select,
   Switch,
@@ -21,6 +17,7 @@ import {
   MultiSelect,
   ActionIcon,
   Tabs,
+  Button,
 } from '@mantine/core';
 import {
   Thermometer,
@@ -28,9 +25,7 @@ import {
   Flame,
   Zap,
   AlertTriangle,
-  Send,
   Brain,
-  Sparkles,
   Cloud,
   Wind,
   Sunrise,
@@ -44,7 +39,6 @@ import {
 } from 'lucide-react';
 import { API_BASE } from '../apiConfig';
 import { useEventSubscription } from '../useEventSubscription';
-import ReactMarkdown from 'react-markdown';
 import WeatherCorrelationChart from '../components/WeatherCorrelationChart';
 import LearningProgressChart from '../components/LearningProgressChart';
 
@@ -114,12 +108,6 @@ interface ZoneSchema {
   attributes: ZoneAttributeField[];
 }
 
-interface AIMessage {
-  role: 'user' | 'assistant';
-  content: string;
-  action?: any;
-}
-
 const ZONE_ICONS: Record<string, any> = {
   'living-room': Thermometer,
   kitchen: Flame,
@@ -155,10 +143,6 @@ export default function HSILRoomView() {
   const [rooms, setRooms] = useState<Room[]>([]);
   const [availableZones, setAvailableZones] = useState<any[]>([]);
   const [zoneSchema, setZoneSchema] = useState<ZoneSchema | null>(null);
-  const [chatMessages, setChatMessages] = useState<AIMessage[]>([]);
-  const [chatInput, setChatInput] = useState('');
-  const [chatLoading, setChatLoading] = useState(false);
-  const [aiThinking, setAiThinking] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [selectedDevice, setSelectedDevice] = useState<Device | null>(null);
   const [selectedZone, setSelectedZone] = useState<string>('');
@@ -166,16 +150,6 @@ export default function HSILRoomView() {
   const [editingZone, setEditingZone] = useState<Room | null>(null);
   const [editedAttributes, setEditedAttributes] = useState<ZoneAttributes | null>(null);
   const [activeTab, setActiveTab] = useState<string>('rooms');
-  const chatEndRef = useRef<HTMLDivElement>(null);
-  
-  // Generate a persistent session ID for this browser tab
-  const [sessionId] = useState(() => {
-    const stored = sessionStorage.getItem('hsil_session_id');
-    if (stored) return stored;
-    const newId = `session_${Date.now()}_${Math.random().toString(36).substring(7)}`;
-    sessionStorage.setItem('hsil_session_id', newId);
-    return newId;
-  });
 
   // Helper to check if device was recently updated (within last 30 seconds)
   const isRecentlyUpdated = (lastUpdated: string | undefined) => {
@@ -195,11 +169,6 @@ export default function HSILRoomView() {
       clearInterval(weatherInterval);
     };
   }, []);
-
-  useEffect(() => {
-    // Auto-scroll to latest message
-    chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [chatMessages]);
 
   // Real-time event handling
   const handleEvent = useCallback((event: any) => {
@@ -307,44 +276,6 @@ export default function HSILRoomView() {
     }
   };
 
-  const handleChatSubmit = async () => {
-    if (!chatInput.trim()) return;
-
-    const userMessage: AIMessage = { role: 'user', content: chatInput };
-    setChatMessages((prev) => [...prev, userMessage]);
-    setChatInput('');
-    setChatLoading(true);
-    setAiThinking(true);
-
-    try {
-      const res = await fetch(`${API_BASE}/api/hsil/chat`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: chatInput, session_id: sessionId }),
-      });
-
-      if (res.ok) {
-        const data = await res.json();
-        const assistantMessage: AIMessage = {
-          role: 'assistant',
-          content: data.reply,
-          action: data.action,
-        };
-        setChatMessages((prev) => [...prev, assistantMessage]);
-
-        if (data.action) {
-          // Flash the affected device/room
-          setAiThinking(false);
-        }
-      }
-    } catch (error) {
-      console.error('Chat error:', error);
-    } finally {
-      setChatLoading(false);
-      setAiThinking(false);
-    }
-  };
-
   const handleSaveZone = async () => {
     if (!editingZone || !editedAttributes) return;
     
@@ -401,14 +332,6 @@ export default function HSILRoomView() {
                 </Text>
               </div>
             </Group>
-            {aiThinking && (
-              <Group>
-                <Sparkles size={20} color="white" />
-                <Text size="sm" c="white" fw={500}>
-                  AI Processing...
-                </Text>
-              </Group>
-            )}
           </Group>
         </Paper>
 
@@ -676,108 +599,6 @@ export default function HSILRoomView() {
             <LearningProgressChart />
           </Tabs.Panel>
         </Tabs>
-
-        {/* AI Chat Panel */}
-        <Paper shadow="md" p="lg" radius="md" withBorder>
-          <Stack gap="md">
-            <Group>
-              <ThemeIcon size="lg" variant="gradient" gradient={{ from: 'indigo', to: 'cyan' }}>
-                <Brain size={20} />
-              </ThemeIcon>
-              <Text size="lg" fw={600}>
-                AI Assistant
-              </Text>
-            </Group>
-
-            <Box
-              style={{
-                maxHeight: rem(300),
-                overflowY: 'auto',
-                padding: rem(12),
-                backgroundColor: 'var(--mantine-color-gray-0)',
-                borderRadius: rem(8),
-              }}
-            >
-              {chatMessages.length === 0 ? (
-                <Text size="sm" c="dimmed" ta="center" py="md">
-                  Ask me anything about your home, or tell me how you'd like to adjust things!
-                </Text>
-              ) : (
-                <Stack gap="md">
-                  {chatMessages.map((msg, idx) => (
-                    <Paper
-                      key={idx}
-                      p="sm"
-                      radius="md"
-                      style={{
-                        backgroundColor:
-                          msg.role === 'user'
-                            ? 'var(--mantine-color-blue-6)'
-                            : 'var(--mantine-color-gray-2)',
-                        color: msg.role === 'user' ? 'white' : 'inherit',
-                        alignSelf: msg.role === 'user' ? 'flex-end' : 'flex-start',
-                        maxWidth: '80%',
-                      }}
-                    >
-                      {msg.role === 'user' ? (
-                        <Text size="sm">{msg.content}</Text>
-                      ) : (
-                        <Box
-                          className="chat-markdown"
-                          style={{
-                            fontSize: 'var(--mantine-font-size-sm)',
-                            lineHeight: 1.5,
-                          }}
-                        >
-                          <ReactMarkdown
-                            components={{
-                              p: ({children}) => <Text size="sm" style={{ margin: '0 0 0.5em 0' }}>{children}</Text>,
-                              strong: ({children}) => <Text component="span" fw={700}>{children}</Text>,
-                              li: ({children}) => <li style={{ marginLeft: 8 }}>{children}</li>,
-                            }}
-                          >
-                            {msg.content}
-                          </ReactMarkdown>
-                        </Box>
-                      )}
-                      {msg.action && (
-                        <Badge size="xs" mt="xs" color="green">
-                          Action: {msg.action.command}
-                        </Badge>
-                      )}
-                    </Paper>
-                  ))}
-                  <div ref={chatEndRef} />
-                </Stack>
-              )}
-            </Box>
-
-            <Group gap="xs" align="flex-end">
-              <Textarea
-                placeholder="Type your message..."
-                value={chatInput}
-                onChange={(e) => setChatInput(e.currentTarget.value)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter' && !e.shiftKey) {
-                    e.preventDefault();
-                    handleChatSubmit();
-                  }
-                }}
-                autosize
-                minRows={1}
-                maxRows={4}
-                style={{ flex: 1 }}
-              />
-              <Button
-                onClick={handleChatSubmit}
-                loading={chatLoading}
-                leftSection={<Send size={16} />}
-              >
-                Send
-              </Button>
-            </Group>
-          </Stack>
-        </Paper>
       </Stack>
 
       {/* Device Settings Modal */}

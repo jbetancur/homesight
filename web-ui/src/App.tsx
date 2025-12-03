@@ -11,6 +11,8 @@ import { IntegrationsView } from './views/IntegrationsView';
 import { StatusView } from './views/StatusView';
 import { ZWaveView } from './views/ZWaveView';
 import HSILRoomView from './views/HSILRoomView';
+import FloatingAIAssistant from './components/FloatingAIAssistant';
+import FloatingAIButton from './components/FloatingAIButton';
 import './App.css';
 
 const navItems = [
@@ -76,18 +78,20 @@ function NavbarContent() {
 
 function AppContent() {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const [aiAssistantOpen, setAiAssistantOpen] = useState(false);
 
   return (
-    <AppShell
-      navbar={{
-        width: 260,
-        breakpoint: 'sm',
-        collapsed: { mobile: !mobileMenuOpen, desktop: false },
-      }}
-      header={{ height: 56 }}
-      layout="alt"
-      style={{ minHeight: '100vh' }}
-    >
+    <>
+      <AppShell
+        navbar={{
+          width: 260,
+          breakpoint: 'sm',
+          collapsed: { mobile: !mobileMenuOpen, desktop: false },
+        }}
+        header={{ height: 56 }}
+        layout="alt"
+        style={{ minHeight: '100vh' }}
+      >
       <AppShell.Navbar p={0} className="navbar">
         <NavbarContent />
       </AppShell.Navbar>
@@ -123,6 +127,16 @@ function AppContent() {
         </Container>
       </AppShell.Main>
     </AppShell>
+
+      {/* Global Floating AI Assistant */}
+      {!aiAssistantOpen && (
+        <FloatingAIButton onClick={() => setAiAssistantOpen(true)} />
+      )}
+      <FloatingAIAssistant
+        opened={aiAssistantOpen}
+        onClose={() => setAiAssistantOpen(false)}
+      />
+    </>
   );
 }
 
