@@ -159,6 +159,16 @@ class ConversationalAgentService:
             logger.info(f"Troubleshooting intent detected, querying RAG...")
             # RAG will be queried in _build_context with the intent
 
+        # Check if user is asking about incidents (historical or current)
+        incident_query = self._detect_incident_query(message)
+        if incident_query:
+            logger.info(f"Incident query detected: {incident_query}")
+            incident_response = await self._handle_incident_query(incident_query, home_state, session_id)
+            if incident_response:
+                self._add_to_memory("user", message, session_id)
+                self._add_to_memory("assistant", incident_response.reply, session_id)
+                return incident_response
+
         # Check if this is a room/zone query - handle directly for better responses
         room_query = self._detect_room_query(message)
         logger.info(f"Room query detection: message='{message}', detected_zone={room_query}, ontology_loaded={self.ontology._loaded}")
@@ -277,6 +287,228 @@ class ConversationalAgentService:
         
         reply = " ".join(parts)
         
+        return ConversationResponse(reply=reply, action=None)
+
+    # ---------------------------------------------------------------------
+    # Incident Query Handling
+    # ---------------------------------------------------------------------
+
+    def _detect_incident_query(self, message: str) -> Optional[Dict[str, Any]]:
+        """
+        Detect if user is asking about incidents, history, or problems.
+        
+        Also handles follow-up responses like "yes" or "yea" after 
+        being offered to check incidents.
+        """
+        message_lower = message.lower()
+        
+        # Direct incident keywords
+        incident_keywords = [
+            "incident", "incidents", "problem", "problems", "issue", "issues",
+            "alert", "alerts", "alarm", "alarms", "history", "past",
+            "erratic", "false positive", "malfunction"
+        ]
+        
+        # Check for direct incident query
+        for kw in incident_keywords:
+            if kw in message_lower:
+                # Try to extract room/zone context
+                zone_id = None
+                if self.ontology._loaded:
+                    for zid in self.ontology.zone_ids:
+                        zone = self.ontology.zones.get(zid)
+                        if zone and zone.name.lower() in message_lower:
+                            zone_id = zid
+                            break
+                
+                # Also check conversation history for zone context
+                if not zone_id:
+                    session_memory = self._get_session_memory()
+                    for msg in reversed(session_memory[-4:]):
+                        content_lower = msg["content"].lower()
+                        for zid in self.ontology.zone_ids if self.ontology._loaded else []:
+                            zone = self.ontology.zones.get(zid)
+                            if zone and zone.name.lower() in content_lower:
+                                zone_id = zid
+                                break
+                        if zone_id:
+                            break
+                
+                return {"type": "incident_query", "zone_id": zone_id}
+        
+        # Check for affirmative follow-up after incident offer
+        affirmative_patterns = ["yes", "yea", "yeah", "yep", "sure", "ok", "okay", "please"]
+        session_memory = self._get_session_memory()
+        
+        if any(pattern in message_lower for pattern in affirmative_patterns):
+            # Check if last assistant message offered incidents
+            for msg in reversed(session_memory[-2:]):
+                if msg["role"] == "assistant":
+                    if "incident" in msg["content"].lower():
+                        # Extract zone from that message
+                        zone_id = None
+                        if self.ontology._loaded:
+                            for zid in self.ontology.zone_ids:
+                                zone = self.ontology.zones.get(zid)
+                                if zone and zone.name.lower() in msg["content"].lower():
+                                    zone_id = zid
+                                    break
+                        return {"type": "incident_followup", "zone_id": zone_id}
+                    break
+        
+        return None
+
+    async def _handle_incident_query(
+        self, 
+        query_info: Dict[str, Any],
+        home_state: Optional[Dict[str, Any]],
+        session_id: Optional[str]
+    ) -> Optional[ConversationResponse]:
+        """
+        Handle incident queries by fetching historical incident data.
+        """
+        import httpx
+        
+        zone_id = query_info.get("zone_id")
+        
+        try:
+            # Fetch incidents from backend
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                resp = await client.get(f"{self.ontology.backend_url}/api/incidents")
+                if resp.status_code != 200:
+                    return None
+                
+                incidents = resp.json()
+        except Exception as e:
+            logger.warning(f"Failed to fetch incidents: {e}")
+            return None
+        
+        if not incidents:
+            return ConversationResponse(
+                reply="Great news! There are no recorded incidents for your home.",
+                action=None
+            )
+        
+        # Filter by zone if specified
+        if zone_id:
+            zone = self.ontology.zones.get(zone_id) if self.ontology._loaded else None
+            zone_name = zone.name if zone else zone_id
+            
+            # Get devices in this zone
+            zone_devices = self.ontology.devices_by_zone.get(zone_id, []) if self.ontology._loaded else []
+            zone_device_ids = {d.device_id for d in zone_devices}
+            
+            incidents = [i for i in incidents if i.get("device_id") in zone_device_ids]
+            
+            if not incidents:
+                return ConversationResponse(
+                    reply=f"No incidents have been recorded for the {zone_name.lower()}.",
+                    action=None
+                )
+        
+        # Analyze incident patterns
+        parts = []
+        
+        # Count by type
+        type_counts: Dict[str, int] = {}
+        device_counts: Dict[str, int] = {}
+        resolved_count = 0
+        active_count = 0
+        
+        # Check for erratic patterns (rapid-fire incidents)
+        from collections import defaultdict
+        device_timestamps: Dict[str, list] = defaultdict(list)
+        
+        for inc in incidents:
+            inc_type = inc.get("type") or inc.get("title", "unknown")  # Use title if type is empty
+            device_id = inc.get("device_id", "unknown")
+            status = inc.get("status", "unknown")
+            created_at = inc.get("created_at", "")
+            
+            type_counts[inc_type] = type_counts.get(inc_type, 0) + 1
+            device_counts[device_id] = device_counts.get(device_id, 0) + 1
+            
+            if status == "resolved":
+                resolved_count += 1
+            elif status == "active":
+                active_count += 1
+            
+            if created_at:
+                device_timestamps[device_id].append(created_at)
+        
+        # Build summary
+        total = len(incidents)
+        if zone_id:
+            zone_name = self.ontology.zones.get(zone_id).name if self.ontology._loaded and zone_id in self.ontology.zones else zone_id
+            parts.append(f"📊 **{zone_name} Incident Summary:**")
+        else:
+            parts.append(f"📊 **Home Incident Summary:**")
+        
+        parts.append(f"- Total incidents: {total}")
+        parts.append(f"- Active: {active_count}, Resolved: {resolved_count}")
+        
+        # Type breakdown
+        if type_counts:
+            type_str = ", ".join([f"{t}: {c}" for t, c in sorted(type_counts.items(), key=lambda x: -x[1])[:5]])
+            parts.append(f"- By type: {type_str}")
+        
+        # Check for erratic patterns
+        erratic_devices = []
+        for device_id, timestamps in device_timestamps.items():
+            if len(timestamps) >= 5:
+                # Sort timestamps and check for rapid sequences
+                try:
+                    from datetime import datetime
+                    sorted_ts = sorted([
+                        datetime.fromisoformat(ts.replace("Z", "+00:00")) 
+                        for ts in timestamps
+                    ])
+                    
+                    # Count events within 1-minute windows
+                    rapid_count = 0
+                    for i in range(len(sorted_ts) - 1):
+                        delta = (sorted_ts[i+1] - sorted_ts[i]).total_seconds()
+                        if delta < 60:  # Less than 1 minute apart
+                            rapid_count += 1
+                    
+                    if rapid_count >= 3:
+                        erratic_devices.append({
+                            "device_id": device_id,
+                            "total": len(timestamps),
+                            "rapid_events": rapid_count
+                        })
+                except Exception as e:
+                    logger.warning(f"Error analyzing timestamps: {e}")
+        
+        if erratic_devices:
+            parts.append("")
+            parts.append("⚠️ **Erratic Behavior Detected:**")
+            for ed in erratic_devices:
+                device_id = ed["device_id"]
+                # Try to get device name
+                device_name = device_id
+                if self.ontology._loaded:
+                    for d in self.ontology.devices.values():  # Iterate dict values
+                        if d.device_id == device_id:
+                            device_name = d.name
+                            break
+                
+                parts.append(f"- {device_name}: {ed['total']} incidents with {ed['rapid_events']} rapid-fire events")
+                parts.append(f"  This pattern suggests possible sensor malfunction or environmental interference.")
+        
+        # Most recent incidents
+        recent = sorted(incidents, key=lambda x: x.get("created_at", ""), reverse=True)[:3]
+        if recent:
+            parts.append("")
+            parts.append("**Recent incidents:**")
+            for inc in recent:
+                inc_type = inc.get("type") or inc.get("title", "unknown")
+                title = inc.get("title", inc_type)
+                status = inc.get("status", "unknown")
+                created = inc.get("created_at", "")[:10]  # Just date
+                parts.append(f"- {title} ({status}) - {created}")
+        
+        reply = "\n".join(parts)
         return ConversationResponse(reply=reply, action=None)
 
     # ---------------------------------------------------------------------

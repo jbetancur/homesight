@@ -45,6 +45,7 @@ import ReactMarkdown from 'react-markdown';
 interface Device {
   id: string;
   name: string;
+  alias?: string;
   type: string;
   value: number | boolean | null;
   state: 'normal' | 'warning' | 'critical' | 'unknown';
@@ -278,6 +279,7 @@ export default function HSILRoomView() {
         roomMap.get(zoneId)!.devices.push({
           id: device.id,
           name: device.name,
+          alias: device.alias,
           type: device.type,
           value: device.value,
           state: device.state || 'unknown',
@@ -600,7 +602,7 @@ export default function HSILRoomView() {
                                 <Icon size={14} />
                               </ThemeIcon>
                               <Text size="sm" fw={500}>
-                                {device.name}
+                                {device.alias ? `${device.alias} (${device.name})` : device.name}
                               </Text>
                             </Group>
                             <Group gap="xs">
@@ -754,7 +756,7 @@ export default function HSILRoomView() {
           setSelectedDevice(null);
           setSelectedZone('');
         }}
-        title={`Configure: ${selectedDevice?.name}`}
+        title={`Configure: ${selectedDevice?.alias ? `${selectedDevice.alias} (${selectedDevice.name})` : selectedDevice?.name}`}
       >
         <Stack gap="md">
           <Select

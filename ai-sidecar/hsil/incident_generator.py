@@ -67,9 +67,11 @@ class IncidentGenerator:
         "behavioral_routine_anomaly": IncidentType.BEHAVIORAL_ANOMALY,
         "behavioral_occupancy_unusual": IncidentType.BEHAVIORAL_ANOMALY,
 
-        # Sensor issues
+        # Sensor issues (including erratic behavior detection)
         "sensor_inconsistency_conflict": IncidentType.SENSOR_ISSUE,
         "sensor_inconsistency_drift": IncidentType.SENSOR_ISSUE,
+        "sensor_erratic": IncidentType.SENSOR_ISSUE,
+        "sensor_noise_false_positive": IncidentType.SENSOR_ISSUE,
     }
 
     # Severity mapping
@@ -95,7 +97,7 @@ class IncidentGenerator:
         IncidentType.BATTERY_LOW: 1440,  # Battery - 24h, don't spam
         IncidentType.HVAC_ISSUE: 60,  # HVAC - 1 hour
         IncidentType.COMFORT_ISSUE: 30,
-        IncidentType.SENSOR_ISSUE: 60,
+        IncidentType.SENSOR_ISSUE: 120,  # Sensor issues - 2 hour window to prevent spam
     }
 
     def __init__(

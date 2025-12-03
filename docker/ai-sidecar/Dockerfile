@@ -3,13 +3,20 @@ FROM python:3.11-slim
 WORKDIR /app
 
 # ------------------------------------------------------------
-# Install system dependencies (including OCR + PDF libs)
+# Install system dependencies (including OCR + PDF libs + Vulkan for GPU)
 # ------------------------------------------------------------
 RUN apt-get update && apt-get install -y \
     build-essential \
+    cmake \
     curl \
     git \
     ca-certificates \
+    # Build tools for compiling from source
+    autoconf \
+    automake \
+    libtool \
+    pkg-config \
+    # OCR and PDF processing
     tesseract-ocr \
     libtesseract-dev \
     libleptonica-dev \
@@ -22,6 +29,14 @@ RUN apt-get update && apt-get install -y \
     libtiff5-dev \
     libwebp-dev \
     poppler-utils \
+    # Vulkan support for AMD GPU acceleration (Radeon 780M / RDNA3)
+    mesa-vulkan-drivers \
+    libvulkan1 \
+    libvulkan-dev \
+    vulkan-tools \
+    glslang-tools \
+    glslc \
+    spirv-tools \
     && rm -rf /var/lib/apt/lists/*
 
 # ------------------------------------------------------------
@@ -29,7 +44,14 @@ RUN apt-get update && apt-get install -y \
 # ------------------------------------------------------------
 COPY ai-sidecar/requirements.txt .
 
-RUN pip install --no-cache-dir -r requirements.txt
+# Install non-GPU dependencies first (faster layer caching)
+RUN grep -v "llama-cpp-python" requirements.txt > requirements-base.txt && \
+    pip install --no-cache-dir -r requirements-base.txt
+
+# Build llama-cpp-python with Vulkan backend for AMD GPU acceleration
+# This compiles llama.cpp with Vulkan support for RADV (AMD open-source driver)
+ENV CMAKE_ARGS="-DGGML_VULKAN=ON"
+RUN pip install --no-cache-dir llama-cpp-python==0.3.16 --force-reinstall --no-binary :all:
 
 # ------------------------------------------------------------
 # Pre-download FastEmbed model

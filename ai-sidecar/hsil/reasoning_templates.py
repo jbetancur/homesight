@@ -221,6 +221,34 @@ SCENARIO_SIGNATURES: Dict[str, ScenarioSignature] = {
         base_severity=Severity.LOW,
         urgency_factors=["sustained_1_day"]
     ),
+    
+    # Erratic Sensor Detection - detects rapid-fire triggers indicating malfunction
+    "sensor_erratic": ScenarioSignature(
+        scenario_id="sensor_erratic",
+        category=ScenarioCategory.MAINTENANCE,
+        name="Sensor Erratic Behavior",
+        description="Sensor triggering too rapidly - possible malfunction or interference",
+        required_signals=["any"],  # Applies to any sensor type
+        threshold_conditions={
+            "is_erratic": True,
+            "event_frequency_per_minute": {"min": 3}
+        },
+        base_severity=Severity.MEDIUM,
+        urgency_factors=["critical_sensor", "sustained_5_minutes", "leak_sensor"]
+    ),
+    "sensor_noise_false_positive": ScenarioSignature(
+        scenario_id="sensor_noise_false_positive",
+        category=ScenarioCategory.MAINTENANCE,
+        name="Likely False Positive - Sensor Noise",
+        description="Repeated rapid triggers suggest sensor noise rather than real events",
+        required_signals=["leak", "motion", "contact"],
+        threshold_conditions={
+            "event_frequency_per_minute": {"min": 5},
+            "quick_resolution_pattern": True  # Events trigger then clear quickly
+        },
+        base_severity=Severity.LOW,
+        urgency_factors=["history_of_false_positives"]
+    ),
 
     # Behavioral Scenarios
     "routine_deviation": ScenarioSignature(

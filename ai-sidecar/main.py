@@ -9,6 +9,7 @@ from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from typing import Optional
+from datetime import datetime
 import uvicorn
 import logging
 import os
@@ -1173,6 +1174,51 @@ async def hsil_get_preferences():
         return prefs
     except Exception as e:
         logger.error(f"HSIL preferences error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/hsil/erratic")
+async def hsil_get_erratic_devices():
+    """
+    Get devices exhibiting erratic behavior patterns.
+    
+    Returns ML-learned statistics about event frequency anomalies,
+    indicating possible sensor malfunctions or environmental interference.
+    """
+    if not hsil_service:
+        raise HTTPException(status_code=503, detail="HSIL not initialized")
+
+    try:
+        erratic_devices = await hsil_service.learning.get_all_erratic_devices()
+        return {
+            "erratic_devices": erratic_devices,
+            "count": len(erratic_devices),
+            "timestamp": datetime.now().isoformat()
+        }
+    except Exception as e:
+        logger.error(f"HSIL erratic devices error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/hsil/erratic/{device_id}")
+async def hsil_get_device_erratic_stats(device_id: str):
+    """
+    Get erratic behavior statistics for a specific device.
+    
+    Returns ML-learned event frequency patterns and erratic score.
+    """
+    if not hsil_service:
+        raise HTTPException(status_code=503, detail="HSIL not initialized")
+
+    try:
+        stats = await hsil_service.learning.get_device_erratic_stats(device_id)
+        if stats is None:
+            raise HTTPException(status_code=404, detail=f"No data for device {device_id}")
+        return stats
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"HSIL device erratic stats error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

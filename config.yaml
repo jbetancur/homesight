@@ -100,9 +100,9 @@ ai:
       n_gpu_layers: -1      # 0 = CPU only, 35+ = full GPU (if CUDA available)
       
       # Chat inference settings
-      temperature: 0.3      # Sampling temperature (0.0-1.0, lower = less hallucination)
-      max_tokens: 400       # Max tokens per chat response
-      max_system_prompt_chars: 6000   # Max chars for system prompt (truncated if exceeded)
+      temperature: 0.1      # Sampling temperature (0.0-1.0, lower = less hallucination)
+      max_tokens: 800       # Max tokens per chat response
+      max_system_prompt_chars: 10000   # Max chars for system prompt (truncated if exceeded)
       max_user_message_chars: 2000    # Max chars for user message
       max_memory_turns: 20            # Max conversation turns to store per session
       context_turns: 10               # Conversation turns to include in LLM context

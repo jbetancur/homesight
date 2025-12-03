@@ -7,7 +7,7 @@ Enriches events with trends, anomalies, and context.
 
 import logging
 from datetime import datetime, timedelta
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Tuple
 import asyncio
 from collections import deque
 import statistics
@@ -20,7 +20,15 @@ logger = logging.getLogger(__name__)
 class EventIngestionService:
     """
     Ingests raw MQTT events and transforms them into enriched EventContext objects.
+    
+    Includes erratic sensor detection to identify potential sensor malfunctions
+    (e.g., rapid-fire triggers that indicate noise/malfunction vs. real events).
     """
+
+    # Erratic detection thresholds
+    ERRATIC_WINDOW_SECONDS = 60  # Time window to count rapid events
+    ERRATIC_THRESHOLD_COUNT = 3  # Number of events in window to flag as erratic
+    ERRATIC_COOLDOWN_SECONDS = 300  # Don't flag same sensor as erratic within this period
 
     def __init__(self, db_path: str = "/var/lib/homesight/homesight.db"):
         self.db_path = db_path
@@ -28,6 +36,10 @@ class EventIngestionService:
         # device_id -> sensor_id -> deque of (timestamp, value)
         self.event_buffer: Dict[str, Dict[str, deque]] = {}
         self.max_buffer_size = 1000  # Keep last 1000 events per sensor
+        
+        # Track erratic sensor detections to prevent spam
+        # device_id:sensor_id -> last erratic detection timestamp
+        self._erratic_cooldowns: Dict[str, datetime] = {}
 
         logger.info(f"EventIngestionService initialized with db_path={db_path}")
 
@@ -82,9 +94,27 @@ class EventIngestionService:
             metadata=metadata or {}
         )
 
+        # Check for erratic sensor behavior (rapid-fire triggers)
+        is_erratic, event_frequency = await self._check_erratic_behavior(
+            device_id, sensor_id, timestamp, event_type
+        )
+        if is_erratic:
+            context.metadata["is_erratic"] = True
+            context.metadata["event_frequency_per_minute"] = event_frequency
+            context.metadata["erratic_reason"] = (
+                f"Sensor triggered {event_frequency:.1f} times/min "
+                f"(threshold: {self.ERRATIC_THRESHOLD_COUNT}/min). "
+                "This may indicate sensor malfunction or environmental interference."
+            )
+            logger.warning(
+                f"ERRATIC SENSOR DETECTED: {device_id}/{sensor_id} - "
+                f"{event_frequency:.1f} events/min in {event_type}"
+            )
+
         logger.debug(
             f"Ingested event: device={device_id}, sensor={sensor_id}, "
             f"type={event_type}, value={value}, anomaly={(f'{anomaly_score:.2f}' if anomaly_score is not None else 'N/A')}"
+            f"{', ERRATIC' if is_erratic else ''}"
         )
 
         return context
@@ -181,6 +211,82 @@ class EventIngestionService:
         except Exception as e:
             logger.warning(f"Error calculating anomaly score: {e}")
             return None
+
+    async def _check_erratic_behavior(
+        self,
+        device_id: str,
+        sensor_id: str,
+        timestamp: datetime,
+        event_type: str
+    ) -> tuple[bool, float]:
+        """
+        Check if sensor is exhibiting erratic behavior (rapid-fire triggers).
+        
+        This detects sensor malfunctions like:
+        - Water leak sensors triggering multiple times per second
+        - Motion sensors with constant false positives
+        - Contact sensors chattering
+        
+        Returns:
+            (is_erratic, event_frequency_per_minute)
+        """
+        # Only check for binary/event sensors (leak, motion, contact, smoke, etc.)
+        erratic_sensor_types = {"leak", "motion", "contact", "smoke", "co", "door", "window", "tamper"}
+        if event_type.lower() not in erratic_sensor_types:
+            return False, 0.0
+        
+        # Get event buffer for this sensor
+        if device_id not in self.event_buffer or sensor_id not in self.event_buffer[device_id]:
+            return False, 0.0
+        
+        buffer = self.event_buffer[device_id][sensor_id]
+        if len(buffer) < self.ERRATIC_THRESHOLD_COUNT:
+            return False, 0.0
+        
+        # Count events within the erratic window
+        cutoff = timestamp - timedelta(seconds=self.ERRATIC_WINDOW_SECONDS)
+        recent_events = [t for t, _ in buffer if t >= cutoff]
+        event_count = len(recent_events)
+        
+        # Calculate frequency per minute
+        event_frequency = event_count * (60.0 / self.ERRATIC_WINDOW_SECONDS)
+        
+        # Check if exceeds threshold
+        if event_count >= self.ERRATIC_THRESHOLD_COUNT:
+            # Check cooldown to prevent spamming erratic detection
+            cooldown_key = f"{device_id}:{sensor_id}"
+            last_erratic = self._erratic_cooldowns.get(cooldown_key)
+            
+            if last_erratic and (timestamp - last_erratic).total_seconds() < self.ERRATIC_COOLDOWN_SECONDS:
+                # Already flagged recently, don't flag again but return the frequency
+                return False, event_frequency
+            
+            # Mark as erratic
+            self._erratic_cooldowns[cooldown_key] = timestamp
+            return True, event_frequency
+        
+        return False, event_frequency
+
+    def get_erratic_sensors(self) -> List[Dict[str, Any]]:
+        """
+        Get list of sensors that have been flagged as erratic recently.
+        
+        Useful for diagnostics and UI display.
+        """
+        now = datetime.now()
+        active_erratic = []
+        
+        for key, timestamp in self._erratic_cooldowns.items():
+            if (now - timestamp).total_seconds() < self.ERRATIC_COOLDOWN_SECONDS:
+                device_id, sensor_id = key.split(":", 1)
+                active_erratic.append({
+                    "device_id": device_id,
+                    "sensor_id": sensor_id,
+                    "flagged_at": timestamp.isoformat(),
+                    "age_seconds": (now - timestamp).total_seconds()
+                })
+        
+        return active_erratic
 
     async def get_device_context(self, device_id: str) -> Dict[str, Any]:
         """

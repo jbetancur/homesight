@@ -93,6 +93,19 @@ class HSILRiverLearningEngine:
         # Baseline models: Running mean/variance per device+metric
         self.baseline_models: Dict[str, Dict[str, Tuple[stats.Mean, stats.Var]]] = defaultdict(dict)
 
+        # Event frequency models: Track event rate per device for erratic detection
+        # Stores (event_count_model, inter_event_time_model) per device
+        self.frequency_models: Dict[str, Dict[str, Any]] = defaultdict(
+            lambda: {
+                "event_count": stats.Mean(),  # Mean events per hour
+                "inter_event_time": stats.Mean(),  # Mean seconds between events
+                "inter_event_var": stats.Var(),  # Variance in inter-event time
+                "last_event_time": None,
+                "recent_events": [],  # Rolling window of recent timestamps
+                "erratic_score": stats.EWMean(fading_factor=0.3),  # Exponential weighted erratic score
+            }
+        )
+
         # Model metadata
         self.model_update_counts = defaultdict(int)
 
@@ -406,6 +419,15 @@ class HSILRiverLearningEngine:
         if isinstance(context.event_value, (int, float)):
             await self._update_baseline(context.device_id, context.event_type, float(context.event_value))
 
+        # Update event frequency model (for erratic detection)
+        erratic_info = await self._update_frequency_model(context)
+        if erratic_info and erratic_info.get("is_erratic"):
+            logger.warning(
+                f"ML detected erratic behavior: {context.device_id} - "
+                f"score={erratic_info['erratic_score']:.2f}, "
+                f"rate={erratic_info['events_per_minute']:.1f}/min"
+            )
+
         # Update anomaly model
         await self._update_anomaly_model(context, env)
 
@@ -438,6 +460,133 @@ class HSILRiverLearningEngine:
 
         if self.model_update_counts[model_name] % 100 == 0:
             self._save_model(model_name, (mean_model, var_model))
+
+    async def _update_frequency_model(self, context: EventContext) -> Optional[Dict[str, Any]]:
+        """
+        Update event frequency model for erratic behavior detection.
+        
+        Tracks:
+        - Inter-event time (seconds between events)
+        - Event rate (events per minute/hour)
+        - Erratic score (high score = erratic behavior)
+        
+        Returns erratic info if behavior is detected.
+        """
+        device_id = context.device_id
+        current_time = context.timestamp
+        
+        freq_model = self.frequency_models[device_id]
+        last_time = freq_model["last_event_time"]
+        
+        # Update recent events window (keep last 60 seconds)
+        recent = freq_model["recent_events"]
+        cutoff = current_time.timestamp() - 60  # Last 60 seconds
+        freq_model["recent_events"] = [t for t in recent if t > cutoff]
+        freq_model["recent_events"].append(current_time.timestamp())
+        
+        # Calculate inter-event time
+        if last_time:
+            inter_event_seconds = (current_time - last_time).total_seconds()
+            
+            # Update statistics
+            freq_model["inter_event_time"].update(inter_event_seconds)
+            freq_model["inter_event_var"].update(inter_event_seconds)
+            
+            # Calculate erratic score
+            # Erratic = many events in short time + low inter-event variance (consistent rapid fire)
+            events_in_window = len(freq_model["recent_events"])
+            events_per_minute = events_in_window  # Window is 60 seconds
+            
+            # Score based on:
+            # - High event rate (>3/min is suspicious, >10/min is very erratic)
+            # - Very short inter-event time (<10 seconds)
+            rate_score = min(1.0, events_per_minute / 10.0)  # Normalize to 0-1
+            time_score = max(0, 1.0 - (inter_event_seconds / 30.0))  # <30s = higher score
+            
+            erratic_score = (rate_score * 0.6 + time_score * 0.4)
+            freq_model["erratic_score"].update(erratic_score)
+            
+            # Get smoothed erratic score
+            smoothed_score = freq_model["erratic_score"].get()
+            
+            # Persist periodically
+            model_name = f"frequency_{device_id}"
+            self.model_update_counts[model_name] += 1
+            
+            if self.model_update_counts[model_name] % 50 == 0:
+                self._save_model(model_name, {
+                    "inter_event_time": freq_model["inter_event_time"],
+                    "inter_event_var": freq_model["inter_event_var"],
+                    "erratic_score": freq_model["erratic_score"],
+                })
+            
+            # Return erratic info if score is high
+            is_erratic = smoothed_score > 0.5 and events_per_minute >= 3
+            
+            result = {
+                "device_id": device_id,
+                "is_erratic": is_erratic,
+                "erratic_score": smoothed_score,
+                "events_per_minute": events_per_minute,
+                "inter_event_seconds": inter_event_seconds,
+                "mean_inter_event": freq_model["inter_event_time"].get(),
+            }
+            
+            # Update last event time
+            freq_model["last_event_time"] = current_time
+            
+            return result
+        
+        # First event for this device
+        freq_model["last_event_time"] = current_time
+        return None
+
+    async def get_device_erratic_stats(self, device_id: str) -> Optional[Dict[str, Any]]:
+        """
+        Get erratic behavior statistics for a device.
+        
+        Returns ML-learned stats about event frequency patterns.
+        """
+        if device_id not in self.frequency_models:
+            return None
+        
+        freq_model = self.frequency_models[device_id]
+        
+        mean_inter_event = freq_model["inter_event_time"].get()
+        var_inter_event = freq_model["inter_event_var"].get()
+        erratic_score = freq_model["erratic_score"].get()
+        recent_count = len(freq_model["recent_events"])
+        
+        # Calculate if currently erratic
+        is_currently_erratic = erratic_score > 0.5 and recent_count >= 3
+        
+        return {
+            "device_id": device_id,
+            "mean_inter_event_seconds": mean_inter_event,
+            "variance_inter_event": var_inter_event,
+            "erratic_score": erratic_score,
+            "is_erratic": is_currently_erratic,
+            "recent_events_per_minute": recent_count,
+            "trend": "erratic" if is_currently_erratic else "normal",
+        }
+
+    async def get_all_erratic_devices(self) -> list:
+        """
+        Get all devices exhibiting erratic behavior.
+        
+        Returns list of devices with high erratic scores.
+        """
+        erratic_devices = []
+        
+        for device_id in self.frequency_models:
+            stats = await self.get_device_erratic_stats(device_id)
+            if stats and stats.get("erratic_score", 0) > 0.3:  # Threshold for concern
+                erratic_devices.append(stats)
+        
+        # Sort by erratic score descending
+        erratic_devices.sort(key=lambda x: x.get("erratic_score", 0), reverse=True)
+        
+        return erratic_devices
 
     async def _update_anomaly_model(self, context: EventContext, env: Optional[EnvironmentalContext]):
         """Update per-device anomaly detection model"""
@@ -685,12 +834,18 @@ class HSILRiverLearningEngine:
 
     async def get_stats(self) -> Dict[str, Any]:
         """Get ML engine statistics"""
+        # Get erratic devices
+        erratic_devices = await self.get_all_erratic_devices()
+        
         return {
             "comfort_model_updates": self.model_update_counts.get("comfort_model", 0),
             "routine_model_updates": self.model_update_counts.get("routine_model", 0),
             "occupancy_model_updates": self.model_update_counts.get("occupancy_model", 0),
             "anomaly_models_active": len(self.anomaly_models),
             "baseline_models_active": sum(len(metrics) for metrics in self.baseline_models.values()),
+            "frequency_models_active": len(self.frequency_models),
             "total_model_updates": sum(self.model_update_counts.values()),
-            "devices_tracked": len(self.baseline_models)
+            "devices_tracked": len(self.baseline_models),
+            "erratic_devices": erratic_devices,
+            "erratic_device_count": len(erratic_devices),
         }
