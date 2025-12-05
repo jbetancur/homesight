@@ -75,6 +75,33 @@ ai:
   # Local:  http://localhost:8001
   service_url: "http://ai-sidecar:8001"
 
+  # HSIL (HomeSight Intelligence Layer) Configuration
+  hsil:
+    # Erratic behavior detection settings
+    erratic:
+      # Time-based decay for erratic scores
+      # When a device stops being erratic, the score decays exponentially over time
+      # decay_half_life_seconds: Time in seconds for the score to drop by 50%
+      #
+      # Examples:
+      #   300 (5 min):  Score drops by 50% every 5 minutes of quiet time
+      #   600 (10 min): Score drops by 50% every 10 minutes (more forgiving)
+      #   120 (2 min):  Score drops by 50% every 2 minutes (less forgiving)
+      #
+      # With 300s half-life:
+      #   - After 5 min quiet:  83% → 41.5%
+      #   - After 10 min quiet: 83% → 20.8% (no longer flagged)
+      #   - After 15 min quiet: 83% → 10.4%
+      decay_half_life_seconds: 300
+
+      # Threshold for flagging a device as erratic (0.0-1.0)
+      # A device is considered erratic if score > threshold AND recent_events >= 3
+      threshold: 0.5
+
+      # Threshold for listing in "erratic devices" query (0.0-1.0)
+      # Devices with score > this threshold appear in the erratic devices list
+      list_threshold: 0.3
+
   # LLM Configuration
   llm:
     # Chat mode: explicit config for user-facing chat

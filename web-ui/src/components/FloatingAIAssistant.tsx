@@ -103,6 +103,47 @@ export default function FloatingAIAssistant({ opened, onClose }: FloatingAIAssis
     setIsExpanded(!isExpanded);
   };
 
+  const handleExampleClick = async (question: string) => {
+    // Submit directly with the question
+    const userMessage: AIMessage = { role: 'user', content: question };
+    setChatMessages((prev) => [...prev, userMessage]);
+    setChatInput('');
+    setChatLoading(true);
+    setAiThinking(true);
+
+    try {
+      const res = await fetch(`${API_BASE}/api/hsil/chat`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message: question, session_id: sessionId }),
+      });
+
+      if (res.ok) {
+        const data = await res.json();
+        const assistantMessage: AIMessage = {
+          role: 'assistant',
+          content: data.reply,
+          action: data.action,
+        };
+        setChatMessages((prev) => [...prev, assistantMessage]);
+
+        if (data.action) {
+          setAiThinking(false);
+        }
+      }
+    } catch (error) {
+      console.error('Chat error:', error);
+      const errorMessage: AIMessage = {
+        role: 'assistant',
+        content: 'Sorry, I encountered an error. Please try again.',
+      };
+      setChatMessages((prev) => [...prev, errorMessage]);
+    } finally {
+      setChatLoading(false);
+      setAiThinking(false);
+    }
+  };
+
   return (
     <Transition
       mounted={opened}
@@ -117,8 +158,8 @@ export default function FloatingAIAssistant({ opened, onClose }: FloatingAIAssis
             position: 'fixed',
             bottom: 20,
             right: 20,
-            width: isExpanded ? 700 : 450,
-            height: isExpanded ? 'calc(100vh - 100px)' : 600,
+            width: isExpanded ? 'min(700px, calc(100vw - 40px))' : 'min(450px, calc(100vw - 40px))',
+            height: isExpanded ? 'calc(100vh - 100px)' : 'min(600px, calc(100vh - 80px))',
             maxHeight: 'calc(100vh - 80px)',
             zIndex: 1000,
             display: 'flex',
@@ -209,25 +250,33 @@ export default function FloatingAIAssistant({ opened, onClose }: FloatingAIAssis
                     p="xs"
                     withBorder
                     style={{ cursor: 'pointer' }}
-                    onClick={() => setChatInput("What's the current status of my home?")}
+                    onClick={() => handleExampleClick('Are any devices behaving erratically?')}
                   >
-                    <Text size="xs">What's the current status of my home?</Text>
+                    <Text size="xs">Are any devices behaving erratically?</Text>
                   </Paper>
                   <Paper
                     p="xs"
                     withBorder
                     style={{ cursor: 'pointer' }}
-                    onClick={() => setChatInput('Are there any alerts I should know about?')}
+                    onClick={() => handleExampleClick('What are the current anomaly scores?')}
                   >
-                    <Text size="xs">Are there any alerts I should know about?</Text>
+                    <Text size="xs">What are the current anomaly scores?</Text>
                   </Paper>
                   <Paper
                     p="xs"
                     withBorder
                     style={{ cursor: 'pointer' }}
-                    onClick={() => setChatInput('Show me the basement sensors')}
+                    onClick={() => handleExampleClick('Show me my comfort preferences')}
                   >
-                    <Text size="xs">Show me the basement sensors</Text>
+                    <Text size="xs">Show me my comfort preferences</Text>
+                  </Paper>
+                  <Paper
+                    p="xs"
+                    withBorder
+                    style={{ cursor: 'pointer' }}
+                    onClick={() => handleExampleClick('How is the machine learning performing?')}
+                  >
+                    <Text size="xs">How is the machine learning performing?</Text>
                   </Paper>
                 </Stack>
               </Stack>

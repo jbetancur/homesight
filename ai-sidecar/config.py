@@ -117,6 +117,27 @@ class QueuesConfig(BaseModel):
     analysis: SingleQueueConfig = Field(default_factory=lambda: SingleQueueConfig(max_concurrent=4, max_queue_depth=20))
 
 
+class ErraticConfig(BaseModel):
+    """Erratic behavior detection configuration"""
+    decay_half_life_seconds: float = Field(
+        default=300.0,
+        description="Exponential decay half-life for erratic scores (seconds)"
+    )
+    threshold: float = Field(
+        default=0.5,
+        description="Threshold for flagging a device as erratic (0.0-1.0)"
+    )
+    list_threshold: float = Field(
+        default=0.3,
+        description="Threshold for listing in erratic devices query (0.0-1.0)"
+    )
+
+
+class HSILConfig(BaseModel):
+    """HSIL (HomeSight Intelligence Layer) configuration"""
+    erratic: ErraticConfig = Field(default_factory=ErraticConfig)
+
+
 class Config(BaseModel):
     """Main application configuration"""
     llm: LLMConfig = Field(default_factory=LLMConfig)
@@ -125,6 +146,7 @@ class Config(BaseModel):
     document_fetcher: DocumentFetcherConfig = Field(default_factory=DocumentFetcherConfig)
     queues: QueuesConfig = Field(default_factory=QueuesConfig)
     weather: WeatherConfig = Field(default_factory=WeatherConfig)
+    hsil: HSILConfig = Field(default_factory=HSILConfig)
     backend_url: str = Field(
         default_factory=lambda: os.getenv('BACKEND_URL', 'http://localhost:8080'),
         description="HomeSight Go backend API URL"
@@ -262,11 +284,27 @@ class Config(BaseModel):
             if 'refresh_interval_minutes' in weather_section:
                 weather_config_data['refresh_interval_minutes'] = weather_section['refresh_interval_minutes']
 
+            # Build HSIL config
+            hsil_config_data = {}
+            hsil_section = ai_config.get('hsil', {})
+            erratic_section = hsil_section.get('erratic', {})
+            erratic_config_data = {}
+            if 'decay_half_life_seconds' in erratic_section:
+                erratic_config_data['decay_half_life_seconds'] = float(erratic_section['decay_half_life_seconds'])
+            if 'threshold' in erratic_section:
+                erratic_config_data['threshold'] = float(erratic_section['threshold'])
+            if 'list_threshold' in erratic_section:
+                erratic_config_data['list_threshold'] = float(erratic_section['list_threshold'])
+
+            if erratic_config_data:
+                hsil_config_data['erratic'] = ErraticConfig(**erratic_config_data)
+
             return cls(
                 llm=LLMConfig(**llm_config_data),
                 rag=RAGConfig(**rag_config_data),
                 search=SearchConfig(**search_config_data),
                 weather=WeatherConfig(**weather_config_data),
+                hsil=HSILConfig(**hsil_config_data) if hsil_config_data else HSILConfig(),
                 document_fetcher=DocumentFetcherConfig(),
                 backend_url=backend_url
             )

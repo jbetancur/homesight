@@ -1204,7 +1204,7 @@ async def hsil_get_erratic_devices():
 async def hsil_get_device_erratic_stats(device_id: str):
     """
     Get erratic behavior statistics for a specific device.
-    
+
     Returns ML-learned event frequency patterns and erratic score.
     """
     if not hsil_service:
@@ -1219,6 +1219,50 @@ async def hsil_get_device_erratic_stats(device_id: str):
         raise
     except Exception as e:
         logger.error(f"HSIL device erratic stats error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/hsil/model-health")
+async def hsil_get_model_health():
+    """
+    Get detailed model health and maturity metrics.
+
+    Returns:
+    - Model maturity status (immature/developing/mature)
+    - Confidence scores for each model
+    - Learning velocity metrics
+    - Feedback loop statistics
+    """
+    if not hsil_service:
+        raise HTTPException(status_code=503, detail="HSIL not initialized")
+
+    try:
+        health = await hsil_service.get_model_health()
+        return health
+    except Exception as e:
+        logger.error(f"HSIL model health error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/hsil/device-health")
+async def hsil_get_device_health():
+    """
+    Get per-device health metrics.
+
+    Returns:
+    - Anomaly scores for each device
+    - Baseline statistics (mean, variance, std deviation)
+    - Erratic behavior scores with time-based decay
+    - Recent event counts
+    """
+    if not hsil_service:
+        raise HTTPException(status_code=503, detail="HSIL not initialized")
+
+    try:
+        health = await hsil_service.get_device_health()
+        return health
+    except Exception as e:
+        logger.error(f"HSIL device health error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

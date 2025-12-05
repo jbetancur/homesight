@@ -38,10 +38,18 @@ class HSILRiverLearningEngine:
     def __init__(
         self,
         db_path: str = "/var/lib/homesight/hsil_memory.db",
-        weather_service=None
+        weather_service=None,
+        erratic_decay_half_life: float = 300.0,
+        erratic_threshold: float = 0.5,
+        erratic_list_threshold: float = 0.3
     ):
         self.db_path = db_path
         self.weather_service = weather_service
+
+        # Erratic behavior configuration
+        self.erratic_decay_half_life = erratic_decay_half_life
+        self.erratic_threshold = erratic_threshold
+        self.erratic_list_threshold = erratic_list_threshold
 
         # Weather context cache
         self._env_context: Optional[EnvironmentalContext] = None
@@ -55,7 +63,11 @@ class HSILRiverLearningEngine:
         # Load persisted models
         self._load_models()
 
-        logger.info("HSILRiverLearningEngine initialized with River models")
+        logger.info(
+            f"HSILRiverLearningEngine initialized with River models "
+            f"(erratic_decay_half_life={erratic_decay_half_life}s, "
+            f"threshold={erratic_threshold}, list_threshold={erratic_list_threshold})"
+        )
 
     def _init_models(self):
         """Initialize all River models"""
@@ -544,27 +556,43 @@ class HSILRiverLearningEngine:
     async def get_device_erratic_stats(self, device_id: str) -> Optional[Dict[str, Any]]:
         """
         Get erratic behavior statistics for a device.
-        
+
         Returns ML-learned stats about event frequency patterns.
+        Applies time-based decay to erratic score if device has been quiet.
         """
         if device_id not in self.frequency_models:
             return None
-        
+
         freq_model = self.frequency_models[device_id]
-        
+
         mean_inter_event = freq_model["inter_event_time"].get()
         var_inter_event = freq_model["inter_event_var"].get()
         erratic_score = freq_model["erratic_score"].get()
         recent_count = len(freq_model["recent_events"])
-        
-        # Calculate if currently erratic
-        is_currently_erratic = erratic_score > 0.5 and recent_count >= 3
-        
+
+        # Apply time-based decay to erratic score
+        # If device has been quiet for a while, reduce the erratic score
+        last_event_time = freq_model.get("last_event_time")
+        if last_event_time:
+            time_since_last_event = (datetime.now() - last_event_time).total_seconds()
+
+            # Decay erratic score exponentially over time
+            # Uses configurable half-life from config
+            decay_factor = 2 ** (-time_since_last_event / self.erratic_decay_half_life)
+
+            # Apply decay
+            decayed_score = erratic_score * decay_factor
+        else:
+            decayed_score = erratic_score
+
+        # Calculate if currently erratic (using configurable threshold)
+        is_currently_erratic = decayed_score > self.erratic_threshold and recent_count >= 3
+
         return {
             "device_id": device_id,
             "mean_inter_event_seconds": mean_inter_event,
             "variance_inter_event": var_inter_event,
-            "erratic_score": erratic_score,
+            "erratic_score": decayed_score,
             "is_erratic": is_currently_erratic,
             "recent_events_per_minute": recent_count,
             "trend": "erratic" if is_currently_erratic else "normal",
@@ -573,19 +601,20 @@ class HSILRiverLearningEngine:
     async def get_all_erratic_devices(self) -> list:
         """
         Get all devices exhibiting erratic behavior.
-        
-        Returns list of devices with high erratic scores.
+
+        Returns list of devices with scores above list_threshold.
+        Uses configurable threshold from config.
         """
         erratic_devices = []
-        
+
         for device_id in self.frequency_models:
             stats = await self.get_device_erratic_stats(device_id)
-            if stats and stats.get("erratic_score", 0) > 0.3:  # Threshold for concern
+            if stats and stats.get("erratic_score", 0) > self.erratic_list_threshold:
                 erratic_devices.append(stats)
-        
+
         # Sort by erratic score descending
         erratic_devices.sort(key=lambda x: x.get("erratic_score", 0), reverse=True)
-        
+
         return erratic_devices
 
     async def _update_anomaly_model(self, context: EventContext, env: Optional[EnvironmentalContext]):
@@ -833,19 +862,121 @@ class HSILRiverLearningEngine:
     # ==================== STATISTICS ====================
 
     async def get_stats(self) -> Dict[str, Any]:
-        """Get ML engine statistics"""
+        """Get comprehensive ML engine statistics with model health and performance metrics"""
         # Get erratic devices
         erratic_devices = await self.get_all_erratic_devices()
-        
+
+        # Calculate model maturity indicators
+        comfort_updates = self.model_update_counts.get("comfort_model", 0)
+        routine_updates = self.model_update_counts.get("routine_model", 0)
+        occupancy_updates = self.model_update_counts.get("occupancy_model", 0)
+
+        # Model maturity thresholds: immature (<100), developing (100-500), mature (>500)
+        comfort_maturity = "mature" if comfort_updates > 500 else "developing" if comfort_updates > 100 else "immature"
+        routine_maturity = "mature" if routine_updates > 500 else "developing" if routine_updates > 100 else "immature"
+        occupancy_maturity = "mature" if occupancy_updates > 500 else "developing" if occupancy_updates > 100 else "immature"
+
+        # Calculate model confidence scores (0-1 based on update counts)
+        comfort_confidence = min(0.95, comfort_updates / 1000.0)
+        routine_confidence = min(0.95, routine_updates / 1000.0)
+        occupancy_confidence = min(0.95, occupancy_updates / 1000.0)
+
+        # Routine clustering stats (if KMeans model has centers)
+        try:
+            routine_clusters = len(self.routine_model.centers) if hasattr(self.routine_model, 'centers') else 0
+        except Exception:
+            routine_clusters = 0
+
+        # Calculate per-device health metrics
+        device_health = []
+        for device_id in self.baseline_models.keys():
+            device_stats = await self.get_device_erratic_stats(device_id)
+
+            # Handle case where device_stats might be None (device has no erratic data yet)
+            if device_stats is None:
+                device_stats = {}
+
+            # Get baseline stats for this device
+            baseline_metrics = {}
+            if device_id in self.baseline_models:
+                for metric, (mean_model, var_model) in self.baseline_models[device_id].items():
+                    mean_val = mean_model.get()
+                    var_val = var_model.get()
+                    baseline_metrics[metric] = {
+                        "mean": mean_val,
+                        "variance": var_val,
+                        "std_dev": math.sqrt(var_val) if var_val and var_val > 0 else 0.0
+                    }
+
+            # Get anomaly model update count for this device
+            anomaly_model_name = f"anomaly_{device_id}"
+            anomaly_updates = self.model_update_counts.get(anomaly_model_name, 0)
+
+            device_health.append({
+                "device_id": device_id,
+                "erratic_score": device_stats.get("erratic_score", 0.0),
+                "decayed_erratic_score": device_stats.get("decayed_erratic_score", 0.0),
+                "is_erratic": device_stats.get("is_erratic", False),
+                "recent_event_count": device_stats.get("recent_event_count", 0),
+                "anomaly_model_updates": anomaly_updates,
+                "baseline_metrics": baseline_metrics,
+                "last_event_time": device_stats.get("last_event_time"),
+            })
+
+        # Calculate learning velocity
+        total_updates = sum(self.model_update_counts.values())
+
+        # Estimate model age (time since first learning started)
+        # For now, use a heuristic based on update counts
+        # In production, you'd track actual timestamps
+        estimated_hours_active = max(1, total_updates / 100)  # Assume ~100 updates per hour
+        updates_per_hour = total_updates / estimated_hours_active
+
+        # Data quality score: based on variety of devices and update distribution
+        num_devices = len(self.baseline_models)
+        data_quality = min(1.0, num_devices / 10.0) * 0.5 + min(1.0, total_updates / 1000.0) * 0.5
+
         return {
-            "comfort_model_updates": self.model_update_counts.get("comfort_model", 0),
-            "routine_model_updates": self.model_update_counts.get("routine_model", 0),
-            "occupancy_model_updates": self.model_update_counts.get("occupancy_model", 0),
+            # Basic stats (backward compatible)
+            "comfort_model_updates": comfort_updates,
+            "routine_model_updates": routine_updates,
+            "occupancy_model_updates": occupancy_updates,
             "anomaly_models_active": len(self.anomaly_models),
             "baseline_models_active": sum(len(metrics) for metrics in self.baseline_models.values()),
             "frequency_models_active": len(self.frequency_models),
-            "total_model_updates": sum(self.model_update_counts.values()),
-            "devices_tracked": len(self.baseline_models),
+            "total_model_updates": total_updates,
+            "devices_tracked": num_devices,
             "erratic_devices": erratic_devices,
             "erratic_device_count": len(erratic_devices),
+
+            # Model maturity indicators
+            "model_maturity": {
+                "comfort": {
+                    "status": comfort_maturity,
+                    "confidence": round(comfort_confidence, 3),
+                    "update_count": comfort_updates
+                },
+                "routine": {
+                    "status": routine_maturity,
+                    "confidence": round(routine_confidence, 3),
+                    "update_count": routine_updates,
+                    "clusters_detected": routine_clusters
+                },
+                "occupancy": {
+                    "status": occupancy_maturity,
+                    "confidence": round(occupancy_confidence, 3),
+                    "update_count": occupancy_updates
+                }
+            },
+
+            # Learning velocity metrics
+            "learning_velocity": {
+                "total_updates": total_updates,
+                "estimated_hours_active": round(estimated_hours_active, 1),
+                "updates_per_hour": round(updates_per_hour, 1),
+                "data_quality_score": round(data_quality, 3)
+            },
+
+            # Per-device health metrics
+            "device_health": device_health
         }

@@ -50,6 +50,21 @@ func (s *Server) hsilGetPreferences(w http.ResponseWriter, r *http.Request) {
 	s.proxyToHSIL(w, r, "/preferences")
 }
 
+// hsilGetErratic gets devices showing erratic behavior
+func (s *Server) hsilGetErratic(w http.ResponseWriter, r *http.Request) {
+	s.proxyToHSIL(w, r, "/erratic")
+}
+
+// hsilGetModelHealth gets detailed model health and maturity metrics
+func (s *Server) hsilGetModelHealth(w http.ResponseWriter, r *http.Request) {
+	s.proxyToHSIL(w, r, "/model-health")
+}
+
+// hsilGetDeviceHealth gets per-device health metrics
+func (s *Server) hsilGetDeviceHealth(w http.ResponseWriter, r *http.Request) {
+	s.proxyToHSIL(w, r, "/device-health")
+}
+
 // handleWeather gets weather data from AI sidecar
 func (s *Server) handleWeather(w http.ResponseWriter, r *http.Request) {
 	s.proxyToHSIL(w, r, "/weather")

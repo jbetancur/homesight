@@ -87,7 +87,10 @@ class HSILService:
         # ML Learning (River) - core pattern detection
         self.learning = HSILRiverLearningEngine(
             db_path=db_path,
-            weather_service=self.weather_service
+            weather_service=self.weather_service,
+            erratic_decay_half_life=config.hsil.erratic.decay_half_life_seconds,
+            erratic_threshold=config.hsil.erratic.threshold,
+            erratic_list_threshold=config.hsil.erratic.list_threshold
         )
         self.river_feedback = RiverFeedbackAdapter(learning_engine=self.learning)
         self.feedback_learning = FeedbackLearningService(db_path=db_path)
@@ -103,9 +106,10 @@ class HSILService:
             dry_run=False
         )
 
-        # Conversational agent - LLM reasons from data
+        # Conversational agent - LLM-as-Orchestrator with tool calling
         self.conversational_agent = ConversationalAgentService(
             llm_provider=llm_provider,
+            learning_engine=self.learning,
             memory_service=self.memory,
             feedback_learning=self.feedback_learning,
             weather_service=self.weather_service,
@@ -317,5 +321,44 @@ class HSILService:
         return {
             "river_comfort_preferences": river_comfort,
             "user_preferences": user_prefs,
+            "timestamp": datetime.now().isoformat()
+        }
+
+    async def get_model_health(self) -> Dict[str, Any]:
+        """
+        Get detailed model health metrics.
+
+        Returns model maturity, confidence scores, learning velocity, and training status.
+        """
+        stats = await self.learning.get_stats()
+
+        return {
+            "model_maturity": stats.get("model_maturity", {}),
+            "learning_velocity": stats.get("learning_velocity", {}),
+            "model_counts": {
+                "comfort_updates": stats.get("comfort_model_updates", 0),
+                "routine_updates": stats.get("routine_model_updates", 0),
+                "occupancy_updates": stats.get("occupancy_model_updates", 0),
+                "total_updates": stats.get("total_model_updates", 0),
+                "anomaly_models": stats.get("anomaly_models_active", 0),
+                "baseline_models": stats.get("baseline_models_active", 0),
+            },
+            "feedback_stats": await self.feedback_learning.get_stats(),
+            "timestamp": datetime.now().isoformat()
+        }
+
+    async def get_device_health(self) -> Dict[str, Any]:
+        """
+        Get per-device health metrics.
+
+        Returns anomaly scores, baseline statistics, and erratic behavior for each device.
+        """
+        stats = await self.learning.get_stats()
+        device_health = stats.get("device_health", [])
+
+        return {
+            "devices": device_health,
+            "total_devices": len(device_health),
+            "erratic_count": sum(1 for d in device_health if d.get("is_erratic", False)),
             "timestamp": datetime.now().isoformat()
         }

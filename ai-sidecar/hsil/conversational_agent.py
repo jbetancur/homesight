@@ -1,9 +1,10 @@
 """
-Conversational Agent - Simplified
+Conversational Agent - LLM-as-Orchestrator Pattern
 
-Philosophy: Gather data, pass to LLM, let it reason.
-No hardcoded intent detection or response generation.
-The LLM does the work.
+Architecture: LLM → [Tools] → LLM → Response
+- LLM selects which tools to invoke
+- Tools execute deterministically
+- LLM synthesizes results into natural language
 """
 
 import logging
@@ -18,6 +19,7 @@ from .types import (
 )
 from .device_ontology import DeviceOntology
 from .home_health_engine import HomeHealthEngine
+from .tools import ToolRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -34,15 +36,16 @@ SAFE_ACTIONS = {
 
 class ConversationalAgentService:
     """
-    Simplified conversational agent.
-    
-    Gathers all relevant data and passes it to the LLM.
-    The LLM reasons about what to say - no hardcoded handlers.
+    LLM-as-Orchestrator Conversational Agent.
+
+    The LLM decides which tools to invoke, then synthesizes results.
+    No hardcoded intent detection - pure orchestration.
     """
 
     def __init__(
         self,
         llm_provider,
+        learning_engine=None,
         memory_service=None,
         feedback_learning=None,
         policy_engine=None,
@@ -51,6 +54,7 @@ class ConversationalAgentService:
         backend_url: str = "http://localhost:8080"
     ):
         self.llm = llm_provider
+        self.learning_engine = learning_engine
         self.memory = memory_service
         self.feedback_learning = feedback_learning
         self.policy = policy_engine
@@ -61,6 +65,13 @@ class ConversationalAgentService:
         # Core services
         self.ontology = DeviceOntology(backend_url=backend_url)
         self.health_engine = HomeHealthEngine(backend_url=backend_url)
+
+        # Tool Registry - enables LLM function calling
+        self.tools = ToolRegistry(
+            learning_engine=learning_engine,
+            memory=memory_service,
+            db_path=None
+        )
 
         # Session memory
         self._session_memories: Dict[str, List[Dict[str, str]]] = {}
@@ -75,7 +86,7 @@ class ConversationalAgentService:
         self.chat_temperature = getattr(cfg, 'chat_temperature', 0.3) if cfg else 0.3
         self.chat_max_tokens = getattr(cfg, 'chat_max_tokens', 500) if cfg else 500
 
-        logger.info(f"ConversationalAgentService initialized (simplified)")
+        logger.info(f"ConversationalAgentService initialized (orchestrator pattern)")
 
     async def initialize(self):
         """Load device ontology."""
@@ -95,31 +106,129 @@ class ConversationalAgentService:
         session_id: Optional[str] = None
     ) -> ConversationResponse:
         """
-        Main chat method.
-        
-        1. Gather all relevant data
-        2. Build prompt with that data
-        3. Let LLM reason and respond
+        Main chat method - Orchestrator Pattern.
+
+        Flow:
+        1. LLM plans which tools to invoke
+        2. Execute tools deterministically
+        3. LLM synthesizes results into response
         """
         self._current_session = session_id or "default"
-        
-        # Gather ALL data the LLM needs
+
+        # Gather lightweight context (only essentials)
         context = await self._gather_context(message, event_context, home_state)
-        
-        # Build system prompt with all context
-        system_prompt = self._build_system_prompt(context)
-        
-        # Call LLM
-        llm_response = await self._call_llm(system_prompt, message)
-        
+
+        # LLM orchestration: plan → execute → synthesize
+        llm_response = await self._orchestrate_with_tools(message, context)
+
         # Parse response
         result = self._parse_response(llm_response)
-        
+
         # Update memory
         self._add_to_memory("user", message)
         self._add_to_memory("assistant", result.reply)
-        
+
         return result
+
+    async def _orchestrate_with_tools(
+        self,
+        message: str,
+        context: Dict[str, Any]
+    ) -> str:
+        """
+        LLM orchestration with function calling.
+
+        The LLM decides which tools to call, we execute them,
+        then the LLM synthesizes the results.
+        """
+        logger.info(f"🔧 Orchestrating with {len(self.tools.tools)} tools available")
+
+        # Build system prompt with tool awareness
+        system_prompt = self._build_orchestrator_prompt(context)
+
+        # Get tool schemas for function calling
+        tool_schemas = self.tools.get_tool_schemas()
+
+        # First LLM call: planning (with tool selection)
+        messages = self._build_messages(system_prompt, message)
+
+        try:
+            # Call LLM with tools - it may request tool invocations
+            llm_response = await self._call_llm_with_tools(messages, tool_schemas)
+
+            # Check if LLM wants to call tools
+            tool_calls = self._extract_tool_calls(llm_response)
+
+            if tool_calls:
+                tool_names = [t['name'] for t in tool_calls]
+                logger.info(f"🔧 LLM requested tools: {tool_names}")
+
+                # Execute each tool
+                tool_results = await self._execute_tools(tool_calls)
+
+                # Add tool results to context
+                messages.append({"role": "assistant", "content": llm_response})
+                messages.append({
+                    "role": "user",
+                    "content": f"Tool results: {json.dumps(tool_results, indent=2)}"
+                })
+
+                # Second LLM call: synthesis with tool results
+                final_response = await self._call_llm_simple(messages)
+                return final_response
+
+            # No tools needed - direct response
+            logger.info("💬 LLM responded directly (no tools needed)")
+            return llm_response
+
+        except Exception as e:
+            logger.error(f"Orchestration error: {e}")
+            # Fallback to simple call
+            return await self._call_llm_simple(messages)
+
+    async def _execute_tools(self, tool_calls: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Execute tool calls and return results"""
+        results = []
+
+        for tool_call in tool_calls:
+            tool_name = tool_call.get("name")
+            arguments = tool_call.get("arguments", {})
+
+            result = await self.tools.execute_tool(tool_name, arguments)
+            results.append({
+                "tool": tool_name,
+                "arguments": arguments,
+                **result
+            })
+
+        return results
+
+    def _extract_tool_calls(self, llm_response: str) -> List[Dict[str, Any]]:
+        """
+        Extract tool calls from LLM response.
+
+        Supports multiple formats:
+        - JSON function calling (if LLM supports it)
+        - Embedded JSON blocks in response
+        """
+        tool_calls = []
+
+        # Try to find JSON tool call blocks in response
+        # Format: ```json\n{"tool": "check_anomaly", "args": {...}}```
+        json_blocks = re.findall(r'```json\s*(\{.*?\})\s*```', llm_response, re.DOTALL)
+
+        for block in json_blocks:
+            try:
+                parsed = json.loads(block)
+                if "tool" in parsed:
+                    tool_calls.append({
+                        "name": parsed["tool"],
+                        "arguments": parsed.get("args", parsed.get("arguments", {}))
+                    })
+            except json.JSONDecodeError:
+                continue
+
+        return tool_calls
 
     # -------------------------------------------------------------------------
     # Context Gathering - Get ALL data upfront
@@ -268,149 +377,161 @@ class ConversationalAgentService:
         return counts
 
     # -------------------------------------------------------------------------
-    # System Prompt - Tell LLM what data it has and how to use it
+    # LLM Orchestrator Prompt
     # -------------------------------------------------------------------------
 
-    def _build_system_prompt(self, context: Dict[str, Any]) -> str:
-        """Build system prompt with all context data."""
-        
+    def _build_orchestrator_prompt(self, context: Dict[str, Any]) -> str:
+        """
+        Build system prompt for LLM orchestrator.
+
+        Lightweight - only essential context. LLM will use tools for detailed data.
+        """
         parts = [
-            "You are HomeSight, a smart home assistant.",
+            "You are HomeSight, a friendly AI assistant helping homeowners monitor their smart home.",
             "",
-            "## RULES",
-            "1. ONLY report data you have. If no sensor exists for something, say so.",
-            "2. Each device has a TYPE that defines what it can measure:",
-            "   - 'leak_sensor' or 'water_leak' or 'sensor': detects water leaks ONLY (NOT temperature/humidity)",
-            "   - 'temperature_sensor': measures temperature and sometimes humidity",
-            "   - 'thermostat': controls HVAC, shows temperature",
-            "   - 'motion_sensor': detects motion only",
-            "3. NEVER claim a sensor can measure something its type doesn't support.",
-            "4. If ml_erratic shows a device with erratic_score > 0.6, ALWAYS mention this is concerning.",
-            "5. 'features' are room (zone) attributes - NOT sensors. You CANNOT report their status.",
-            "6. Be conversational and helpful. Suggest what you CAN help with.",
+            "## Your Communication Style",
+            "- Use plain, conversational language (avoid technical jargon like 'anomaly', 'erratic', 'baseline')",
+            "- Speak like you're talking to a friend, not an engineer",
+            "- Instead of 'anomaly detected', say 'something unusual happened'",
+            "- Instead of 'erratic behavior', say 'acting strange' or 'behaving oddly'",
+            "- Instead of 'baseline metrics', say 'normal patterns' or 'typical behavior'",
+            "- Be proactive: if you see issues or patterns, mention them even if not directly asked",
             "",
-            "## YOUR DATA",
+            "## Your Role",
+            "You have access to tools to check device history, detect unusual patterns, and answer questions.",
+            "Use tools intelligently to gather data, then explain findings in simple terms.",
             "",
+            "## Core Context",
         ]
-        
-        # Devices
+
+        # Minimal device list
         if "devices" in context:
-            parts.append("### Devices (these are your sensors)")
-            for d in context["devices"]:
-                parts.append(f"- {d['name']} (type: {d['type']}, model: {d.get('model', 'unknown')}) in {d['zone']}")
+            parts.append(f"### Devices: {len(context['devices'])} sensors installed")
             parts.append("")
-        
-        # Zones
-        if "zones" in context:
-            parts.append("### Zones")
-            for z in context["zones"]:
-                devices_str = ", ".join(z["devices"]) if z["devices"] else "no sensors"
-                types_str = ", ".join(set(z["device_types"])) if z["device_types"] else "none"
-                features_str = ", ".join(z["features"]) if z["features"] else "none"
-                parts.append(f"- {z['name']}: sensors=[{devices_str}] (types: {types_str}), features=[{features_str}]")
-            parts.append("")
-        
-        # Health
+
+        # Health summary
         if "health" in context:
             h = context["health"]
-            parts.append(f"### Home Health: {h['status'].upper()} (score: {h['score']}/100)")
-            if h["has_leak"]:
-                parts.append("⚠️ WATER LEAK DETECTED")
-            if h["has_smoke"]:
-                parts.append("⚠️ SMOKE DETECTED")
-            if h["issues"]:
-                for issue in h["issues"]:
-                    parts.append(f"- {issue}")
+            parts.append(f"### Home Status: {h['status'].upper()} (score: {h['score']}/100)")
             parts.append("")
-        
-        # ML Erratic - CRITICAL for health questions
-        if "ml_erratic" in context:
-            parts.append("### ⚠️ ML-Detected Erratic Behavior (IMPORTANT)")
-            parts.append("These sensors show unusual rapid-fire patterns. Mention this when discussing health!")
-            for e in context["ml_erratic"]:
-                parts.append(f"- {e['device_id']}: erratic_score={e['erratic_score']:.0%}, rate={e.get('recent_events_per_minute', 0)}/min, trend={e.get('trend', 'unknown')}")
-            parts.append("(High scores suggest sensor malfunction or false positives)")
-            parts.append("")
-        
-        # Incidents
-        if "incidents" in context:
-            inc = context["incidents"]
-            parts.append(f"### Incident History ({inc['total_count']} total)")
-            if inc["by_type"]:
-                types_str = ", ".join([f"{k}: {v}" for k, v in list(inc["by_type"].items())[:5]])
-                parts.append(f"By type: {types_str}")
-            parts.append("")
-        
+
         # Weather
         if "weather" in context:
             parts.append(f"### Weather: {context['weather']}")
             parts.append("")
-        
-        # Home State (live readings)
-        if "home_state" in context:
-            parts.append("### Current Device Readings")
-            state_str = json.dumps(context["home_state"], indent=2)
-            if len(state_str) > 500:
-                state_str = state_str[:500] + "..."
-            parts.append(state_str)
-            parts.append("")
-        
-        # Conversation
-        if "conversation" in context:
-            parts.append("### Recent Conversation")
-            for msg in context["conversation"][-5:]:
-                content = msg["content"][:150] if len(msg["content"]) > 150 else msg["content"]
-                parts.append(f"[{msg['role']}]: {content}")
-            parts.append("")
-        
-        # Response format
-        parts.append("""
-## RESPONSE FORMAT
-Respond with JSON only:
-{
-  "reply": "Your conversational response here",
-  "action": null
-}
 
-For actions:
-{
-  "reply": "Your response",
-  "action": {"topic": "homesight/device/command", "command": "turn_on", "value": true}
-}
+        parts.append("""
+## Tool Usage Strategy
+
+1. **Understand intent**: What is the homeowner really asking? (e.g., "anything wrong?" means check for unusual activity)
+2. **Be smart about tools**: Use incident history for "when did X happen", erratic checks for "acting weird", baselines for "normal vs unusual"
+3. **Execute**: I'll run the tools and give you results
+4. **Translate to human**: Take technical results and explain them conversationally
+
+## Examples of Natural Understanding
+
+User: "Has my basement sensor been acting up lately?"
+→ Think: They want to know if anything unusual happened
+→ Use: check_erratic_behavior(device_id="basement-sensor") + get_device_incidents(device_id="basement-sensor")
+→ Respond: "I checked your basement sensor - it's been working normally. Last detected water on [date], but nothing since then."
+
+User: "When did I last have a leak?"
+→ Think: They want recent incident history
+→ Use: get_recent_incidents(limit=10) and filter for leak-related
+→ Respond: "The last time a leak was detected was [date] in the [location]. Everything's been dry since then."
+
+User: "Anything weird happening?"
+→ Think: General health check - look for unusual patterns, recent incidents, devices acting strange
+→ Use: get_erratic_devices() + get_recent_incidents(limit=5)
+→ Respond: Natural summary of findings or "Everything looks good - no unusual activity detected."
+
+User: "Is my [device] broken?"
+→ Think: Check recent activity, incidents, and behavior patterns
+→ Use: get_device_incidents() + check_erratic_behavior()
+→ Respond: Give clear yes/no with evidence
+
+## Response Format
+Always respond conversationally in plain English. If you need to call tools, include JSON blocks.
+Be helpful, proactive, and explain things like you're talking to a neighbor.
 """)
-        
-        prompt = "\n".join(parts)
-        
-        # Truncate if needed
-        if len(prompt) > self.max_system_prompt_chars:
-            prompt = prompt[:self.max_system_prompt_chars]
-        
-        return prompt
+
+        return "\n".join(parts)
 
     # -------------------------------------------------------------------------
     # LLM Call
     # -------------------------------------------------------------------------
 
-    async def _call_llm(self, system_prompt: str, user_message: str) -> str:
-        """Call the LLM."""
-        messages = [
-            {"role": "system", "content": system_prompt},
-        ]
-        
+    def _build_messages(self, system_prompt: str, user_message: str) -> List[Dict[str, str]]:
+        """Build message list with history"""
+        messages = [{"role": "system", "content": system_prompt}]
+
         # Add conversation history
         memory = self._get_session_memory()
         for msg in memory[-self.llm_context_turns:]:
             messages.append({"role": msg["role"], "content": msg["content"]})
-        
+
         messages.append({"role": "user", "content": user_message})
-        
+        return messages
+
+    async def _call_llm_with_tools(self, messages: List[Dict[str, str]], tool_schemas: List[Dict]) -> str:
+        """
+        Call LLM with tool/function calling support.
+
+        For models that support function calling, they can request tool invocations.
+        For models that don't, we provide tool schemas in the system prompt.
+        """
+        # Add tool awareness to system prompt
+        if tool_schemas:
+            tool_desc = self._format_tools_for_prompt(tool_schemas)
+            messages[0]["content"] += f"\n\n{tool_desc}"
+
         resp_text, _ = await self.llm.chat_async(
             messages=messages,
             temperature=self.chat_temperature,
             max_tokens=self.chat_max_tokens
         )
-        
+
         return resp_text
+
+    async def _call_llm_simple(self, messages: List[Dict[str, str]]) -> str:
+        """Simple LLM call without tools"""
+        resp_text, _ = await self.llm.chat_async(
+            messages=messages,
+            temperature=self.chat_temperature,
+            max_tokens=self.chat_max_tokens
+        )
+        return resp_text
+
+    def _format_tools_for_prompt(self, tool_schemas: List[Dict]) -> str:
+        """Format tool schemas for inclusion in system prompt"""
+        if not tool_schemas:
+            return ""
+
+        tools_text = "# Available Tools\n\nYou can invoke the following tools:\n\n"
+
+        for schema in tool_schemas:
+            func = schema["function"]
+            tools_text += f"**{func['name']}**: {func['description']}\n"
+
+            if func['parameters']['properties']:
+                tools_text += "Parameters:\n"
+                for param_name, param_info in func['parameters']['properties'].items():
+                    required = "(required)" if param_name in func['parameters'].get('required', []) else "(optional)"
+                    tools_text += f"  - {param_name} {required}: {param_info['description']}\n"
+
+            tools_text += "\n"
+
+        tools_text += """
+To use a tool, include a JSON block in your response:
+```json
+{"tool": "tool_name", "args": {"param1": "value1"}}
+```
+
+You can call multiple tools by including multiple JSON blocks.
+After I execute the tools, I'll provide the results and you can synthesize the final response.
+"""
+
+        return tools_text
 
     # -------------------------------------------------------------------------
     # Response Parsing

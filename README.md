@@ -35,7 +35,7 @@
 | Service | Port | Description |
 |---------|------|-------------|
 | API | `:8080` | HomeSight Core REST API + Web UI |
-| AI Sidecar | `:8001` | HIL Intelligence Layer |
+| AI Sidecar | `:8001` | HSIL Intelligence Layer |
 | Mosquitto | `:1883` | MQTT Message Bus |
 | ZwaveJS | `:3001` | Z-Wave WebSocket API |
 | ZwaveJS UI | `:8091` | Z-Wave Admin Interface |
@@ -71,11 +71,11 @@ graph TB
     end
 
     subgraph Intelligence["🧠 AI Sidecar (Python)"]
-        HSIL["HSIL Service"]
-        CHAT["Chat Service"]
+        HSIL["HSIL Service<br/>(Conversational Agent)"]
         LLM["LLM Provider"]
         RAG["RAG Engine"]
         MQTTSUB["MQTT Subscriber"]
+        TOOLS["Tool Registry"]
     end
 
     subgraph Interface["🖥️ Interface"]
@@ -104,14 +104,16 @@ graph TB
     PUBLISHER -->|"publish"| MQTT
     MQTT -->|"commands"| BRIDGE
 
-    %% AI Sidecar subscribes to MQTT broker
+    %% AI Sidecar MQTT subscription
     MQTT -->|"subscribe"| MQTTSUB
     MQTTSUB -->|"events"| HSIL
-    CONSUMER -->|"HTTP"| HSIL
-    API <-->|"HTTP proxy"| CHAT
-    CHAT --> LLM
-    CHAT --> RAG
+
+    %% AI Sidecar chat interface
+    API <-->|"HTTP proxy /api/hsil/*"| HSIL
+    HSIL --> TOOLS
+    TOOLS -->|"query data"| API
     HSIL --> LLM
+    HSIL --> RAG
 
     %% UI connections
     REACT <-->|"REST"| API
@@ -126,83 +128,8 @@ graph TB
     class ZDEVICES,ZSTICK physical
     class ZWAVEJS,MQTT gateway
     class BRIDGE,CONSUMER,PUBLISHER,API,DB,RULES,ALARM core
-    class HSIL,CHAT,LLM,RAG,MQTTSUB ai
+    class HSIL,LLM,RAG,MQTTSUB,TOOLS ai
     class REACT ui
-```
-
-### Data Flow Details
-
-#### 1. Device State Updates (Z-Wave → Dashboard)
-
-```mermaid
-sequenceDiagram
-    participant ZD as Z-Wave Device
-    participant ZJS as ZwaveJS
-    participant Bridge as Z-Wave Bridge
-    participant MQTT as Mosquitto
-    participant Consumer as MQTT Consumer
-    participant DB as SQLite
-    participant Rules as Rules Engine
-    participant SSE as SSE EventBus
-    participant UI as React Dashboard
-
-    ZD->>ZJS: State change (e.g., leak detected)
-    ZJS->>Bridge: WebSocket event
-    Bridge->>MQTT: Publish homesight/zwave/{id}/state
-    MQTT->>Consumer: Deliver message
-    Consumer->>DB: Update device state
-    Consumer->>Rules: Process event
-    Rules->>DB: Create incident (if triggered)
-    Consumer->>SSE: Emit device_updated
-    SSE->>UI: Push via SSE
-    UI->>UI: Update display
-```
-
-#### 2. AI Chat (Dashboard → LLM → Response)
-
-```mermaid
-sequenceDiagram
-    participant UI as React Dashboard
-    participant API as Go API
-    participant Chat as Chat Service
-    participant LLM as LLM Provider
-    participant RAG as ChromaDB
-    participant Tools as Tool Executor
-    participant Backend as Go API
-
-    UI->>API: POST /api/hsil/chat
-    API->>Chat: HTTP Proxy
-    Chat->>RAG: Query relevant docs
-    RAG-->>Chat: Document context
-    Chat->>LLM: Generate with tools
-    LLM-->>Chat: Tool call (e.g., get_devices)
-    Chat->>Backend: Execute tool via HTTP
-    Backend-->>Chat: Tool result
-    Chat->>LLM: Continue with result
-    LLM-->>Chat: Final response
-    Chat-->>API: JSON response
-    API-->>UI: Display to user
-```
-
-#### 3. Device Commands (Dashboard → Z-Wave Device)
-
-```mermaid
-sequenceDiagram
-    participant UI as React Dashboard
-    participant API as Go API
-    participant Pub as MQTT Publisher
-    participant MQTT as Mosquitto
-    participant Bridge as Z-Wave Bridge
-    participant ZJS as ZwaveJS
-    participant ZD as Z-Wave Device
-
-    UI->>API: POST /api/devices/{id}/command
-    API->>Pub: Publish command
-    Pub->>MQTT: homesight/cmd/zwave-{id}
-    MQTT->>Bridge: Deliver command
-    Bridge->>ZJS: WebSocket setValue
-    ZJS->>ZD: Z-Wave command
-    ZD-->>ZJS: Ack
 ```
 
 ### Component Descriptions
@@ -218,10 +145,10 @@ sequenceDiagram
 | **Rules Engine** | Go | Evaluates alarm conditions from events |
 | **Alarm Manager** | Go | Incident lifecycle (create, auto-resolve) |
 | **SQLite** | - | Device state, incidents, zones, knowledge base |
-| **HSIL Service** | Python | Home intelligence layer - learning, predictions, anomaly detection |
-| **Chat Service** | Python | Conversational AI with function/tool calling |
-| **LLM Provider** | Python | Abstraction over Llama (local) or OpenAI API |
-| **RAG Engine** | Python | ChromaDB-based document retrieval for device manuals |
+| **HSIL Service** | Python | LLM-as-Orchestrator with online ML (River), anomaly detection, tool registry |
+| **Conversational Agent** | Python | Natural language interface with 9 specialized tools |
+| **LLM Provider** | Python | Hybrid: Qwen 2.5 7B (local + Vulkan GPU) or GPT-4o-mini (cloud) |
+| **RAG Engine** | Python | ChromaDB vector search with FastEmbed for device documentation |
 | **React Dashboard** | TypeScript | Real-time web UI with SSE updates |
 
 ### Key Design Principles
@@ -238,138 +165,7 @@ sequenceDiagram
 
 HomeSight runs as **Docker containers** orchestrated by Docker Compose. All services communicate via the internal `homesight` bridge network.
 
-### Docker Services
-
-```mermaid
-graph TB
-    subgraph Docker["🐳 Docker Compose"]
-        subgraph Core["Core Services"]
-            MOSQUITTO["mosquitto<br/>:1883<br/>MQTT Broker"]
-            API["api<br/>:8080<br/>Go + React"]
-            AI["ai-sidecar<br/>:8001<br/>Python + LLM"]
-        end
-        
-        subgraph Integrations["Device Integrations"]
-            ZWAVEJS["zwavejs<br/>:3001/:8091<br/>Z-Wave JS UI"]
-        end
-        
-        subgraph Monitoring["Monitoring Stack"]
-            PROM["prometheus<br/>:9090"]
-            GRAF["grafana<br/>:3000"]
-        end
-    end
-
-    subgraph External["External"]
-        ZSTICK["Z-Wave USB Stick"]
-        BROWSER["Web Browser"]
-    end
-
-    %% Connections
-    ZSTICK -->|USB| ZWAVEJS
-    ZWAVEJS -->|WebSocket| API
-    ZWAVEJS -->|MQTT| MOSQUITTO
-    API -->|Subscribe/Publish| MOSQUITTO
-    AI -->|Subscribe| MOSQUITTO
-    API -->|HTTP Proxy| AI
-    PROM -->|Scrape| API
-    PROM -->|Scrape| AI
-    GRAF -->|Query| PROM
-    BROWSER -->|HTTP| API
-    BROWSER -->|HTTP| GRAF
-
-    classDef core fill:#4a9eff,stroke:#2d5f9f,color:#fff
-    classDef integration fill:#ff9800,stroke:#e65100,color:#fff
-    classDef monitoring fill:#9c27b0,stroke:#6a1b9a,color:#fff
-    classDef external fill:#607d8b,stroke:#455a64,color:#fff
-
-    class MOSQUITTO,API,AI core
-    class ZWAVEJS integration
-    class PROM,GRAF monitoring
-    class ZSTICK,BROWSER external
-```
-
-### Service Communication
-
-```mermaid
-sequenceDiagram
-    participant Z as ZwaveJS
-    participant M as Mosquitto
-    participant A as API (Go)
-    participant AI as AI Sidecar
-    participant U as Web UI
-
-    Note over Z,U: Device State Update
-    Z->>M: MQTT: homesight/zwave/30/state
-    M->>A: Subscribe: homesight/#
-    M->>AI: Subscribe: homesight/#
-    A->>A: Update DB
-    A->>U: SSE: device_updated
-    AI->>AI: Update Home State
-
-    Note over Z,U: User Chat
-    U->>A: POST /api/hsil/chat
-    A->>AI: HTTP Proxy
-    AI->>AI: LLM + Context
-    AI->>A: Response
-    A->>U: JSON Response
-
-    Note over Z,U: Device Command
-    U->>A: POST /api/devices/{id}/command
-    A->>M: MQTT: homesight/cmd/zwave-30
-    M->>Z: Command
-    Z->>Z: Execute
-```
-
-### Data Flow
-
-```mermaid
-flowchart LR
-    subgraph Devices["🔌 Physical Devices"]
-        ZW["Z-Wave<br/>Sensors"]
-        MQTT_D["MQTT<br/>Devices"]
-    end
-
-    subgraph Docker["🐳 Docker"]
-        subgraph Bus["Message Bus"]
-            MQ["Mosquitto"]
-        end
-        
-        subgraph Core["Core"]
-            API_C["API Container"]
-            DB["SQLite"]
-        end
-        
-        subgraph Intelligence["AI"]
-            HIL["HIL Service"]
-            LLM["Local LLM"]
-            RAG["ChromaDB"]
-        end
-    end
-
-    subgraph UI["🖥️ Interface"]
-        WEB["React Dashboard"]
-    end
-
-    ZW --> MQ
-    MQTT_D --> MQ
-    MQ --> API_C
-    MQ --> HIL
-    API_C --> DB
-    HIL --> LLM
-    HIL --> RAG
-    API_C --> WEB
-    WEB --> API_C
-
-    classDef device fill:#e8eaf6,stroke:#3f51b5
-    classDef docker fill:#e3f2fd,stroke:#2196f3
-    classDef ui fill:#e8f5e9,stroke:#4caf50
-
-    class ZW,MQTT_D device
-    class MQ,API_C,DB,HIL,LLM,RAG docker
-    class WEB ui
-```
-
-## Docker Compose Services
+### Docker Compose Services
 
 ### mosquitto - MQTT Message Bus
 
@@ -390,13 +186,13 @@ Go-based REST API with embedded React dashboard.
 
 ### ai-sidecar - Intelligence Layer
 
-Python-based AI service with local LLM support.
+Python-based AI service with HSIL (HomeSight Intelligence Layer).
 
 - **Image:** `homesight-ai-sidecar` (built from `docker/ai-sidecar/Dockerfile`)
 - **Port:** `8001`
-- **Features:** HIL pipeline, conversational agent, RAG, anomaly detection
-- **GPU:** Vulkan acceleration via `/dev/dri`
-- **Mounts:** LLM models, ChromaDB, manuals
+- **Features:** HSIL orchestrator, River ML, conversational agent, RAG, 9 specialized tools
+- **GPU:** Vulkan acceleration via `/dev/dri` for local LLM
+- **Mounts:** LLM models (Qwen 2.5 7B), ChromaDB, device manuals
 
 ### zwavejs - Z-Wave Integration
 
@@ -477,71 +273,180 @@ ai:
       temperature: 0.3
 ```
 
-## HIL (HomeSight Intelligence Layer)
+## HSIL (HomeSight Intelligence Layer)
 
-The HIL is the brain of HomeSight - a multi-stage intelligence pipeline running in the AI sidecar container.
+The HSIL is an AI-powered intelligence system running in the AI sidecar container. It uses LLM-as-Orchestrator pattern with online machine learning for real-time home intelligence.
 
 ```mermaid
-flowchart TB
-    subgraph Input["📥 Input"]
-        MQTT["MQTT Events"]
-        CHAT["Chat Messages"]
+graph TB
+    subgraph Inputs["📥 Input Sources"]
+        MQTT_IN["MQTT Events<br/>(device state changes)"]
+        CHAT_IN["User Chat<br/>(natural language)"]
+        API_IN["Backend API<br/>(incidents, devices)"]
     end
 
-    subgraph Pipeline["🧠 Intelligence Pipeline"]
-        INGEST["Event Ingestion"]
-        FUSION["Sensor Fusion"]
-        ML["Anomaly Detection<br/>(River ML)"]
-        REASON["Reasoning Engine"]
-        SAFETY["Safety Guardian"]
+    subgraph HSIL["🧠 HSIL Core"]
+        CONV["Conversational Agent<br/>(LLM Orchestrator)"]
+        TOOLS["Tool Registry<br/>(9 tools)"]
+        LEARNING["River ML Engine<br/>(online learning)"]
+        MEMORY["Home Memory<br/>(ChromaDB + SQLite)"]
+        EVENTS["Event Ingestion<br/>(MQTT consumer)"]
     end
 
-    subgraph Memory["💾 Memory"]
-        STATE["Home State"]
-        PREFS["User Preferences"]
-        HISTORY["Event History"]
+    subgraph LLM["🤖 LLM Provider"]
+        LOCAL["Local: Qwen 2.5 7B<br/>(Vulkan GPU)"]
+        CLOUD["Cloud: GPT-4o-mini<br/>(fallback)"]
     end
 
-    subgraph LLM["🤖 LLM Layer"]
-        LOCAL["Local Llama 3.x"]
-        CLOUD["OpenAI GPT-4"]
+    subgraph Tools["🔧 Available Tools"]
+        T1["check_anomaly"]
+        T2["check_erratic_behavior"]
+        T3["get_erratic_devices"]
+        T4["get_recent_incidents"]
+        T5["get_device_incidents"]
+        T6["get_device_baseline"]
+        T7["get_ml_stats"]
+        T8["get_comfort_preferences"]
     end
 
-    subgraph Output["📤 Output"]
-        ACTIONS["Device Commands"]
-        INCIDENTS["Incidents"]
-        RESPONSE["Chat Response"]
+    subgraph ML["📊 ML Models (River)"]
+        BASELINE["Baseline Models<br/>(mean/variance)"]
+        FREQ["Frequency Models<br/>(event patterns)"]
+        COMFORT["Comfort Model<br/>(preferences)"]
+        ROUTINE["Routine Model<br/>(patterns)"]
     end
 
-    MQTT --> INGEST
-    CHAT --> REASON
-    INGEST --> FUSION
-    FUSION --> ML
-    ML --> REASON
-    REASON --> SAFETY
-    
-    STATE --> FUSION
-    PREFS --> REASON
-    HISTORY --> ML
-    
-    REASON --> LOCAL
-    REASON --> CLOUD
-    
-    SAFETY --> ACTIONS
-    SAFETY --> INCIDENTS
-    LOCAL --> RESPONSE
-    CLOUD --> RESPONSE
+    subgraph Outputs["📤 Outputs"]
+        CHAT_OUT["Chat Responses"]
+        INCIDENTS["Incident Detection"]
+        ACTIONS["Device Actions<br/>(via MQTT)"]
+    end
+
+    MQTT_IN --> EVENTS
+    CHAT_IN --> CONV
+    EVENTS --> LEARNING
+    EVENTS --> MEMORY
+
+    CONV --> TOOLS
+    TOOLS --> API_IN
+    TOOLS --> LEARNING
+    TOOLS --> MEMORY
+
+    CONV --> LOCAL
+    CONV --> CLOUD
+
+    LEARNING --> BASELINE
+    LEARNING --> FREQ
+    LEARNING --> COMFORT
+    LEARNING --> ROUTINE
+
+    LOCAL --> CHAT_OUT
+    CLOUD --> CHAT_OUT
+    LEARNING --> INCIDENTS
+    CONV --> ACTIONS
+
+    classDef input fill:#e3f2fd,stroke:#1976d2,color:#000
+    classDef core fill:#f3e5f5,stroke:#7b1fa2,color:#000
+    classDef llm fill:#fff3e0,stroke:#f57c00,color:#000
+    classDef output fill:#e8f5e9,stroke:#388e3c,color:#000
+
+    class MQTT_IN,CHAT_IN,API_IN input
+    class CONV,TOOLS,LEARNING,MEMORY,EVENTS core
+    class LOCAL,CLOUD llm
+    class CHAT_OUT,INCIDENTS,ACTIONS output
 ```
 
-### Features
+### HSIL Features
 
-- **Sensor Fusion** - Combines multi-sensor data with weather & time context
-- **Anomaly Detection** - Online ML (River) learns device patterns
-- **Scenario Detection** - Pattern matching for leak, freeze, intrusion, etc.
-- **Reasoning Templates** - Chain-of-thought for complex scenarios
-- **Safety Guardian** - Validates all actions before execution
-- **Conversational Agent** - Natural language interface to your home
-- **RAG Pipeline** - Retrieves manufacturer docs for incident analysis
+- **LLM-as-Orchestrator** - LLM selects tools, tools execute deterministically, LLM synthesizes results (inspired by [Anthropic's tool use patterns](https://docs.anthropic.com/en/docs/build-with-claude/tool-use))
+- **Online Learning (River)** - Incremental ML models learn patterns without batch retraining ([River ML framework](https://riverml.xyz/))
+- **Anomaly Detection** - Detects unusual sensor readings based on learned baselines
+- **Erratic Behavior Detection** - Identifies devices with rapid-fire events or unusual frequencies
+- **Conversational Interface** - Natural language queries about home state, incidents, and device history
+- **Tool-Based Architecture** - 9 specialized tools for device queries, ML stats, and incident history
+- **Hybrid LLM** - Local Qwen 2.5 7B with GPU acceleration, cloud GPT-4o-mini fallback
+- **Persistent Memory** - SQLite for structured data, ChromaDB for semantic embeddings
+
+### References
+
+HSIL architecture is built on researched patterns:
+
+- **LLM Tool Use**: Schick et al. (2024), "[Toolformer: Language Models Can Teach Themselves to Use Tools](https://arxiv.org/abs/2302.04761)", arXiv:2302.04761
+- **Online Machine Learning**: Montiel et al. (2021), "[River: machine learning for streaming data in Python](https://jmlr.org/papers/v22/20-1380.html)", JMLR 22(110):1−8
+
+## RAG (Retrieval-Augmented Generation)
+
+The RAG engine fetches and indexes device documentation to provide context-aware troubleshooting.
+
+```mermaid
+graph TB
+    subgraph Sources["📚 Document Sources"]
+        MANUALS["Manufacturer PDFs<br/>(pre-downloaded)"]
+        WEB["Web Scraping<br/>(auto-discovery)"]
+        VENDOR["Vendor APIs<br/>(structured data)"]
+    end
+
+    subgraph Indexing["🔍 Document Indexing"]
+        FETCH["Auto-Fetcher<br/>(tiered discovery)"]
+        PARSE["PDF Parser<br/>(text extraction)"]
+        CHUNK["Chunking<br/>(semantic splits)"]
+        EMBED["FastEmbed<br/>(bge-small-en-v1.5)"]
+    end
+
+    subgraph Storage["💾 Vector Storage"]
+        CHROMA["ChromaDB<br/>(local persistence)"]
+        VENDOR_DB["Vendor Index<br/>(SQLite metadata)"]
+    end
+
+    subgraph Query["🔎 Query Pipeline"]
+        USER_Q["User Question"]
+        RETRIEVE["Similarity Search<br/>(top-k chunks)"]
+        RERANK["Context Ranking"]
+        INJECT["Context Injection"]
+    end
+
+    subgraph LLM_RAG["🤖 LLM Generation"]
+        PROMPT["Augmented Prompt<br/>(question + context)"]
+        GENERATE["LLM Response<br/>(with citations)"]
+    end
+
+    MANUALS --> FETCH
+    WEB --> FETCH
+    VENDOR --> FETCH
+
+    FETCH --> PARSE
+    PARSE --> CHUNK
+    CHUNK --> EMBED
+
+    EMBED --> CHROMA
+    EMBED --> VENDOR_DB
+
+    USER_Q --> RETRIEVE
+    CHROMA --> RETRIEVE
+    RETRIEVE --> RERANK
+    RERANK --> INJECT
+
+    INJECT --> PROMPT
+    PROMPT --> GENERATE
+
+    classDef source fill:#e3f2fd,stroke:#1976d2,color:#000
+    classDef index fill:#fff3e0,stroke:#f57c00,color:#000
+    classDef storage fill:#f3e5f5,stroke:#7b1fa2,color:#000
+    classDef query fill:#e8f5e9,stroke:#388e3c,color:#000
+
+    class MANUALS,WEB,VENDOR source
+    class FETCH,PARSE,CHUNK,EMBED index
+    class CHROMA,VENDOR_DB storage
+    class USER_Q,RETRIEVE,RERANK,INJECT,PROMPT,GENERATE query
+```
+
+### RAG Features
+
+- **Local Embeddings** - FastEmbed (bge-small-en-v1.5) runs offline, no API calls
+- **Auto-Discovery** - Tiered pipeline finds manuals from manufacturer domains
+- **Vendor Index** - SQLite tracks document metadata, refresh schedules
+- **Semantic Search** - ChromaDB vector similarity for context retrieval
+- **Offline-First** - All models and documents stored locally
 
 ## Device Discovery
 
@@ -597,31 +502,6 @@ make docker-rebuild-ai
 
 # Quick rebuild + restart
 make rebuild-quick
-```
-
-### Project Structure
-
-```
-homesight/
-├── cmd/homesightd/        # Go API entrypoint
-├── internal/              # Go packages
-│   ├── api/               # REST API handlers
-│   ├── db/                # SQLite repositories
-│   ├── integrations/      # MQTT, Z-Wave bridges
-│   └── rules/             # Rules engine
-├── ai-sidecar/            # Python AI service
-│   ├── hsil/              # HIL intelligence layer
-│   ├── llm/               # LLM providers
-│   ├── rag/               # RAG engine
-│   └── services/          # API services
-├── web-ui/                # React dashboard
-├── docker/                # Dockerfiles & configs
-│   ├── api/Dockerfile
-│   ├── ai-sidecar/Dockerfile
-│   └── mosquitto/mosquitto.conf
-├── docker-compose.yml     # Service orchestration
-├── config.yaml            # Runtime configuration
-└── scripts/               # Management scripts
 ```
 
 ## Requirements

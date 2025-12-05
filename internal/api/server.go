@@ -198,6 +198,9 @@ func (s *Server) setupRoutes() {
 			r.Get("/state", s.hsilGetState)
 			r.Get("/stats", s.hsilGetStats)
 			r.Get("/preferences", s.hsilGetPreferences)
+			r.Get("/erratic", s.hsilGetErratic)
+			r.Get("/model-health", s.hsilGetModelHealth)
+			r.Get("/device-health", s.hsilGetDeviceHealth)
 			r.Get("/weather", s.handleWeather)
 		})
 

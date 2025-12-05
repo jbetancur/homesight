@@ -158,8 +158,12 @@ class HomeSightMQTTClient:
             return
 
         integration = parts[1]
-        device_id = parts[2]
+        node_id = parts[2]
         message_type = parts[3]
+
+        # Construct full device ID: {integration}-{nodeId}
+        # This matches the format used by the Go API database
+        device_id = f"{integration}-{node_id}"
 
         # Route to appropriate callback
         if message_type == "discovery" and self._discovery_callback:

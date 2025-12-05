@@ -1,7 +1,31 @@
 import { useEffect, useState } from 'react';
-import { Paper, Text, Group, Stack, Progress, ThemeIcon, Badge, Box, RingProgress, Grid } from '@mantine/core';
-import { Brain, TrendingUp, Activity, Zap, Target, Database } from 'lucide-react';
+import { useNavigate } from 'react-router-dom';
+import { Paper, Text, Group, Stack, Progress, ThemeIcon, Badge, Box, RingProgress, Grid, Tooltip, Modal, Table, Button } from '@mantine/core';
+import { Brain, TrendingUp, Activity, Zap, Target, Database, ExternalLink, AlertTriangle } from 'lucide-react';
 import { API_BASE } from '../apiConfig';
+
+interface ModelMaturity {
+  status: string;
+  confidence: number;
+  update_count: number;
+  clusters_detected?: number;
+}
+
+interface LearningVelocity {
+  total_updates: number;
+  estimated_hours_active: number;
+  updates_per_hour: number;
+  data_quality_score: number;
+}
+
+interface DeviceHealth {
+  device_id: string;
+  erratic_score: number;
+  decayed_erratic_score: number;
+  is_erratic: boolean;
+  recent_event_count: number;
+  anomaly_model_updates: number;
+}
 
 interface RiverML {
   comfort_model_updates: number;
@@ -13,12 +37,26 @@ interface RiverML {
   total_model_updates: number;
   devices_tracked: number;
   erratic_device_count: number;
-  erratic_devices: any[];
+  erratic_devices: ErraticDevice[];
+  model_maturity?: {
+    comfort: ModelMaturity;
+    routine: ModelMaturity;
+    occupancy: ModelMaturity;
+  };
+  learning_velocity?: LearningVelocity;
+  device_health?: DeviceHealth[];
+}
+
+interface FeedbackLearning {
+  total_interactions: number;
+  learning_rate: number;
+  high_confidence_preferences: number;
 }
 
 interface ModelStats {
   river_ml?: RiverML;
-  // Fallback for direct properties
+  feedback_learning?: FeedbackLearning;
+  // Fallback for direct properties (for backward compatibility)
   comfort_model_updates?: number;
   routine_model_updates?: number;
   occupancy_model_updates?: number;
@@ -28,6 +66,13 @@ interface ModelStats {
   total_model_updates?: number;
   devices_tracked?: number;
   erratic_device_count?: number;
+  model_maturity?: {
+    comfort: ModelMaturity;
+    routine: ModelMaturity;
+    occupancy: ModelMaturity;
+  };
+  learning_velocity?: LearningVelocity;
+  device_health?: DeviceHealth[];
 }
 
 interface ModelInfo {
@@ -39,9 +84,20 @@ interface ModelInfo {
   description: string;
 }
 
+interface ErraticDevice {
+  device_id: string;
+  erratic_score: number;
+  is_erratic: boolean;
+  recent_events_per_minute: number;
+  trend: string;
+}
+
 export default function LearningProgressChart() {
+  const navigate = useNavigate();
   const [stats, setStats] = useState<ModelStats | null>(null);
   const [loading, setLoading] = useState(true);
+  const [erraticModalOpen, setErraticModalOpen] = useState(false);
+  const [erraticDevices, setErraticDevices] = useState<ErraticDevice[]>([]);
 
   useEffect(() => {
     fetchStats();
@@ -61,6 +117,28 @@ export default function LearningProgressChart() {
     } finally {
       setLoading(false);
     }
+  };
+
+  const fetchErraticDevices = async () => {
+    try {
+      const res = await fetch(`${API_BASE}/api/hsil/erratic`);
+      if (res.ok) {
+        const data = await res.json();
+        setErraticDevices(data.erratic_devices || []);
+        setErraticModalOpen(true);
+      }
+    } catch (error) {
+      console.error('Failed to fetch erratic devices:', error);
+    }
+  };
+
+  const handleErraticBadgeClick = () => {
+    fetchErraticDevices();
+  };
+
+  const handleDeviceClick = (deviceId: string) => {
+    setErraticModalOpen(false);
+    navigate(`/devices/${deviceId}/overview`);
   };
 
   const calculateConfidence = (updates: number, max: number = 1000): number => {
@@ -169,14 +247,19 @@ export default function LearningProgressChart() {
                 </Text>
               </Box>
               {(mlStats?.erratic_device_count || 0) > 0 && (
-                <Box>
-                  <Text size="xs" c="rgba(255,255,255,0.8)">
-                    Erratic Devices
-                  </Text>
-                  <Badge size="lg" color="red" variant="filled">
-                    {mlStats.erratic_device_count}
-                  </Badge>
-                </Box>
+                <Tooltip label="Click to view erratic devices">
+                  <Box
+                    style={{ cursor: 'pointer' }}
+                    onClick={handleErraticBadgeClick}
+                  >
+                    <Text size="xs" c="rgba(255,255,255,0.8)">
+                      Erratic Devices
+                    </Text>
+                    <Badge size="lg" color="red" variant="filled" style={{ cursor: 'pointer' }}>
+                      {mlStats.erratic_device_count} <ExternalLink size={12} style={{ marginLeft: 4 }} />
+                    </Badge>
+                  </Box>
+                </Tooltip>
               )}
             </Group>
           </Stack>
@@ -273,6 +356,196 @@ export default function LearningProgressChart() {
         })}
       </Grid>
 
+      {/* Model Maturity & Learning Velocity */}
+      {mlStats?.model_maturity && mlStats?.learning_velocity && (
+        <Grid>
+          {/* Model Maturity Card */}
+          <Grid.Col span={{ base: 12, md: 6 }}>
+            <Paper p="md" withBorder h="100%">
+              <Group gap="xs" mb="md">
+                <ThemeIcon size="sm" variant="light" color="violet">
+                  <Target size={14} />
+                </ThemeIcon>
+                <Text size="sm" fw={600}>
+                  Model Maturity
+                </Text>
+              </Group>
+              <Stack gap="sm">
+                <Box>
+                  <Group justify="space-between" mb={4}>
+                    <Text size="xs" c="dimmed">Comfort Model</Text>
+                    <Badge
+                      size="sm"
+                      color={
+                        mlStats.model_maturity.comfort.status === 'mature' ? 'green' :
+                        mlStats.model_maturity.comfort.status === 'developing' ? 'yellow' :
+                        'gray'
+                      }
+                    >
+                      {mlStats.model_maturity.comfort.status}
+                    </Badge>
+                  </Group>
+                  <Progress
+                    value={mlStats.model_maturity.comfort.confidence * 100}
+                    size="sm"
+                    color={
+                      mlStats.model_maturity.comfort.status === 'mature' ? 'green' :
+                      mlStats.model_maturity.comfort.status === 'developing' ? 'yellow' :
+                      'gray'
+                    }
+                  />
+                </Box>
+
+                <Box>
+                  <Group justify="space-between" mb={4}>
+                    <Text size="xs" c="dimmed">Routine Model</Text>
+                    <Badge
+                      size="sm"
+                      color={
+                        mlStats.model_maturity.routine.status === 'mature' ? 'green' :
+                        mlStats.model_maturity.routine.status === 'developing' ? 'yellow' :
+                        'gray'
+                      }
+                    >
+                      {mlStats.model_maturity.routine.status}
+                      {mlStats.model_maturity.routine.clusters_detected ?
+                        ` (${mlStats.model_maturity.routine.clusters_detected} clusters)` :
+                        ''
+                      }
+                    </Badge>
+                  </Group>
+                  <Progress
+                    value={mlStats.model_maturity.routine.confidence * 100}
+                    size="sm"
+                    color={
+                      mlStats.model_maturity.routine.status === 'mature' ? 'green' :
+                      mlStats.model_maturity.routine.status === 'developing' ? 'yellow' :
+                      'gray'
+                    }
+                  />
+                </Box>
+
+                <Box>
+                  <Group justify="space-between" mb={4}>
+                    <Text size="xs" c="dimmed">Occupancy Model</Text>
+                    <Badge
+                      size="sm"
+                      color={
+                        mlStats.model_maturity.occupancy.status === 'mature' ? 'green' :
+                        mlStats.model_maturity.occupancy.status === 'developing' ? 'yellow' :
+                        'gray'
+                      }
+                    >
+                      {mlStats.model_maturity.occupancy.status}
+                    </Badge>
+                  </Group>
+                  <Progress
+                    value={mlStats.model_maturity.occupancy.confidence * 100}
+                    size="sm"
+                    color={
+                      mlStats.model_maturity.occupancy.status === 'mature' ? 'green' :
+                      mlStats.model_maturity.occupancy.status === 'developing' ? 'yellow' :
+                      'gray'
+                    }
+                  />
+                </Box>
+              </Stack>
+            </Paper>
+          </Grid.Col>
+
+          {/* Learning Velocity Card */}
+          <Grid.Col span={{ base: 12, md: 6 }}>
+            <Paper p="md" withBorder h="100%">
+              <Group gap="xs" mb="md">
+                <ThemeIcon size="sm" variant="light" color="cyan">
+                  <TrendingUp size={14} />
+                </ThemeIcon>
+                <Text size="sm" fw={600}>
+                  Learning Velocity
+                </Text>
+              </Group>
+              <Stack gap="md">
+                <Group justify="space-between">
+                  <Text size="xs" c="dimmed">Updates/Hour</Text>
+                  <Text size="sm" fw={600}>
+                    {mlStats.learning_velocity.updates_per_hour.toFixed(1)}
+                  </Text>
+                </Group>
+                <Group justify="space-between">
+                  <Text size="xs" c="dimmed">Hours Active</Text>
+                  <Text size="sm" fw={600}>
+                    {mlStats.learning_velocity.estimated_hours_active.toFixed(1)}h
+                  </Text>
+                </Group>
+                <Box>
+                  <Group justify="space-between" mb={4}>
+                    <Text size="xs" c="dimmed">Data Quality</Text>
+                    <Text size="xs" fw={600}>
+                      {(mlStats.learning_velocity.data_quality_score * 100).toFixed(0)}%
+                    </Text>
+                  </Group>
+                  <Progress
+                    value={mlStats.learning_velocity.data_quality_score * 100}
+                    size="sm"
+                    color={
+                      mlStats.learning_velocity.data_quality_score > 0.7 ? 'green' :
+                      mlStats.learning_velocity.data_quality_score > 0.4 ? 'yellow' :
+                      'orange'
+                    }
+                  />
+                </Box>
+              </Stack>
+            </Paper>
+          </Grid.Col>
+        </Grid>
+      )}
+
+      {/* Feedback Learning Stats */}
+      {stats?.feedback_learning && stats.feedback_learning.total_interactions > 0 && (
+        <Paper p="md" withBorder>
+          <Group gap="xs" mb="md">
+            <ThemeIcon size="sm" variant="light" color="pink">
+              <Brain size={14} />
+            </ThemeIcon>
+            <Text size="sm" fw={600}>
+              User Feedback Learning
+            </Text>
+          </Group>
+          <Grid>
+            <Grid.Col span={{ base: 12, sm: 4 }}>
+              <Box ta="center">
+                <Text size="xl" fw={700} c="pink">
+                  {stats.feedback_learning.total_interactions}
+                </Text>
+                <Text size="xs" c="dimmed">
+                  Total Interactions
+                </Text>
+              </Box>
+            </Grid.Col>
+            <Grid.Col span={{ base: 12, sm: 4 }}>
+              <Box ta="center">
+                <Text size="xl" fw={700} c="pink">
+                  {(stats.feedback_learning.learning_rate * 100).toFixed(1)}%
+                </Text>
+                <Text size="xs" c="dimmed">
+                  Learning Rate
+                </Text>
+              </Box>
+            </Grid.Col>
+            <Grid.Col span={{ base: 12, sm: 4 }}>
+              <Box ta="center">
+                <Text size="xl" fw={700} c="pink">
+                  {stats.feedback_learning.high_confidence_preferences}
+                </Text>
+                <Text size="xs" c="dimmed">
+                  High Confidence Prefs
+                </Text>
+              </Box>
+            </Grid.Col>
+          </Grid>
+        </Paper>
+      )}
+
       {/* Learning Insights */}
       <Paper p="md" withBorder style={{ borderLeft: '4px solid var(--mantine-color-indigo-6)' }}>
         <Group gap="xs" mb="sm">
@@ -306,9 +579,14 @@ export default function LearningProgressChart() {
           )}
 
           {(mlStats?.erratic_device_count || 0) > 0 && (
-            <Text size="sm" c="orange">
+            <Text
+              size="sm"
+              c="orange"
+              style={{ cursor: 'pointer' }}
+              onClick={handleErraticBadgeClick}
+            >
               ⚠️ {mlStats?.erratic_device_count} device{(mlStats?.erratic_device_count || 0) > 1 ? 's' : ''} showing
-              erratic behavior - check for issues
+              unusual behavior - <span style={{ textDecoration: 'underline' }}>click to view</span>
             </Text>
           )}
 
@@ -317,6 +595,82 @@ export default function LearningProgressChart() {
           </Text>
         </Stack>
       </Paper>
+
+      {/* Erratic Devices Modal */}
+      <Modal
+        opened={erraticModalOpen}
+        onClose={() => setErraticModalOpen(false)}
+        title={
+          <Group gap="sm">
+            <AlertTriangle size={20} color="#fd7e14" />
+            <Text fw={600}>Devices Acting Unusual</Text>
+          </Group>
+        }
+        size="lg"
+      >
+        <Stack gap="md">
+          <Text size="sm" c="dimmed">
+            These devices have been showing unusual activity patterns. Click on a device to view more details and incident history.
+          </Text>
+
+          {erraticDevices.length === 0 ? (
+            <Text size="sm" c="dimmed" ta="center" py="xl">
+              No erratic devices found at this time.
+            </Text>
+          ) : (
+            <Table striped highlightOnHover>
+              <Table.Thead>
+                <Table.Tr>
+                  <Table.Th>Device</Table.Th>
+                  <Table.Th>Activity Score</Table.Th>
+                  <Table.Th>Events/Min</Table.Th>
+                  <Table.Th>Status</Table.Th>
+                  <Table.Th></Table.Th>
+                </Table.Tr>
+              </Table.Thead>
+              <Table.Tbody>
+                {erraticDevices.map((device) => (
+                  <Table.Tr
+                    key={device.device_id}
+                    style={{ cursor: 'pointer' }}
+                    onClick={() => handleDeviceClick(device.device_id)}
+                  >
+                    <Table.Td>
+                      <Text fw={500}>{device.device_id}</Text>
+                    </Table.Td>
+                    <Table.Td>
+                      <Badge color={device.erratic_score > 0.7 ? 'red' : 'orange'}>
+                        {(device.erratic_score * 100).toFixed(0)}%
+                      </Badge>
+                    </Table.Td>
+                    <Table.Td>
+                      <Text size="sm">{device.recent_events_per_minute}</Text>
+                    </Table.Td>
+                    <Table.Td>
+                      <Badge color={device.is_erratic ? 'red' : 'yellow'} variant="light">
+                        {device.is_erratic ? 'Active Issue' : 'Monitoring'}
+                      </Badge>
+                    </Table.Td>
+                    <Table.Td>
+                      <Button
+                        size="xs"
+                        variant="light"
+                        rightSection={<ExternalLink size={14} />}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleDeviceClick(device.device_id);
+                        }}
+                      >
+                        View
+                      </Button>
+                    </Table.Td>
+                  </Table.Tr>
+                ))}
+              </Table.Tbody>
+            </Table>
+          )}
+        </Stack>
+      </Modal>
     </Stack>
   );
 }
