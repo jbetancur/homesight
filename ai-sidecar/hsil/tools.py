@@ -42,10 +42,11 @@ class ToolRegistry:
     - Results returned to LLM for synthesis
     """
 
-    def __init__(self, learning_engine=None, memory=None, db_path=None):
+    def __init__(self, learning_engine=None, memory=None, db_path=None, ontology=None):
         self.learning_engine = learning_engine
         self.memory = memory
         self.db_path = db_path
+        self.ontology = ontology
         self.tools: Dict[str, Tool] = {}
 
         # Register all tools
@@ -139,12 +140,42 @@ class ToolRegistry:
         # Device baseline
         self.register_tool(Tool(
             name="get_device_baseline",
-            description="Get the learned baseline (mean and variance) for a device metric.",
+            description="Get HISTORICAL learned baseline statistics (mean and variance) for a device metric from machine learning models. Use this for trend analysis, not current values. For current battery levels or sensor readings, use get_device_status instead.",
             parameters=[
                 ToolParameter("device_id", "string", "The device ID"),
                 ToolParameter("metric", "string", "The metric name (e.g., 'temperature')"),
             ],
             function=self._get_device_baseline
+        ))
+
+        # List devices by location/zone
+        self.register_tool(Tool(
+            name="list_devices",
+            description="List ALL devices in a specific location/zone or list ALL devices in the entire home. Use this when users ask 'which sensors', 'what devices', 'list sensors', or 'show me devices' in a location. Returns device names, IDs, types, and zones.",
+            parameters=[
+                ToolParameter("zone", "string", "The zone/location name (e.g., 'basement', 'kitchen'). Leave empty to list ALL devices.", required=False),
+            ],
+            function=self._list_devices
+        ))
+
+        # Device status (current readings, battery, etc.)
+        self.register_tool(Tool(
+            name="get_device_status",
+            description="Get CURRENT live status of a device including BATTERY LEVEL, sensor readings, state, and metadata. Use this when users ask about current battery levels, current readings, or device status. Returns real-time data from the device API, not historical baselines.",
+            parameters=[
+                ToolParameter("device_id", "string", "The device ID (e.g., 'zwave-31' for leak sensor)"),
+            ],
+            function=self._get_device_status
+        ))
+
+        # Device documentation / knowledge base
+        self.register_tool(Tool(
+            name="get_device_documentation",
+            description="Get the FULL documentation, manual, specs, installation guide, and troubleshooting info for a device. ALWAYS use this when users ask about: 'documentation', 'manual', 'how to use', 'how does X work', 'help with device', 'instructions', 'specs', 'features', 'troubleshooting', or any device-related questions. Returns comprehensive manufacturer documentation.",
+            parameters=[
+                ToolParameter("device_id", "string", "The device ID (e.g., 'zwave-31' for leak sensor, 'zwave-1' for controller)"),
+            ],
+            function=self._get_device_documentation
         ))
 
     def register_tool(self, tool: Tool):
@@ -476,6 +507,125 @@ class ToolRegistry:
             "samples": self.learning_engine.model_update_counts.get(f"baseline_{device_id}_{metric}", 0)
         }
 
+    async def _list_devices(self, zone: Optional[str] = None) -> Dict[str, Any]:
+        """List devices in a zone or all devices"""
+        import httpx
+
+        try:
+            async with httpx.AsyncClient() as client:
+                devices_url = "http://api:8080/api/devices"
+                resp = await client.get(devices_url, timeout=5.0)
+
+                if resp.status_code != 200:
+                    return {"error": f"Failed to fetch devices: {resp.status_code}"}
+
+                all_devices = resp.json()
+
+                # Filter by zone if specified
+                if zone:
+                    zone_normalized = zone.lower().strip()
+                    devices = [
+                        d for d in all_devices
+                        if d.get("zone_id", "").lower() == zone_normalized
+                    ]
+                    
+                    if not devices:
+                        return {
+                            "zone": zone,
+                            "count": 0,
+                            "devices": [],
+                            "message": f"No devices found in {zone}"
+                        }
+                else:
+                    devices = all_devices
+
+                # Format device list
+                device_list = []
+                for d in devices:
+                    device_info = {
+                        "device_id": d.get("id"),
+                        "name": d.get("display_name") or d.get("name"),
+                        "type": d.get("type"),
+                        "zone": d.get("zone_id"),
+                        "integration": d.get("integration"),
+                    }
+                    
+                    # Add manufacturer/model if available
+                    metadata = d.get("metadata", {})
+                    if metadata.get("manufacturer"):
+                        device_info["manufacturer"] = metadata["manufacturer"]
+                    if metadata.get("model"):
+                        device_info["model"] = metadata["model"]
+                    
+                    # Add battery level if available
+                    if "battery_level" in d:
+                        device_info["battery_level"] = d["battery_level"]
+                    
+                    device_list.append(device_info)
+
+                return {
+                    "zone": zone or "all",
+                    "count": len(device_list),
+                    "devices": device_list
+                }
+
+        except Exception as e:
+            logger.error(f"Error listing devices: {e}")
+            return {"error": str(e)}
+
+    async def _get_device_status(self, device_id: str) -> Dict[str, Any]:
+        """Get current device status including battery, readings, and state"""
+        import httpx
+
+        try:
+            async with httpx.AsyncClient() as client:
+                device_url = f"http://api:8080/api/devices/{device_id}"
+                resp = await client.get(device_url, timeout=5.0)
+
+                if resp.status_code != 200:
+                    return {
+                        "error": f"Failed to fetch device: {resp.status_code}",
+                        "device_id": device_id
+                    }
+
+                device = resp.json()
+
+                # Extract key information
+                result = {
+                    "device_id": device_id,
+                    "name": device.get("display_name") or device.get("name", device_id),
+                    "type": device.get("type"),
+                    "state": device.get("state"),
+                    "zone": device.get("zone_id"),
+                    "last_seen": device.get("last_seen"),
+                }
+
+                # Battery info if available
+                if "battery_level" in device:
+                    result["battery_level"] = device["battery_level"]
+                    result["battery_low"] = device.get("battery_low", False)
+
+                # Current readings
+                if device.get("readings"):
+                    result["readings"] = device["readings"]
+
+                # Metadata with useful info
+                metadata = device.get("metadata", {})
+                if metadata:
+                    # Extract commonly needed metadata
+                    useful_metadata = {}
+                    for key in ["manufacturer", "model", "firmware", "location"]:
+                        if key in metadata:
+                            useful_metadata[key] = metadata[key]
+                    if useful_metadata:
+                        result["metadata"] = useful_metadata
+
+                return result
+
+        except Exception as e:
+            logger.error(f"Error fetching device status: {e}")
+            return {"error": str(e), "device_id": device_id}
+
     # ==================== Helper Methods ====================
 
     def _interpret_anomaly_score(self, score: float, is_anomalous: bool) -> str:
@@ -491,3 +641,54 @@ class ToolRegistry:
             return "Borderline - approaching anomaly threshold"
         else:
             return "Slightly elevated but acceptable"
+
+    async def _get_device_documentation(self, device_id: str) -> Dict[str, Any]:
+        """Get documentation/knowledge base for a device"""
+        import httpx
+
+        try:
+            async with httpx.AsyncClient() as client:
+                # First get device info
+                device_url = f"http://api:8080/api/devices/{device_id}"
+                device_resp = await client.get(device_url, timeout=5.0)
+                
+                device_info = {}
+                if device_resp.status_code == 200:
+                    device_info = device_resp.json()
+                
+                # Get knowledge base
+                kb_url = f"http://api:8080/api/devices/{device_id}/knowledge-base"
+                kb_resp = await client.get(kb_url, timeout=5.0)
+
+                if kb_resp.status_code != 200:
+                    return {
+                        "device_id": device_id,
+                        "device_name": device_info.get("name", device_id),
+                        "has_documentation": False,
+                        "message": "No documentation available for this device"
+                    }
+
+                kb_data = kb_resp.json()
+                content = kb_data.get("content", "")
+
+                if not content:
+                    return {
+                        "device_id": device_id,
+                        "device_name": device_info.get("name", device_id),
+                        "has_documentation": False,
+                        "message": "Documentation not yet ingested for this device"
+                    }
+
+                return {
+                    "device_id": device_id,
+                    "device_name": device_info.get("name", device_id),
+                    "manufacturer": kb_data.get("manufacturer", ""),
+                    "model": kb_data.get("model", ""),
+                    "has_documentation": True,
+                    "documentation": content,
+                    "source": kb_data.get("source", ""),
+                    "ingested_at": kb_data.get("ingested_at", "")
+                }
+        except Exception as e:
+            logger.error(f"Error fetching device documentation: {e}")
+            return {"error": str(e)}

@@ -106,6 +106,7 @@ class ConversationResponse(BaseModel):
     """LLM conversation output"""
     reply: str
     action: Optional[ActionCommand] = None
+    clarification: Optional[Dict[str, Any]] = None  # For disambiguation requests
 
 
 class DeviceStateEnum(str, Enum):

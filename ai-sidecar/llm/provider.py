@@ -420,11 +420,20 @@ class LLMProvider:
             llm_input_tokens.labels(model=model_name, provider="local").inc(input_token_count)
 
             # Run llama-cpp safely
+            # Stop tokens for various model formats (Llama, Qwen, ChatML)
             response = self.local_llm(
                 formatted_prompt,
                 max_tokens=max_tokens,
                 temperature=temperature,
-                stop=["<|eot_id|>", "<|end_of_text|>"],
+                stop=[
+                    "<|eot_id|>",           # Llama 3 format
+                    "<|end_of_text|>",      # Llama 3 format  
+                    "<|im_end|>",           # ChatML / Qwen format
+                    "<|endoftext|>",        # GPT-2 style
+                    "<|eot_header_id|>",    # Llama 3 role marker (shouldn't continue past)
+                    "user<|",               # Prevent fake conversation continuation
+                    "\nuser\n",             # Prevent fake conversation continuation
+                ],
                 echo=False
             )
 

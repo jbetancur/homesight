@@ -70,7 +70,8 @@ class ConversationalAgentService:
         self.tools = ToolRegistry(
             learning_engine=learning_engine,
             memory=memory_service,
-            db_path=None
+            db_path=None,
+            ontology=self.ontology
         )
 
         # Session memory
@@ -112,6 +113,9 @@ class ConversationalAgentService:
         1. LLM plans which tools to invoke
         2. Execute tools deterministically
         3. LLM synthesizes results into response
+        
+        Following LLM-as-Orchestrator pattern: LLM decides what tools to use,
+        tools execute deterministically, LLM synthesizes results.
         """
         self._current_session = session_id or "default"
 
@@ -130,6 +134,8 @@ class ConversationalAgentService:
 
         return result
 
+
+
     async def _orchestrate_with_tools(
         self,
         message: str,
@@ -138,8 +144,13 @@ class ConversationalAgentService:
         """
         LLM orchestration with function calling.
 
-        The LLM decides which tools to call, we execute them,
-        then the LLM synthesizes the results.
+        Pure LLM-as-Orchestrator pattern:
+        - LLM analyzes the user's intent
+        - LLM decides which tools (if any) to invoke
+        - Tools execute deterministically
+        - LLM synthesizes results into natural language
+        
+        No hardcoded rules - the LLM is fully in control.
         """
         logger.info(f"🔧 Orchestrating with {len(self.tools.tools)} tools available")
 
@@ -153,8 +164,11 @@ class ConversationalAgentService:
         messages = self._build_messages(system_prompt, message)
 
         try:
-            # Call LLM with tools - it may request tool invocations
+            # LLM decides tools
             llm_response = await self._call_llm_with_tools(messages, tool_schemas)
+            
+            logger.info(f"📝 LLM response length: {len(llm_response)} chars")
+            logger.info(f"📝 LLM response preview: {llm_response[:200]}")
 
             # Check if LLM wants to call tools
             tool_calls = self._extract_tool_calls(llm_response)
@@ -170,11 +184,12 @@ class ConversationalAgentService:
                 messages.append({"role": "assistant", "content": llm_response})
                 messages.append({
                     "role": "user",
-                    "content": f"Tool results: {json.dumps(tool_results, indent=2)}"
+                    "content": f"Tool results:\n\n{json.dumps(tool_results, indent=2)}\n\nNow provide a helpful, conversational response to the user based on these results."
                 })
 
                 # Second LLM call: synthesis with tool results
                 final_response = await self._call_llm_simple(messages)
+                logger.info(f"✅ LLM synthesized response: {len(final_response)} chars")
                 return final_response
 
             # No tools needed - direct response
@@ -182,7 +197,7 @@ class ConversationalAgentService:
             return llm_response
 
         except Exception as e:
-            logger.error(f"Orchestration error: {e}")
+            logger.error(f"Orchestration error: {e}", exc_info=True)
             # Fallback to simple call
             return await self._call_llm_simple(messages)
 
@@ -208,15 +223,55 @@ class ConversationalAgentService:
         Extract tool calls from LLM response.
 
         Supports multiple formats:
-        - JSON function calling (if LLM supports it)
-        - Embedded JSON blocks in response
+        - JSON code blocks: ```json {"tool": "...", "args": {...}} ```
+        - Bare JSON: {"tool": "...", "args": {...}}
         """
         tool_calls = []
 
-        # Try to find JSON tool call blocks in response
-        # Format: ```json\n{"tool": "check_anomaly", "args": {...}}```
-        json_blocks = re.findall(r'```json\s*(\{.*?\})\s*```', llm_response, re.DOTALL)
+        # Try to find JSON tool call blocks in response (fenced code blocks)
+        json_blocks = re.findall(r'```(?:json)?\s*(\{.*?\})\s*```', llm_response, re.DOTALL)
 
+        # For bare JSON, try to parse the entire response if it looks like JSON
+        if llm_response.strip().startswith('{') and llm_response.strip().endswith('}'):
+            try:
+                parsed = json.loads(llm_response.strip())
+                if "tool" in parsed:
+                    tool_calls.append({
+                        "name": parsed["tool"],
+                        "arguments": parsed.get("args", parsed.get("arguments", {}))
+                    })
+                    return tool_calls
+            except json.JSONDecodeError:
+                pass
+
+        # Also try to find JSON objects with "tool" key using simple search
+        # Look for {"tool": anywhere in the response
+        if '"tool"' in llm_response or "'tool'" in llm_response:
+            # Try to extract JSON starting from { to matching }
+            stack = []
+            start_idx = None
+            for i, char in enumerate(llm_response):
+                if char == '{':
+                    if not stack:
+                        start_idx = i
+                    stack.append(char)
+                elif char == '}' and stack:
+                    stack.pop()
+                    if not stack and start_idx is not None:
+                        # Found complete JSON object
+                        potential_json = llm_response[start_idx:i+1]
+                        try:
+                            parsed = json.loads(potential_json)
+                            if "tool" in parsed:
+                                tool_calls.append({
+                                    "name": parsed["tool"],
+                                    "arguments": parsed.get("args", parsed.get("arguments", {}))
+                                })
+                        except json.JSONDecodeError:
+                            pass
+                        start_idx = None
+
+        # Process any fenced code blocks found
         for block in json_blocks:
             try:
                 parsed = json.loads(block)
@@ -400,13 +455,21 @@ class ConversationalAgentService:
             "## Your Role",
             "You have access to tools to check device history, detect unusual patterns, and answer questions.",
             "Use tools intelligently to gather data, then explain findings in simple terms.",
+            "IMPORTANT: When users ask for documentation, manuals, or how-to info - you MUST use the get_device_documentation tool. Do NOT make up documentation!",
             "",
             "## Core Context",
         ]
 
-        # Minimal device list
+        # Device list with IDs for tool calls
         if "devices" in context:
-            parts.append(f"### Devices: {len(context['devices'])} sensors installed")
+            parts.append(f"### Devices ({len(context['devices'])} sensors)")
+            parts.append("Device ID mapping (use these IDs when calling tools):")
+            for dev in context.get("devices", []):
+                dev_id = dev.get("id", "")
+                dev_name = dev.get("name", dev_id)
+                dev_type = dev.get("type", "sensor")
+                zone = dev.get("zone", "")
+                parts.append(f"  - {dev_id}: {dev_name} ({dev_type}) in {zone}")
             parts.append("")
 
         # Health summary
@@ -421,38 +484,78 @@ class ConversationalAgentService:
             parts.append("")
 
         parts.append("""
-## Tool Usage Strategy
+## Tool Usage Rules - CRITICAL
 
-1. **Understand intent**: What is the homeowner really asking? (e.g., "anything wrong?" means check for unusual activity)
-2. **Be smart about tools**: Use incident history for "when did X happen", erratic checks for "acting weird", baselines for "normal vs unusual"
-3. **Execute**: I'll run the tools and give you results
-4. **Translate to human**: Take technical results and explain them conversationally
+**YOU MUST CALL TOOLS TO ANSWER QUESTIONS.**
 
-## Examples of Natural Understanding
+Do NOT respond with phrases like:
+- "Let me check that for you"
+- "I'll need to query the data"
+- "Let me fetch that information"
 
-User: "Has my basement sensor been acting up lately?"
-→ Think: They want to know if anything unusual happened
-→ Use: check_erratic_behavior(device_id="basement-sensor") + get_device_incidents(device_id="basement-sensor")
-→ Respond: "I checked your basement sensor - it's been working normally. Last detected water on [date], but nothing since then."
+Instead, IMMEDIATELY call the appropriate tool using this EXACT format:
+```json
+{"tool": "tool_name", "args": {"param": "value"}}
+```
 
-User: "When did I last have a leak?"
-→ Think: They want recent incident history
-→ Use: get_recent_incidents(limit=10) and filter for leak-related
-→ Respond: "The last time a leak was detected was [date] in the [location]. Everything's been dry since then."
+### When to Use Each Tool:
 
-User: "Anything weird happening?"
-→ Think: General health check - look for unusual patterns, recent incidents, devices acting strange
-→ Use: get_erratic_devices() + get_recent_incidents(limit=5)
-→ Respond: Natural summary of findings or "Everything looks good - no unusual activity detected."
+**User asks: "Which sensors?" / "What devices in basement?" / "List devices" / "Show me sensors"**
+→ Call: `list_devices` to get ALL devices in a zone or entire home
+→ Example:
+```json
+{"tool": "list_devices", "args": {"zone": "basement"}}
+```
 
-User: "Is my [device] broken?"
-→ Think: Check recent activity, incidents, and behavior patterns
-→ Use: get_device_incidents() + check_erratic_behavior()
-→ Respond: Give clear yes/no with evidence
+**User asks: "How's the basement?" / "Everything OK in basement?" / "Any issues?"**
+→ Call: `check_erratic_behavior` for all basement devices + `get_recent_incidents` for basement
+→ Example:
+```json
+{"tool": "check_erratic_behavior", "args": {"device_id": "zwave-31"}}
+```
 
-## Response Format
-Always respond conversationally in plain English. If you need to call tools, include JSON blocks.
-Be helpful, proactive, and explain things like you're talking to a neighbor.
+**User asks: "What's the battery level?" / "Battery status?" / "Check battery"**
+→ Call: `get_device_status` to see CURRENT battery level
+→ Example:
+```json
+{"tool": "get_device_status", "args": {"device_id": "zwave-31"}}
+```
+
+**User asks: "Comfort levels?" / "How's the temperature?"**
+→ Call: `get_comfort_preferences` for learned temperature/humidity preferences
+→ Example:
+```json
+{"tool": "get_comfort_preferences", "args": {}}
+```
+
+**User asks: "When did X happen?" / "Last time there was a leak?"**
+→ Call: `get_recent_incidents` or `get_device_incidents`
+→ Example:
+```json
+{"tool": "get_recent_incidents", "args": {"limit": 10}}
+```
+
+**User asks: "Is my sensor broken?" / "Acting weird?"**
+→ Call: `check_erratic_behavior` to see if behavior is unusual
+→ Example:
+```json
+{"tool": "check_erratic_behavior", "args": {"device_id": "zwave-31"}}
+```
+
+**User asks: "Show me docs" / "How do I use X?" / "Manual for sensor"**
+→ Call: `get_device_documentation`
+→ Example:
+```json
+{"tool": "get_device_documentation", "args": {"device_id": "zwave-31"}}
+```
+
+### Response Flow:
+1. User asks question
+2. YOU call appropriate tool(s) - NO explanatory text, just the JSON
+3. I execute the tool and give you results
+4. YOU synthesize results into a natural, helpful response
+
+DO NOT say you're "going to check" - JUST CHECK by calling the tool!
 """)
 
         return "\n".join(parts)
@@ -522,13 +625,22 @@ Be helpful, proactive, and explain things like you're talking to a neighbor.
             tools_text += "\n"
 
         tools_text += """
-To use a tool, include a JSON block in your response:
-```json
-{"tool": "tool_name", "args": {"param1": "value1"}}
-```
+## CRITICAL: Tool Calling Format
 
-You can call multiple tools by including multiple JSON blocks.
-After I execute the tools, I'll provide the results and you can synthesize the final response.
+When you need to answer a question with data, you MUST call a tool.
+
+**Correct Format - Output ONLY the JSON:**
+{"tool": "tool_name", "args": {"param": "value"}}
+
+**WRONG - Do NOT output explanatory text:**
+❌ "Let me check that for you."
+❌ "I'll need to query the data."
+❌ "To check X, I'll use tool Y."
+
+**RIGHT - Just call the tool:**
+✅ {"tool": "get_device_baseline", "args": {"device_id": "zwave-31", "metric": "battery"}}
+
+After I execute the tool, I'll give you the results and THEN you respond conversationally.
 """
 
         return tools_text
@@ -538,35 +650,92 @@ After I execute the tools, I'll provide the results and you can synthesize the f
     # -------------------------------------------------------------------------
 
     def _parse_response(self, llm_response: str) -> ConversationResponse:
-        """Parse LLM response, extracting reply and optional action."""
+        """Parse LLM response, extracting reply and optional action or clarification."""
         action = None
+        clarification = None
         reply = llm_response
         
+        # Check if this is a clarification response (structured JSON from system)
         try:
-            # Find JSON in response
+            if llm_response.strip().startswith('{"type"'):
+                parsed = json.loads(llm_response.strip())
+                if parsed.get("type") == "clarification" and parsed.get("data"):
+                    clarification_data = parsed["data"]
+                    # Format as user-friendly message
+                    reply = clarification_data["question"]
+                    return ConversationResponse(
+                        reply=reply,
+                        action=None,
+                        clarification=clarification_data
+                    )
+        except json.JSONDecodeError as e:
+            logger.debug(f"Not a clarification JSON: {e}")
+        
+        # Strip LLM special tokens (Llama/Qwen format markers that shouldn't appear)
+        reply = re.sub(r'<\|[^|>]+\|>', '', reply)  # <|eot_header_id|>, <|start_header_id|>, etc.
+        reply = re.sub(r'<\|im_start\|>.*?<\|im_end\|>', '', reply, flags=re.DOTALL)  # ChatML format
+        reply = re.sub(r'<\|im_start\|>|<\|im_end\|>', '', reply)  # Leftover ChatML markers
+        
+        # Strip hallucinated role markers and JSON blocks that look like system messages
+        reply = re.sub(r'>?\s*system\s*\n?\{.*?\}', '', reply, flags=re.DOTALL | re.IGNORECASE)
+        reply = re.sub(r'>?\s*assistant\s*\n?\{.*?\}', '', reply, flags=re.DOTALL | re.IGNORECASE)
+        
+        # Strip fake conversation continuations (model hallucinating multi-turn)
+        # Stop at first "user" or "assistant" role marker if model outputs them
+        if 'user<|' in reply.lower() or '\nuser\n' in reply.lower():
+            reply = re.split(r'(?i)user<\||\nuser\n', reply)[0]
+        if 'assistant<|' in reply.lower():
+            reply = re.split(r'(?i)assistant<\|', reply)[0]
+        
+        # Strip raw tool call JSON from response (should never be shown to user)
+        # Remove: {"tool": "...", "args": {...}} including nested args
+        reply = re.sub(r'\{"tool"\s*:\s*"[^"]+"\s*,\s*"args"\s*:\s*\{[^}]*\}\s*\}', '', reply)
+        reply = re.sub(r"\{'tool'\s*:\s*'[^']+'\s*,\s*'args'\s*:\s*\{[^}]*\}\s*\}", '', reply)
+        # Remove: ```json ... ``` blocks containing tool calls
+        reply = re.sub(r'```(?:json)?\s*\{[^}]*"tool"[^}]*\}\s*```', '', reply, flags=re.DOTALL)
+        # Remove standalone ``` markers left over
+        reply = re.sub(r'```(?:json)?', '', reply)
+        reply = re.sub(r'```', '', reply)
+        
+        # Clean up extra whitespace
+        reply = re.sub(r'\n\s*\n\s*\n+', '\n\n', reply).strip()
+        
+        # If response is now empty or just filler, provide fallback
+        if not reply or reply in ["I'll run these checks and let you know what I find.", 
+                                   "Let me check that for you.",
+                                   "I'll look into that."]:
+            reply = ""  # Will be filled by tool execution results
+        
+        try:
+            # Find structured JSON response (for actions)
             match = re.search(r"\{(?:[^{}]|(?:\{[^}]*\}))*\}", llm_response, re.DOTALL)
             if match:
                 raw = match.group(0)
-                # Clean trailing commas
-                cleaned = re.sub(r",\s*}", "}", raw)
-                cleaned = re.sub(r",\s*]", "]", cleaned)
-                
-                parsed = json.loads(cleaned)
-                reply = parsed.get("reply", reply)
-                
-                # Validate action
-                if parsed.get("action"):
-                    a = parsed["action"]
-                    if a.get("command") in SAFE_ACTIONS:
-                        action = ActionCommand(
-                            topic=a["topic"],
-                            command=a["command"],
-                            value=a.get("value")
-                        )
+                # Skip if it's a tool call or clarification
+                if '"tool"' in raw or '"type"' in raw:
+                    pass
+                else:
+                    # Clean trailing commas
+                    cleaned = re.sub(r",\s*}", "}", raw)
+                    cleaned = re.sub(r",\s*]", "]", cleaned)
+                    
+                    parsed = json.loads(cleaned)
+                    if "reply" in parsed:
+                        reply = parsed.get("reply", reply)
+                    
+                    # Validate action
+                    if parsed.get("action"):
+                        a = parsed["action"]
+                        if a.get("command") in SAFE_ACTIONS:
+                            action = ActionCommand(
+                                topic=a["topic"],
+                                command=a["command"],
+                                value=a.get("value")
+                            )
         except Exception as e:
             logger.warning(f"JSON parse failed: {e}")
         
-        return ConversationResponse(reply=reply, action=action)
+        return ConversationResponse(reply=reply, action=action, clarification=clarification)
 
     # -------------------------------------------------------------------------
     # Memory Management

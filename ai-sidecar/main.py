@@ -1071,10 +1071,16 @@ async def hsil_chat(request: dict):
             session_id=request.get("session_id")
         )
         # Return dict for JSON serialization
-        return {
+        result = {
             "reply": response.reply,
             "action": response.action.model_dump() if response.action else None
         }
+        
+        # Include clarification if present
+        if response.clarification:
+            result["clarification"] = response.clarification
+            
+        return result
     except Exception as e:
         logger.error(f"HSIL chat error: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
