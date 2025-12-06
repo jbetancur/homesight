@@ -23,6 +23,20 @@ type Config struct {
 		URL string `yaml:"url"`
 	} `yaml:"prometheus"`
 
+	System struct {
+		Timezone string `yaml:"timezone"`
+		NTP      struct {
+			Enabled           bool     `yaml:"enabled"`
+			Servers           []string `yaml:"servers"`
+			SyncIntervalHours int      `yaml:"sync_interval_hours"`
+		} `yaml:"ntp"`
+	} `yaml:"system"`
+
+	Weather struct {
+		ZipCode             string `yaml:"zip_code"`
+		RefreshIntervalMins int    `yaml:"refresh_interval_minutes"`
+	} `yaml:"weather"`
+
 	AI struct {
 		ServiceURL string `yaml:"service_url"`
 	} `yaml:"ai"`

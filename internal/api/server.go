@@ -26,6 +26,7 @@ import (
 	"github.com/homesight/homesight/internal/integrations/zwave"
 	"github.com/homesight/homesight/internal/metrics"
 	"github.com/homesight/homesight/internal/model"
+	"github.com/homesight/homesight/internal/timezone"
 )
 
 // Server is the REST API server
@@ -51,6 +52,9 @@ type Server struct {
 	zwaveClient *zwave.Client
 	zwaveHomeID int
 	zwaveMutex  sync.RWMutex
+
+	// Timezone service
+	timezoneService *timezone.Service
 }
 
 // NewServer creates a new API server
@@ -77,6 +81,15 @@ func NewServer(
 		addr:              addr,
 		eventBus:          NewEventBus(),
 		cfg:               cfg,
+	}
+
+	// Initialize timezone service
+	tzSvc, err := timezone.NewService(cfg.System.Timezone, cfg.Weather.ZipCode)
+	if err != nil {
+		log.Printf("Warning: Failed to initialize timezone service: %v", err)
+	} else {
+		s.timezoneService = tzSvc
+		log.Printf("Timezone initialized: %s (local time: %s)", tzSvc.GetName(), tzSvc.Now().Format("2006-01-02 15:04:05 MST"))
 	}
 
 	// Initialize Z-Wave if enabled
@@ -206,6 +219,12 @@ func (s *Server) setupRoutes() {
 
 		// Weather (also available at /api/weather for convenience)
 		r.Get("/weather", s.handleWeather)
+
+		// System configuration
+		r.Route("/system", func(r chi.Router) {
+			r.Get("/timezone", s.handleGetTimezone)
+			r.Post("/timezone", s.handleSetTimezone)
+		})
 
 		// Events
 		r.Get("/events", s.handleEvents)
@@ -449,28 +468,38 @@ func (s *Server) enrichDeviceWithState(ctx context.Context, device model.Device)
 
 	// Start with all original device fields
 	enriched := map[string]interface{}{
-		"id":               device.ID,
-		"name":             device.Name,
-		"alias":            device.Alias,
-		"display_name":     displayName,
-		"type":             device.Type,
-		"integration":      device.Integration,
-		"zone_id":          device.ZoneID,
-		"asset_id":         device.AssetID,
-		"enabled":          device.Enabled,
-		"last_seen":        device.LastSeen,
-		"metadata":         device.Metadata,
-		"docs_ingested":    device.DocsIngested,
-		"docs_ingested_at": device.DocsIngestedAt,
-		"docs_status":      device.DocsStatus,
-		"created_at":       device.CreatedAt,
-		"updated_at":       device.UpdatedAt,
+		"id":           device.ID,
+		"name":         device.Name,
+		"alias":        device.Alias,
+		"display_name": displayName,
+		"type":         device.Type,
+		"integration":  device.Integration,
+		"zone_id":      device.ZoneID,
+		"asset_id":     device.AssetID,
+		"enabled":      device.Enabled,
+		"last_seen":    device.LastSeen,
+		"metadata":     device.Metadata,
+		"created_at":   device.CreatedAt,
+		"updated_at":   device.UpdatedAt,
 		// Add enrichment fields
 		"state":  "normal",
 		"active": false,
 		"value":  nil,
 		"unit":   "",
 		"trend":  nil,
+	}
+
+	// Compute docs_status from KB table (source of truth) instead of device fields
+	// This avoids stale status when AI sidecar updates fail
+	kb, _ := s.knowledgeBaseRepo.GetByDevice(ctx, device.ID)
+	if kb != nil && kb.Content != "" {
+		enriched["docs_ingested"] = true
+		enriched["docs_ingested_at"] = kb.CreatedAt
+		enriched["docs_status"] = "success"
+	} else {
+		enriched["docs_ingested"] = false
+		enriched["docs_ingested_at"] = nil
+		enriched["docs_status"] = "" // Empty = not yet ingested
 	}
 
 	// Extract battery level and sensor readings from metadata

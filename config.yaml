@@ -152,6 +152,21 @@ api:
 # For network: use your actual IP like 10.0.20.175:8080
 backend_url: "http://10.0.20.175:8080"
 
+# System Configuration
+system:
+  # Timezone configuration (IANA timezone database format)
+  # Examples: "America/New_York", "America/Los_Angeles", "Europe/London", "Asia/Tokyo"
+  # Leave empty or set to "auto" for automatic detection based on ZIP code
+  timezone: "auto"              # "auto" or IANA timezone (e.g., "America/New_York")
+  
+  # NTP (Network Time Protocol) for time synchronization
+  ntp:
+    enabled: true               # Enable NTP time sync
+    servers:                    # NTP servers to use (in priority order)
+      - "time.nist.gov"
+      - "pool.ntp.org"
+    sync_interval_hours: 24     # How often to sync time (hours)
+
 # Weather Service Configuration
 # Uses Met.no API (same as Home Assistant) - no API key required!
 weather:
