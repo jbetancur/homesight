@@ -369,9 +369,26 @@ func (r *DeviceRepo) Upsert(ctx context.Context, device *model.Device) error {
 		nullAlias = sql.NullString{String: device.Alias, Valid: true}
 	}
 
+	// Use INSERT ... ON CONFLICT to preserve user-assigned fields (alias, zone_id)
+	// when device discovery re-upserts existing devices
 	_, err := r.db.ExecContext(ctx,
-		`INSERT OR REPLACE INTO devices (id, name, alias, type, integration, zone_id, asset_id, enabled, last_seen, metadata, docs_ingested, docs_ingested_at, docs_status, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO devices (id, name, alias, type, integration, zone_id, asset_id, enabled, last_seen, metadata, docs_ingested, docs_ingested_at, docs_status, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(id) DO UPDATE SET
+		   name = excluded.name,
+		   type = excluded.type,
+		   integration = excluded.integration,
+		   asset_id = excluded.asset_id,
+		   enabled = excluded.enabled,
+		   last_seen = excluded.last_seen,
+		   metadata = excluded.metadata,
+		   docs_ingested = excluded.docs_ingested,
+		   docs_ingested_at = excluded.docs_ingested_at,
+		   docs_status = excluded.docs_status,
+		   updated_at = excluded.updated_at,
+		   -- Preserve user-assigned fields: only update if incoming value is non-empty
+		   alias = COALESCE(NULLIF(excluded.alias, ''), devices.alias),
+		   zone_id = COALESCE(NULLIF(excluded.zone_id, ''), devices.zone_id)`,
 		device.ID, device.Name, nullAlias, device.Type, device.Integration, device.ZoneID, device.AssetID, device.Enabled,
 		device.LastSeen, string(metadataJSON), device.DocsIngested, device.DocsIngestedAt, device.DocsStatus, device.CreatedAt, device.UpdatedAt)
 	return err

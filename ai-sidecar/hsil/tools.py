@@ -178,6 +178,16 @@ class ToolRegistry:
             function=self._get_device_documentation
         ))
 
+        # List zones / rooms
+        self.register_tool(Tool(
+            name="list_zones",
+            description="List ALL zones/rooms in the home with their IDs, names, types, and attributes. ALWAYS use this when users ask about rooms, zones, or use room names that might not exactly match (e.g., 'primary bedroom' vs 'master bedroom'). Returns all zone information including square footage and other attributes. Use this to find the correct zone ID before answering questions about specific rooms.",
+            parameters=[
+                ToolParameter("search", "string", "Optional search term to filter zones by name (e.g., 'bedroom', 'bath'). Leave empty to list all zones.", required=False),
+            ],
+            function=self._list_zones
+        ))
+
     def register_tool(self, tool: Tool):
         """Register a tool in the registry"""
         self.tools[tool.name] = tool
@@ -691,4 +701,54 @@ class ToolRegistry:
                 }
         except Exception as e:
             logger.error(f"Error fetching device documentation: {e}")
+            return {"error": str(e)}
+
+    async def _list_zones(self, search: Optional[str] = None) -> Dict[str, Any]:
+        """List all zones/rooms in the home, optionally filtered by search term"""
+        import httpx
+
+        try:
+            async with httpx.AsyncClient() as client:
+                # Get all zones
+                zones_url = f"http://api:8080/api/zones"
+                zones_resp = await client.get(zones_url, timeout=5.0)
+
+                if zones_resp.status_code != 200:
+                    return {"error": f"Failed to fetch zones: {zones_resp.status_code}"}
+
+                zones = zones_resp.json()
+
+                # Filter by search term if provided
+                if search:
+                    search_lower = search.lower()
+                    zones = [z for z in zones if search_lower in z.get("name", "").lower() or search_lower in z.get("id", "").lower()]
+
+                # Get attributes for each zone
+                enriched_zones = []
+                for zone in zones:
+                    zone_id = zone.get("id", "")
+                    attrs_url = f"http://api:8080/api/zones/{zone_id}/attributes"
+                    attrs_resp = await client.get(attrs_url, timeout=2.0)
+                    
+                    zone_info = {
+                        "id": zone_id,
+                        "name": zone.get("name", ""),
+                        "type": zone.get("type", ""),
+                        "home_id": zone.get("home_id", ""),
+                        "attributes": {}
+                    }
+                    
+                    if attrs_resp.status_code == 200:
+                        attrs = attrs_resp.json()
+                        zone_info["attributes"] = attrs
+                    
+                    enriched_zones.append(zone_info)
+
+                return {
+                    "total_zones": len(enriched_zones),
+                    "search_term": search if search else "none",
+                    "zones": enriched_zones
+                }
+        except Exception as e:
+            logger.error(f"Error listing zones: {e}")
             return {"error": str(e)}

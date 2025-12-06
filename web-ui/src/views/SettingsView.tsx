@@ -17,9 +17,10 @@ import {
   Accordion,
   LoadingOverlay,
   Alert,
+  Modal,
 } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
-import { Home, DoorOpen, Database, Check, AlertCircle } from 'lucide-react';
+import { Home, DoorOpen, Database, Check, AlertCircle, Plus, Trash2, Edit2 } from 'lucide-react';
 import { API_BASE } from '../apiConfig';
 
 interface HomeProfile {
@@ -79,6 +80,15 @@ interface Zone {
   type: string;
 }
 
+interface ZoneTypeOption {
+  value: string;
+  label: string;
+}
+
+interface ZoneSchema {
+  zone_types: ZoneTypeOption[];
+}
+
 export default function SettingsView() {
   const [activeTab, setActiveTab] = useState<string | null>('home');
   const [loading, setLoading] = useState(false);
@@ -86,11 +96,18 @@ export default function SettingsView() {
   const [attributeDefs, setAttributeDefs] = useState<AttributeDefinition[]>([]);
   const [zones, setZones] = useState<Zone[]>([]);
   const [zoneAttributes, setZoneAttributes] = useState<Record<string, Record<string, string>>>({});
+  const [zoneSchema, setZoneSchema] = useState<ZoneSchema | null>(null);
+  
+  // Add zone modal state
+  const [addZoneModalOpen, setAddZoneModalOpen] = useState(false);
+  const [newZoneType, setNewZoneType] = useState<string>('');
+  const [newZoneName, setNewZoneName] = useState<string>('');
 
   useEffect(() => {
     loadHomeProfile();
     loadAttributeDefinitions();
     loadZones();
+    loadZoneSchema();
   }, []);
 
   const loadHomeProfile = async () => {
@@ -110,6 +127,16 @@ export default function SettingsView() {
       setAttributeDefs(data || []);
     } catch (error) {
       console.error('Failed to load attribute definitions:', error);
+    }
+  };
+
+  const loadZoneSchema = async () => {
+    try {
+      const response = await fetch(`${API_BASE}/api/zones/schema`);
+      const data = await response.json();
+      setZoneSchema(data);
+    } catch (error) {
+      console.error('Failed to load zone schema:', error);
     }
   };
 
@@ -211,6 +238,51 @@ export default function SettingsView() {
     }));
   };
 
+  const handleAddZone = async () => {
+    if (!newZoneType || !newZoneName) return;
+    
+    const zoneId = newZoneName.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
+    
+    try {
+      const response = await fetch(`${API_BASE}/api/zones`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          id: zoneId,
+          name: newZoneName,
+          type: newZoneType,
+          home_id: 'default',
+        }),
+      });
+      
+      if (response.ok) {
+        notifications.show({
+          title: 'Success',
+          message: 'Zone created successfully',
+          color: 'green',
+        });
+        setAddZoneModalOpen(false);
+        setNewZoneType('');
+        setNewZoneName('');
+        loadZones();
+      }
+    } catch {
+      notifications.show({
+        title: 'Error',
+        message: 'Failed to create zone',
+        color: 'red',
+      });
+    }
+  };
+
+  // Auto-fill zone name when type changes
+  useEffect(() => {
+    if (newZoneType && !newZoneName) {
+      const typeName = newZoneType.split('-').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
+      setNewZoneName(typeName);
+    }
+  }, [newZoneType, newZoneName]);
+
   const renderAttributeInput = (zoneId: string, def: AttributeDefinition) => {
     const value = zoneAttributes[zoneId]?.[def.id] || '';
     
@@ -270,6 +342,9 @@ export default function SettingsView() {
         <Tabs.List>
           <Tabs.Tab value="home" leftSection={<Home size={16} />}>
             Home Profile
+          </Tabs.Tab>
+          <Tabs.Tab value="manage-zones" leftSection={<DoorOpen size={16} />}>
+            Manage Zones
           </Tabs.Tab>
           <Tabs.Tab value="zones" leftSection={<DoorOpen size={16} />}>
             Zone Attributes
@@ -490,6 +565,109 @@ export default function SettingsView() {
           </Paper>
         </Tabs.Panel>
 
+        <Tabs.Panel value="manage-zones" pt="lg">
+          <Paper shadow="sm" p="xl" withBorder>
+            <Stack gap="lg">
+              <Group justify="space-between">
+                <Title order={3}>Manage Zones (Rooms)</Title>
+                <Button
+                  leftSection={<Plus size={16} />}
+                  onClick={() => setAddZoneModalOpen(true)}
+                >
+                  Add Zone
+                </Button>
+              </Group>
+
+              <Alert color="blue" icon={<AlertCircle size={18} />}>
+                Zones represent physical rooms or areas in your home. Add zones here, then configure their attributes in the "Zone Attributes" tab.
+              </Alert>
+
+              <Stack gap="sm">
+                {zones.map((zone) => (
+                  <Paper key={zone.id} p="md" withBorder>
+                    <Group justify="space-between">
+                      <Stack gap={4}>
+                        <Text fw={500}>{zone.name}</Text>
+                        <Group gap="xs">
+                          <Badge size="sm" variant="light">{zone.type}</Badge>
+                          <Text size="sm" c="dimmed">ID: {zone.id}</Text>
+                        </Group>
+                      </Stack>
+                      <Group gap="xs">
+                        <Button
+                          size="xs"
+                          variant="light"
+                          leftSection={<Edit2 size={14} />}
+                          onClick={() => {
+                            const newName = prompt('Enter new zone name:', zone.name);
+                            if (!newName || newName === zone.name) return;
+                            
+                            fetch(`${API_BASE}/api/zones/${zone.id}`, {
+                              method: 'PUT',
+                              headers: { 'Content-Type': 'application/json' },
+                              body: JSON.stringify({
+                                ...zone,
+                                name: newName,
+                              }),
+                            })
+                              .then(() => {
+                                notifications.show({
+                                  title: 'Success',
+                                  message: 'Zone updated successfully',
+                                  color: 'green',
+                                });
+                                loadZones();
+                              })
+                              .catch(() => {
+                                notifications.show({
+                                  title: 'Error',
+                                  message: 'Failed to update zone',
+                                  color: 'red',
+                                });
+                              });
+                          }}
+                        >
+                          Edit
+                        </Button>
+                        <Button
+                          size="xs"
+                          color="red"
+                          variant="light"
+                          leftSection={<Trash2 size={14} />}
+                          onClick={() => {
+                            if (!confirm(`Delete zone "${zone.name}"? Devices in this zone will need to be reassigned.`)) return;
+                            
+                            fetch(`${API_BASE}/api/zones/${zone.id}`, {
+                              method: 'DELETE',
+                            })
+                              .then(() => {
+                                notifications.show({
+                                  title: 'Success',
+                                  message: 'Zone deleted successfully',
+                                  color: 'green',
+                                });
+                                loadZones();
+                              })
+                              .catch(() => {
+                                notifications.show({
+                                  title: 'Error',
+                                  message: 'Failed to delete zone',
+                                  color: 'red',
+                                });
+                              });
+                          }}
+                        >
+                          Delete
+                        </Button>
+                      </Group>
+                    </Group>
+                  </Paper>
+                ))}
+              </Stack>
+            </Stack>
+          </Paper>
+        </Tabs.Panel>
+
         <Tabs.Panel value="zones" pt="lg">
           <Stack gap="md">
             {zones.length === 0 ? (
@@ -571,6 +749,57 @@ export default function SettingsView() {
           </Paper>
         </Tabs.Panel>
       </Tabs>
+
+      {/* Add Zone Modal */}
+      <Modal
+        opened={addZoneModalOpen}
+        onClose={() => {
+          setAddZoneModalOpen(false);
+          setNewZoneType('');
+          setNewZoneName('');
+        }}
+        title="Add New Zone"
+        size="md"
+      >
+        <Stack gap="md">
+          <Select
+            label="Room Type"
+            placeholder="Select room type"
+            value={newZoneType}
+            onChange={(value) => setNewZoneType(value || '')}
+            data={zoneSchema?.zone_types || []}
+            searchable
+            required
+          />
+          
+          <TextInput
+            label="Zone Name"
+            placeholder="e.g., Master Bedroom, Guest Bathroom"
+            value={newZoneName}
+            onChange={(e) => setNewZoneName(e.currentTarget.value)}
+            required
+          />
+
+          <Group justify="flex-end" mt="md">
+            <Button
+              variant="subtle"
+              onClick={() => {
+                setAddZoneModalOpen(false);
+                setNewZoneType('');
+                setNewZoneName('');
+              }}
+            >
+              Cancel
+            </Button>
+            <Button
+              onClick={handleAddZone}
+              disabled={!newZoneType || !newZoneName}
+            >
+              Add Zone
+            </Button>
+          </Group>
+        </Stack>
+      </Modal>
     </Container>
   );
 }

@@ -156,6 +156,11 @@ class ConversationalAgentService:
 
         # Build system prompt with tool awareness
         system_prompt = self._build_orchestrator_prompt(context)
+        logger.info(f"📋 System prompt length: {len(system_prompt)} chars")
+        if "home_profile" in context:
+            logger.info(f"✅ Home profile IS in context, has keys: {list(context['home_profile'].keys())[:10]}")
+        else:
+            logger.warning(f"⚠️  Home profile NOT in context. Context keys: {list(context.keys())}")
 
         # Get tool schemas for function calling
         tool_schemas = self.tools.get_tool_schemas()
@@ -304,44 +309,67 @@ class ConversationalAgentService:
             "user_message": message,
         }
         
+        # 0. Home Profile - construction details, HVAC, systems
+        try:
+            async with httpx.AsyncClient(timeout=2.0) as client:
+                resp = await client.get(f"{self.backend_url}/api/home/profile")
+                if resp.status_code == 200:
+                    profile_data = resp.json()
+                    context["home_profile"] = profile_data
+                    logger.info(f"✅ Home profile loaded: {list(profile_data.keys())}")
+                else:
+                    logger.warning(f"⚠️  Home profile API returned status {resp.status_code}")
+        except Exception as e:
+            logger.warning(f"⚠️  Home profile fetch failed: {e}")
+        
         # 1. Device Ontology - what sensors exist and where
         if self.ontology._loaded:
-            context["devices"] = []
-            for device in self.ontology.devices.values():
-                # Extract manufacturer/model from metadata if available
-                meta = device.metadata or {}
-                context["devices"].append({
-                    "id": device.device_id,
-                    "name": device.name,
-                    "type": device.type,  # e.g., "sensor", "leak_sensor", "thermostat"
-                    "zone": device.zone_id,
-                    "manufacturer": meta.get("manufacturer", "Unknown"),
-                    "model": meta.get("model", device.name),
-                })
+            from dataclasses import asdict
             
+            # Serialize all devices
+            context["devices"] = [asdict(device) for device in self.ontology.devices.values()]
+            
+            # Zones with dynamic attributes
             context["zones"] = []
-            for zone_id, zone in self.ontology.zones.items():
-                zone_devices = self.ontology.devices_by_zone.get(zone_id, [])
-                context["zones"].append({
-                    "id": zone_id,
-                    "name": zone.name,
-                    "type": zone.type,
-                    "devices": [d.name for d in zone_devices],
-                    "device_types": [d.type for d in zone_devices],
-                    "features": self._get_zone_features(zone),
-                })
+            async with httpx.AsyncClient(timeout=2.0) as client:
+                for zone_id, zone in self.ontology.zones.items():
+                    # Start with full zone data
+                    zone_context = asdict(zone)
+                    
+                    # Add device list for this zone
+                    zone_devices = self.ontology.devices_by_zone.get(zone_id, [])
+                    zone_context["device_list"] = [d.name for d in zone_devices]
+                    
+                    # Fetch dynamic zone attributes (extensible user-defined attributes)
+                    try:
+                        attr_resp = await client.get(f"{self.backend_url}/api/zones/{zone_id}/attributes")
+                        if attr_resp.status_code == 200:
+                            dynamic_attrs = attr_resp.json()
+                            if dynamic_attrs:
+                                # Store as "attributes" so prompt builder can find them
+                                zone_context["attributes"] = dynamic_attrs
+                                logger.debug(f"Zone {zone_id} has attributes: {list(dynamic_attrs.keys())}")
+                    except Exception as e:
+                        logger.debug(f"Failed to fetch attributes for zone {zone_id}: {e}")
+                    
+                    context["zones"].append(zone_context)
         
         # 2. Home Health - current status
         try:
             health = await self.health_engine.evaluate(home_state=home_state)
+            # Convert dataclass to dict for JSON serialization
             context["health"] = {
                 "status": health.status.value,
-                "score": health.health_score,
+                "health_score": health.health_score,
                 "has_leak": health.has_leak,
                 "has_smoke": health.has_smoke,
                 "has_co": health.has_co,
+                "has_temp_anomaly": health.has_temp_anomaly,
+                "has_humidity_anomaly": health.has_humidity_anomaly,
+                "total_devices": health.total_devices,
                 "active_alarms": health.active_alarms,
-                "issues": [d.message for d in health.details[:5]],
+                "critical_devices": health.critical_devices,
+                "details": [{"severity": d.severity, "category": d.category, "message": d.message, "device_id": d.device_id, "location": d.location} for d in health.details],
             }
         except Exception as e:
             logger.warning(f"Health check failed: {e}")
@@ -401,28 +429,6 @@ class ConversationalAgentService:
         
         return context
 
-    def _get_zone_features(self, zone) -> List[str]:
-        """Extract zone features as a list."""
-        features = []
-        attrs = zone.attributes
-        if attrs.floor_type:
-            features.append(f"{attrs.floor_type} floor")
-        if attrs.has_plumbing:
-            features.append("plumbing")
-        if attrs.has_water_heater:
-            features.append("water heater")
-        if attrs.has_washer:
-            features.append("washer/dryer")
-        if attrs.has_sump_pump:
-            features.append("sump pump")
-        if attrs.has_hvac_return:
-            features.append("HVAC return")
-        if attrs.has_hvac_vent:
-            features.append("HVAC vent")
-        if attrs.has_windows:
-            features.append("windows")
-        return features
-
     def _count_by_field(self, items: List[Dict], field: str) -> Dict[str, int]:
         """Count items by a field value."""
         counts = {}
@@ -430,6 +436,15 @@ class ConversationalAgentService:
             val = item.get(field, "unknown")
             counts[val] = counts.get(val, 0) + 1
         return counts
+    
+    def _format_home_profile(self, profile: Optional[Dict[str, Any]]) -> str:
+        """Format home profile for LLM context."""
+        if not profile:
+            return "No home profile data available."
+        
+        # Format as readable JSON-like structure for LLM
+        import json
+        return json.dumps(profile, indent=2)
 
     # -------------------------------------------------------------------------
     # LLM Orchestrator Prompt
@@ -443,6 +458,26 @@ class ConversationalAgentService:
         """
         parts = [
             "You are HomeSight, a friendly AI assistant helping homeowners monitor their smart home.",
+            "",
+        ]
+        
+        # Add home profile if available
+        if "home_profile" in context:
+            logger.info(f"📋 Home profile found in context: {list(context['home_profile'].keys())}")
+            parts.append("## Home Profile")
+            parts.append(self._format_home_profile(context["home_profile"]))
+            parts.append("")
+        else:
+            logger.warning("⚠️  No home profile in context!")
+        
+        parts.extend([
+            "## CRITICAL: Anti-Hallucination Rules",
+            "1. NEVER make up device IDs, zone names, or attributes - ONLY use what's listed below",
+            "2. NEVER invent square footage, room sizes, or attributes not explicitly shown",
+            "3. If a zone name doesn't match exactly (e.g., 'primary bedroom' vs 'master bedroom'), use the list_zones tool to search",
+            "4. NEVER provide documentation without calling get_device_documentation tool first",
+            "5. If you don't have information, say 'I don't have that information' - don't guess!",
+            "6. When asked about zone attributes, ONLY mention attributes that are explicitly listed below",
             "",
             "## Your Communication Style",
             "- Use plain, conversational language (avoid technical jargon like 'anomaly', 'erratic', 'baseline')",
@@ -458,7 +493,7 @@ class ConversationalAgentService:
             "IMPORTANT: When users ask for documentation, manuals, or how-to info - you MUST use the get_device_documentation tool. Do NOT make up documentation!",
             "",
             "## Core Context",
-        ]
+        ])
 
         # Device list with IDs for tool calls
         if "devices" in context:
@@ -471,11 +506,40 @@ class ConversationalAgentService:
                 zone = dev.get("zone", "")
                 parts.append(f"  - {dev_id}: {dev_name} ({dev_type}) in {zone}")
             parts.append("")
+        
+        # Zones with attributes
+        if "zones" in context:
+            parts.append(f"### Zones ({len(context['zones'])} rooms)")
+            parts.append("IMPORTANT: These are ALL the zones that exist. If a user asks about a zone not in this list, use the list_zones tool to search!")
+            parts.append("")
+            for zone in context.get("zones", []):
+                zone_name = zone.get("name", zone.get("id", ""))
+                zone_id = zone.get("id", "")
+                zone_attrs = zone.get("attributes", {})
+                
+                logger.debug(f"Zone {zone_id} - Name: {zone_name}, Has attributes: {bool(zone_attrs)}, Keys: {list(zone_attrs.keys()) if zone_attrs else []}")
+                
+                zone_desc = f"  - {zone_name} (ID: {zone_id}): {zone.get('type', '')} zone"
+                if zone.get("devices"):
+                    zone_desc += f" with {len(zone['devices'])} device(s)"
+                parts.append(zone_desc)
+                
+                # Add dynamic zone attributes if available - BE EXPLICIT
+                if zone_attrs:
+                    parts.append("      Known attributes for this zone:")
+                    for key, value in zone_attrs.items():
+                        if value and value != "false" and value != "0":
+                            parts.append(f"        • {key}: {value}")
+                else:
+                    parts.append("      (No attributes set for this zone)")
+            parts.append("")
 
         # Health summary
         if "health" in context:
             h = context["health"]
-            parts.append(f"### Home Status: {h['status'].upper()} (score: {h['score']}/100)")
+            parts.append(f"### Home Status: {h['status'].upper()} (score: {h['health_score']}/100)")
+            if h.get("active_alarms", 0) > 0:
+                parts.append(f"Active alarms: {h['active_alarms']}")
             parts.append("")
 
         # Weather
@@ -542,11 +606,18 @@ Instead, IMMEDIATELY call the appropriate tool using this EXACT format:
 {"tool": "check_erratic_behavior", "args": {"device_id": "zwave-31"}}
 ```
 
-**User asks: "Show me docs" / "How do I use X?" / "Manual for sensor"**
+**User asks: "Show me docs" / "How do I use X?" / "Manual for sensor"
 → Call: `get_device_documentation`
 → Example:
 ```json
 {"tool": "get_device_documentation", "args": {"device_id": "zwave-31"}}
+```
+
+**User asks about a room/zone that might not match exactly (e.g., 'primary bedroom' when you have 'master bedroom')**
+→ Call: `list_zones` with search term to find matching zones
+→ Example:
+```json
+{"tool": "list_zones", "args": {"search": "bedroom"}}
 ```
 
 ### Response Flow:

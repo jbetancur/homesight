@@ -411,9 +411,10 @@ class LLMProvider:
             formatted_prompt += "<|start_header_id|>assistant<|end_header_id|>\n"
 
             # TRUNCATE PROMPT to avoid ggml crashes
-            if len(formatted_prompt) > 8000:
-                logger.warning("Local prompt exceeded 8000 chars, truncating tail to fit context.")
-                formatted_prompt = formatted_prompt[-8000:]
+            # Keep first 16000 chars (system context + recent messages)
+            if len(formatted_prompt) > 16000:
+                logger.warning(f"Local prompt exceeded 16000 chars ({len(formatted_prompt)}), truncating to fit context.")
+                formatted_prompt = formatted_prompt[:16000]
 
             # Estimate tokens for metrics
             input_token_count = len(formatted_prompt) // 4
