@@ -31,19 +31,22 @@ import (
 
 // Server is the REST API server
 type Server struct {
-	router            *chi.Mux
-	incidentService   incidents.IncidentService
-	deviceRepo        db.DeviceRepository
-	sensorRepo        db.SensorRepository
-	zoneRepo          db.ZoneRepository
-	knowledgeBaseRepo db.KnowledgeBaseRepository
-	metricsSink       metrics.MetricsSink
-	aiClient          ai.Client
-	addr              string
-	discoveryListener *discovery.MQTTDiscoveryListener
-	discoveryMutex    sync.RWMutex
-	eventBus          *EventBus
-	cfg               *config.Config
+	router                  *chi.Mux
+	incidentService         incidents.IncidentService
+	deviceRepo              db.DeviceRepository
+	sensorRepo              db.SensorRepository
+	zoneRepo                db.ZoneRepository
+	knowledgeBaseRepo       db.KnowledgeBaseRepository
+	homeProfileRepo         db.HomeProfileRepository
+	attributeDefinitionRepo db.AttributeDefinitionRepository
+	zoneAttributeValueRepo  db.ZoneAttributeValueRepository
+	metricsSink             metrics.MetricsSink
+	aiClient                ai.Client
+	addr                    string
+	discoveryListener       *discovery.MQTTDiscoveryListener
+	discoveryMutex          sync.RWMutex
+	eventBus                *EventBus
+	cfg                     *config.Config
 
 	// MQTT publisher for device commands
 	mqttPublisher *mqttint.Publisher
@@ -65,22 +68,28 @@ func NewServer(
 	sensorRepo db.SensorRepository,
 	zoneRepo db.ZoneRepository,
 	knowledgeBaseRepo db.KnowledgeBaseRepository,
+	homeProfileRepo db.HomeProfileRepository,
+	attributeDefinitionRepo db.AttributeDefinitionRepository,
+	zoneAttributeValueRepo db.ZoneAttributeValueRepository,
 	metricsSink metrics.MetricsSink,
 	aiClient ai.Client,
 	cfg *config.Config,
 ) *Server {
 	s := &Server{
-		router:            chi.NewRouter(),
-		incidentService:   incidentService,
-		deviceRepo:        deviceRepo,
-		sensorRepo:        sensorRepo,
-		zoneRepo:          zoneRepo,
-		knowledgeBaseRepo: knowledgeBaseRepo,
-		metricsSink:       metricsSink,
-		aiClient:          aiClient,
-		addr:              addr,
-		eventBus:          NewEventBus(),
-		cfg:               cfg,
+		router:                  chi.NewRouter(),
+		incidentService:         incidentService,
+		deviceRepo:              deviceRepo,
+		sensorRepo:              sensorRepo,
+		zoneRepo:                zoneRepo,
+		knowledgeBaseRepo:       knowledgeBaseRepo,
+		homeProfileRepo:         homeProfileRepo,
+		attributeDefinitionRepo: attributeDefinitionRepo,
+		zoneAttributeValueRepo:  zoneAttributeValueRepo,
+		metricsSink:             metricsSink,
+		aiClient:                aiClient,
+		addr:                    addr,
+		eventBus:                NewEventBus(),
+		cfg:                     cfg,
 	}
 
 	// Initialize timezone service
@@ -169,9 +178,28 @@ func (s *Server) setupRoutes() {
 			r.Get("/", s.handleListZones)
 			r.Get("/schema", s.handleGetZoneSchema)
 			r.Post("/", s.handleCreateZone)
+
+			// Zone-specific routes (use {id} parameter)
 			r.Get("/{id}", s.handleGetZone)
 			r.Put("/{id}", s.handleUpdateZone)
 			r.Delete("/{id}", s.handleDeleteZone)
+			r.Get("/{id}/attributes", s.handleGetZoneAttributes)
+			r.Put("/{id}/attributes", s.handleSetZoneAttributes)
+		})
+
+		// Attribute Definitions (dynamic schema for zones)
+		r.Route("/zone-attributes", func(r chi.Router) {
+			r.Get("/definitions", s.handleListAttributeDefinitions)
+			r.Post("/definitions", s.handleCreateAttributeDefinition)
+			r.Get("/definitions/{id}", s.handleGetAttributeDefinition)
+			r.Put("/definitions/{id}", s.handleUpdateAttributeDefinition)
+			r.Delete("/definitions/{id}", s.handleDeleteAttributeDefinition)
+		})
+
+		// Home Profile
+		r.Route("/home", func(r chi.Router) {
+			r.Get("/profile", s.handleGetHomeProfile)
+			r.Put("/profile", s.handleUpdateHomeProfile)
 		})
 
 		// Metrics

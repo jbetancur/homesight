@@ -6,12 +6,25 @@ import (
 
 // EventType represents the type of change
 const (
-	DeviceAdded     = "device_added"
-	DeviceUpdated   = "device_updated"
-	DeviceRemoved   = "device_removed"
-	IncidentAdded   = "incident_added"
-	IncidentUpdated = "incident_updated"
-	IncidentRemoved = "incident_removed"
+	DeviceAdded        = "device_added"
+	DeviceUpdated      = "device_updated"
+	DeviceRemoved      = "device_removed"
+	IncidentAdded      = "incident_added"
+	IncidentUpdated    = "incident_updated"
+	IncidentRemoved    = "incident_removed"
+	ZoneUpdated        = "zone_updated"
+	HomeProfileUpdated = "home_profile_updated"
+)
+
+const (
+	EventTypeDeviceAdded        = DeviceAdded
+	EventTypeDeviceUpdated      = DeviceUpdated
+	EventTypeDeviceRemoved      = DeviceRemoved
+	EventTypeIncidentAdded      = IncidentAdded
+	EventTypeIncidentUpdated    = IncidentUpdated
+	EventTypeIncidentRemoved    = IncidentRemoved
+	EventTypeZoneUpdated        = ZoneUpdated
+	EventTypeHomeProfileUpdated = HomeProfileUpdated
 )
 
 type Event struct {

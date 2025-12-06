@@ -47,6 +47,9 @@ func main() {
 	incidentRepo := db.NewIncidentRepo(database)
 	knowledgeBaseRepo := db.NewKnowledgeBaseRepo(database)
 	zoneRepo := db.NewZoneRepo(database)
+	homeProfileRepo := db.NewHomeProfileRepo(database)
+	attributeDefinitionRepo := db.NewAttributeDefinitionRepo(database)
+	zoneAttributeValueRepo := db.NewZoneAttributeValueRepo(database)
 
 	// Seed default zones if none exist
 	if err := zoneRepo.SeedDefaultZones(context.Background()); err != nil {
@@ -128,7 +131,20 @@ func main() {
 	}
 
 	// Start API server
-	server := api.NewServer(cfg.API.Addr, incidentService, deviceRepo, sensorRepo, zoneRepo, knowledgeBaseRepo, metricsSink, aiClient, cfg)
+	server := api.NewServer(
+		cfg.API.Addr,
+		incidentService,
+		deviceRepo,
+		sensorRepo,
+		zoneRepo,
+		knowledgeBaseRepo,
+		homeProfileRepo,
+		attributeDefinitionRepo,
+		zoneAttributeValueRepo,
+		metricsSink,
+		aiClient,
+		cfg,
+	)
 
 	// Set MQTT publisher for device commands
 	if mqttPublisher != nil {

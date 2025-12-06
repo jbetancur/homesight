@@ -66,6 +66,29 @@ type TaskRepository interface {
 	Delete(ctx context.Context, id string) error
 }
 
+// HomeProfileRepository manages home profile persistence
+type HomeProfileRepository interface {
+	Get(ctx context.Context, homeID string) (*model.HomeProfile, error)
+	Upsert(ctx context.Context, profile *model.HomeProfile) error
+	Delete(ctx context.Context, homeID string) error
+}
+
+// AttributeDefinitionRepository manages custom attribute definitions
+type AttributeDefinitionRepository interface {
+	Get(ctx context.Context, id string) (*model.AttributeDefinition, error)
+	List(ctx context.Context, scope model.AttributeScope) ([]model.AttributeDefinition, error)
+	Upsert(ctx context.Context, def *model.AttributeDefinition) error
+	Delete(ctx context.Context, id string) error
+}
+
+// ZoneAttributeValueRepository manages zone attribute values
+type ZoneAttributeValueRepository interface {
+	Get(ctx context.Context, zoneID, attributeID string) (string, error)
+	ListByZone(ctx context.Context, zoneID string) (map[string]string, error)
+	Set(ctx context.Context, zoneID, attributeID, value string) error
+	Delete(ctx context.Context, zoneID, attributeID string) error
+}
+
 // KnowledgeBase represents a single knowledge base document for a device
 // Simplified from multiple articles to one comprehensive document per device model
 type KnowledgeBase struct {

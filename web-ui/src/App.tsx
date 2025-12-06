@@ -11,6 +11,7 @@ import { IntegrationsView } from './views/IntegrationsView';
 import { StatusView } from './views/StatusView';
 import { ZWaveView } from './views/ZWaveView';
 import HSILRoomView from './views/HSILRoomView';
+import SettingsView from './views/SettingsView';
 import FloatingAIAssistant from './components/FloatingAIAssistant';
 import FloatingAIButton from './components/FloatingAIButton';
 import './App.css';
@@ -20,6 +21,7 @@ const navItems = [
   { label: 'Home Intelligence', icon: Brain, path: '/hsil' },
   { label: 'Incidents', icon: AlertCircle, path: '/incidents' },
   { label: 'Integrations', icon: Layers, path: '/integrations' },
+  { label: 'Settings', icon: Settings, path: '/settings' },
   { label: 'Status', icon: Server, path: '/status' },
 ];
 
@@ -122,6 +124,7 @@ function AppContent() {
             <Route path="/incidents" element={<IncidentsView />} />
             <Route path="/integrations" element={<IntegrationsView />} />
             <Route path="/integrations/zwave" element={<ZWaveView />} />
+            <Route path="/settings" element={<SettingsView />} />
             <Route path="/status" element={<StatusView />} />
           </Routes>
         </Container>
