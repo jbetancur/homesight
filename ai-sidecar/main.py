@@ -5,7 +5,7 @@ HomeSight AI Sidecar Service
 from dotenv import load_dotenv
 load_dotenv()
 
-from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi import FastAPI, HTTPException, BackgroundTasks, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from typing import Optional
@@ -13,6 +13,7 @@ from datetime import datetime
 import uvicorn
 import logging
 import os
+import httpx
 from pathlib import Path
 from contextlib import asynccontextmanager
 
@@ -32,6 +33,7 @@ from models.device_profile import DeviceProfile
 from services.session_service import SessionService
 from services.document_service import DocumentService
 from services.mqtt_service import initialize_mqtt_service, shutdown_mqtt_service, get_mqtt_service
+from services.sse_service import SSEService, get_sse_service
 
 # LLM and RAG
 from llm.provider import LLMProvider
@@ -278,6 +280,47 @@ async def lifespan(app: FastAPI):
 
     # Start health status updater in background
     health_task = asyncio.create_task(update_health_status())
+
+    # Start backend incident listener (polls backend API for new incidents)
+    async def listen_for_incidents():
+        """Poll backend API for new incidents and broadcast via SSE"""
+        logger.info("🚨 Starting incident listener task (polls every 2s)")
+        last_check = datetime.utcnow()
+        sse_service = get_sse_service()
+        
+        while True:
+            try:
+                await asyncio.sleep(2)  # Poll every 2 seconds
+                
+                # Fetch recent incidents from backend
+                async with httpx.AsyncClient() as client:
+                    response = await client.get(
+                        f"{config.backend_url}/api/incidents",
+                        timeout=5.0
+                    )
+                    
+                    if response.status_code == 200:
+                        incidents = response.json()
+                        
+                        # Broadcast new incidents (created after last_check)
+                        for incident in incidents:
+                            created_at_str = incident.get("created_at")
+                            if created_at_str:
+                                try:
+                                    created_at = datetime.fromisoformat(created_at_str.replace("Z", "+00:00"))
+                                    if created_at.replace(tzinfo=None) > last_check:
+                                        # New incident! Broadcast to SSE clients
+                                        logger.info(f"🚨 New incident detected: {incident.get('id')} ({incident.get('severity')})")
+                                        await sse_service.broadcast_incident(incident)
+                                except Exception as e:
+                                    logger.debug(f"Error parsing incident timestamp: {e}")
+                        
+                        last_check = datetime.utcnow()
+                    
+            except Exception as e:
+                logger.debug(f"Error polling incidents: {e}")
+    
+    incident_listener_task = asyncio.create_task(listen_for_incidents())
 
     # Optionally start vendor indexer (background documentation crawler)
     vendor_indexer_task = None
@@ -1048,6 +1091,27 @@ async def hsil_process_event(event: dict):
     except Exception as e:
         logger.error(f"HSIL event processing error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/hsil/events")
+async def hsil_events(request: Request):
+    """
+    Server-Sent Events (SSE) stream for real-time incident notifications.
+    
+    Clients connect to this endpoint to receive push notifications when
+    incidents occur. This enables the chat UI to display alerts in real-time.
+    
+    Example usage:
+    ```javascript
+    const eventSource = new EventSource('/hsil/events');
+    eventSource.addEventListener('incident_alert', (event) => {
+        const data = JSON.parse(event.data);
+        console.log('New incident:', data.message);
+    });
+    ```
+    """
+    sse_service = get_sse_service()
+    return await sse_service.subscribe(request)
 
 
 @app.post("/hsil/chat")

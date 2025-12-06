@@ -57,6 +57,78 @@ export default function FloatingAIAssistant({ opened, onClose }: FloatingAIAssis
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [chatMessages]);
 
+  // Connect to SSE for real-time incident notifications
+  useEffect(() => {
+    if (!opened) return; // Only connect when chat is opened
+
+    const eventSource = new EventSource(`${API_BASE}/api/events`);
+
+    eventSource.addEventListener('connected', (event) => {
+      console.log('✅ Connected to incident stream:', event.data);
+    });
+
+    // Listen for incident events from backend
+    eventSource.addEventListener('message', (event) => {
+      try {
+        const data = JSON.parse(event.data);
+        console.log('📡 SSE event received:', data);
+
+        // Handle incident_added events
+        if (data.type === 'incident_added') {
+          const incident = data.data;
+          const emoji = incident.severity === 'critical' ? '🚨' : incident.severity === 'warning' ? '⚠️' : 'ℹ️';
+          const message = `${emoji} ${incident.severity?.toUpperCase()}: ${incident.title}${incident.zone_id ? ' in ' + incident.zone_id : ''}`;
+          
+          // Add incident notification as an assistant message
+          const notificationMessage: AIMessage = {
+            role: 'assistant',
+            content: `${message}\n\nAsk me if you'd like more details about this incident.`,
+          };
+
+          setChatMessages((prev) => [...prev, notificationMessage]);
+        }
+        
+        // Handle incident_updated events (including resolutions)
+        if (data.type === 'incident_updated') {
+          const incident = data.data;
+          console.log('📝 Incident updated:', {
+            id: incident.id,
+            status: incident.status,
+            title: incident.title,
+            fullIncident: incident
+          });
+          
+          // Only notify if incident was resolved
+          if (incident.status === 'resolved') {
+            console.log('✅ Showing resolution notification');
+            const message = `✅ RESOLVED: ${incident.title}${incident.zone_id ? ' in ' + incident.zone_id : ''}`;
+            
+            const notificationMessage: AIMessage = {
+              role: 'assistant',
+              content: `${message}\n\nThe incident has been cleared.`,
+            };
+
+            setChatMessages((prev) => [...prev, notificationMessage]);
+          } else {
+            console.log('⏭️ Skipping notification, status is:', incident.status);
+          }
+        }
+      } catch (error) {
+        console.error('Error parsing SSE event:', error);
+      }
+    });
+
+    eventSource.addEventListener('error', (error) => {
+      console.error('SSE connection error:', error);
+    });
+
+    // Cleanup on unmount or when chat is closed
+    return () => {
+      console.log('Closing SSE connection');
+      eventSource.close();
+    };
+  }, [opened]);
+
   const handleChatSubmit = async () => {
     if (!chatInput.trim()) return;
 
