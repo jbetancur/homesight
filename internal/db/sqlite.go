@@ -418,15 +418,13 @@ func (r *DeviceRepo) Update(ctx context.Context, id string, updates map[string]i
 			continue // Skip disallowed fields
 		}
 
-		// Handle nullable string fields
+		// Handle nullable string fields (alias can be set to NULL with empty string)
 		if field == "alias" {
-			if strVal, ok := value.(string); ok {
-				if strVal == "" {
-					setClauses = append(setClauses, field+" = NULL")
-				} else {
-					setClauses = append(setClauses, field+" = ?")
-					args = append(args, strVal)
-				}
+			if value.(string) == "" {
+				setClauses = append(setClauses, field+" = NULL")
+			} else {
+				setClauses = append(setClauses, field+" = ?")
+				args = append(args, value)
 			}
 		} else {
 			setClauses = append(setClauses, field+" = ?")

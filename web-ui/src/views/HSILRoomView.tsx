@@ -17,6 +17,7 @@ import {
   Tabs,
   Button,
   Tooltip,
+  TextInput,
 } from '@mantine/core';
 import {
   DndContext,
@@ -77,6 +78,7 @@ export default function HSILRoomView() {
   const [showSettings, setShowSettings] = useState(false);
   const [selectedDevice, setSelectedDevice] = useState<Device | null>(null);
   const [selectedZone, setSelectedZone] = useState<string>('');
+  const [editingAlias, setEditingAlias] = useState<string>('');
   const [weather, setWeather] = useState<any>(null);
   const [editingZone, setEditingZone] = useState<Room | null>(null);
   const [editedAttributes, setEditedAttributes] = useState<ZoneAttributes | null>(null);
@@ -114,10 +116,13 @@ export default function HSILRoomView() {
 
   // Real-time event handling
   const handleEvent = useCallback((event: any) => {
-    // Refresh devices on incident added/removed/updated
+    // Refresh devices on incident or device state changes
     if (event.type === "incident_added" ||
         event.type === "incident_removed" ||
-        event.type === "incident_updated") {
+        event.type === "incident_updated" ||
+        event.type === "device_updated" ||
+        event.type === "device_added" ||
+        event.type === "device_removed") {
       fetchRoomsAndDevices();
     }
   }, []);
@@ -209,6 +214,7 @@ export default function HSILRoomView() {
           trend: device.trend,
           battery_level: batteryLevel,
           metadata: device.metadata,
+          readings: device.readings,
         });
       });
 
@@ -440,6 +446,7 @@ export default function HSILRoomView() {
                         onDeviceClick={(device) => {
                           setSelectedDevice(device);
                           setSelectedZone(device.zone_id || '');
+                          setEditingAlias(device.alias || '');
                           setShowSettings(true);
                         }}
                         onSettingsClick={(room) => {
@@ -459,6 +466,7 @@ export default function HSILRoomView() {
                   onDeviceClick={(device) => {
                     setSelectedDevice(device);
                     setSelectedZone(device.zone_id || '');
+                    setEditingAlias(device.alias || '');
                     setShowSettings(true);
                   }}
                   isRecentlyUpdated={isRecentlyUpdated}
@@ -495,10 +503,18 @@ export default function HSILRoomView() {
           setShowSettings(false);
           setSelectedDevice(null);
           setSelectedZone('');
+          setEditingAlias('');
         }}
         title={`Configure: ${selectedDevice?.alias ? `${selectedDevice.alias} (${selectedDevice.name})` : selectedDevice?.name}`}
       >
         <Stack gap="md">
+          <TextInput
+            label="Device Alias"
+            placeholder="Enter a friendly name (optional)"
+            value={editingAlias}
+            onChange={(e) => setEditingAlias(e.currentTarget.value)}
+            description="Leave empty to use the default device name"
+          />
           <Select
             label="Assign to Room"
             placeholder="Select a room"
@@ -513,17 +529,43 @@ export default function HSILRoomView() {
                 setShowSettings(false);
                 setSelectedDevice(null);
                 setSelectedZone('');
+                setEditingAlias('');
               }}
             >
               Cancel
             </Button>
             <Button
-              onClick={() => {
-                if (selectedZone && selectedDevice) {
-                  handleDeviceZoneUpdate(selectedDevice.id, selectedZone);
+              onClick={async () => {
+                if (!selectedDevice) return;
+                
+                try {
+                  // Update alias if changed
+                  if (editingAlias !== (selectedDevice.alias || '')) {
+                    const aliasResponse = await fetch(`${API_BASE}/api/devices/${selectedDevice.id}`, {
+                      method: 'PATCH',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({ alias: editingAlias.trim() || null }),
+                    });
+                    if (!aliasResponse.ok) {
+                      console.error('Failed to update alias');
+                    }
+                  }
+                  
+                  // Update zone if changed
+                  if (selectedZone && selectedZone !== selectedDevice.zone_id) {
+                    await handleDeviceZoneUpdate(selectedDevice.id, selectedZone);
+                  } else {
+                    // If only alias changed, refresh the data
+                    fetchRoomsAndDevices();
+                    setShowSettings(false);
+                    setSelectedDevice(null);
+                    setSelectedZone('');
+                    setEditingAlias('');
+                  }
+                } catch (error) {
+                  console.error('Error updating device:', error);
                 }
               }}
-              disabled={!selectedZone}
             >
               Save
             </Button>

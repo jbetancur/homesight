@@ -131,6 +131,7 @@ class DeviceState(BaseModel):
     unit: Optional[str] = None
     last_updated: datetime
     trend: Optional[str] = None  # "up", "down", "stable"
+    readings: Optional[Dict[str, Any]] = None  # All sensor readings (temperature, humidity, etc.)
 
 
 class HomeState(BaseModel):

@@ -1,6 +1,6 @@
 import { useDroppable } from '@dnd-kit/core';
-import { Card, Text, Badge, Group, Stack, ThemeIcon, ActionIcon } from '@mantine/core';
-import { Thermometer, Droplet, Flame, Zap, Settings } from 'lucide-react';
+import { Card, Text, Badge, Group, Stack, ActionIcon } from '@mantine/core';
+import { Settings } from 'lucide-react';
 import { DraggableSensor } from './DraggableSensor';
 import type { Device, Room } from './types';
 
@@ -11,15 +11,6 @@ interface DroppableRoomCardProps {
   onSettingsClick: (room: Room) => void;
   isRecentlyUpdated: (lastUpdated: string | undefined) => boolean;
 }
-
-const ZONE_ICONS: Record<string, any> = {
-  'living-room': Thermometer,
-  kitchen: Flame,
-  bedroom: Thermometer,
-  bathroom: Droplet,
-  basement: Droplet,
-  garage: Zap,
-};
 
 export function DroppableRoomCard({
   room,
@@ -63,22 +54,7 @@ export function DroppableRoomCard({
     >
       <Card.Section withBorder inheritPadding py="xs">
         <Group justify="space-between">
-          <Group>
-            {ZONE_ICONS[room.id] &&
-              (() => {
-                const Icon = ZONE_ICONS[room.id];
-                return (
-                  <ThemeIcon
-                    variant="light"
-                    size="lg"
-                    color={hasCritical ? 'red' : hasWarning ? 'yellow' : undefined}
-                  >
-                    <Icon size={20} />
-                  </ThemeIcon>
-                );
-              })()}
-            <Text fw={600}>{room.name}</Text>
-          </Group>
+          <Text fw={600}>{room.name}</Text>
           <Group gap="xs">
             <Badge
               size="sm"

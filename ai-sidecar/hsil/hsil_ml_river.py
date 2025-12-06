@@ -933,7 +933,13 @@ class HSILRiverLearningEngine:
         updates_per_hour = total_updates / estimated_hours_active
 
         # Data quality score: based on variety of devices and update distribution
-        num_devices = len(self.baseline_models)
+        # Count all devices being tracked across all model types (baseline, anomaly, frequency)
+        all_tracked_devices = set()
+        all_tracked_devices.update(self.baseline_models.keys())
+        all_tracked_devices.update(self.anomaly_models.keys())
+        all_tracked_devices.update(self.frequency_models.keys())
+        num_devices = len(all_tracked_devices)
+        
         data_quality = min(1.0, num_devices / 10.0) * 0.5 + min(1.0, total_updates / 1000.0) * 0.5
 
         return {

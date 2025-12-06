@@ -3,10 +3,10 @@ import { useEffect, useState, useRef, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   Table, Badge, Loader, Stack, Title, Text, Card, Group, Paper, Button, Modal,
-  ActionIcon, Tooltip, ScrollArea, TextInput, Select, MultiSelect, Grid
+  ActionIcon, Tooltip, ScrollArea, TextInput, MultiSelect, Grid
 } from '@mantine/core';
 import {
-  Wifi, CheckCircle, Activity, Trash2, RefreshCw, FileText, Search,
+  Wifi, Activity, Trash2, RefreshCw, FileText, Search,
   Filter, Grid3x3, List, Power, Lock, Lightbulb, Thermometer, Home, Battery,
   Droplets, Zap
 } from 'lucide-react';
@@ -14,20 +14,6 @@ import { useEventSubscription } from '../useEventSubscription';
 import { API_BASE_WITH_PATHS } from '../apiConfig';
 
 const API_BASE = API_BASE_WITH_PATHS;
-
-function getDeviceStatus(lastSeen: string) {
-  const lastSeenDate = new Date(lastSeen);
-  const now = new Date();
-  const diffMinutes = (now.getTime() - lastSeenDate.getTime()) / (1000 * 60);
-
-  if (diffMinutes < 5) {
-    return { label: 'Online', color: 'green' };
-  } else if (diffMinutes < 30) {
-    return { label: 'Recent', color: 'yellow' };
-  } else {
-    return { label: 'Offline', color: 'red' };
-  }
-}
 
 function getDeviceIcon(type: string, size: number = 20) {
   const iconMap: Record<string, any> = {
@@ -168,7 +154,6 @@ export function DevicesView() {
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedIntegrations, setSelectedIntegrations] = useState<string[]>([]);
   const [selectedTypes, setSelectedTypes] = useState<string[]>([]);
-  const [selectedStatus, setSelectedStatus] = useState<string | null>(null);
   const [selectedRooms, setSelectedRooms] = useState<string[]>([]);
   const [viewMode, setViewMode] = useState<'table' | 'grid'>('table');
 
@@ -288,14 +273,6 @@ export function DevicesView() {
       return false;
     }
 
-    // Status filter
-    if (selectedStatus) {
-      const status = getDeviceStatus(device.last_seen).label;
-      if (status !== selectedStatus) {
-        return false;
-      }
-    }
-
     // Room filter
     if (selectedRooms.length > 0) {
       const room = device.metadata?.room || device.metadata?.location;
@@ -316,7 +293,6 @@ export function DevicesView() {
     );
   }
 
-  const onlineDevices = devices.filter(d => getDeviceStatus(d.last_seen).label === 'Online');
   const totalDevices = devices.length;
   const filteredCount = filteredDevices.length;
 
@@ -345,18 +321,6 @@ export function DevicesView() {
               <div>
                 <Text size="xl" fw={700}>{totalDevices}</Text>
                 <Text size="xs" c="dimmed">Total Devices</Text>
-              </div>
-            </Group>
-          </Paper>
-        </Grid.Col>
-
-        <Grid.Col span={{ base: 12, xs: 6, sm: 3 }}>
-          <Paper p="md" withBorder>
-            <Group gap="xs">
-              <CheckCircle size={24} color="#40c057" />
-              <div>
-                <Text size="xl" fw={700}>{onlineDevices.length}</Text>
-                <Text size="xs" c="dimmed">Online Now</Text>
               </div>
             </Group>
           </Paper>
@@ -440,16 +404,6 @@ export function DevicesView() {
               />
             </Grid.Col>
 
-            <Grid.Col span={{ base: 12, sm: 6, md: 3 }}>
-              <Select
-                placeholder="Status"
-                data={['Online', 'Recent', 'Offline']}
-                value={selectedStatus}
-                onChange={setSelectedStatus}
-                clearable
-              />
-            </Grid.Col>
-
             {rooms.length > 0 && (
               <Grid.Col span={{ base: 12, sm: 6, md: 3 }}>
                 <MultiSelect
@@ -463,7 +417,7 @@ export function DevicesView() {
             )}
           </Grid>
 
-          {(searchQuery || selectedIntegrations.length > 0 || selectedTypes.length > 0 || selectedStatus || selectedRooms.length > 0) && (
+          {(searchQuery || selectedIntegrations.length > 0 || selectedTypes.length > 0 || selectedRooms.length > 0) && (
             <Button
               variant="subtle"
               size="xs"
@@ -471,7 +425,6 @@ export function DevicesView() {
                 setSearchQuery('');
                 setSelectedIntegrations([]);
                 setSelectedTypes([]);
-                setSelectedStatus(null);
                 setSelectedRooms([]);
               }}
             >
@@ -508,14 +461,12 @@ export function DevicesView() {
                   <Table.Th>Type</Table.Th>
                   <Table.Th>Integration</Table.Th>
                   <Table.Th>Battery</Table.Th>
-                  <Table.Th>Status</Table.Th>
                   <Table.Th>Documentation</Table.Th>
                   <Table.Th style={{ textAlign: 'center' }}>Actions</Table.Th>
                 </Table.Tr>
               </Table.Thead>
               <Table.Tbody>
                 {filteredDevices.map((device: any) => {
-                  const status = getDeviceStatus(device.last_seen);
                   return (
                     <Table.Tr key={device.id} style={{ cursor: 'pointer' }} onClick={() => navigate(`/devices/${device.id}/overview`)}>
                       <Table.Td>
@@ -532,9 +483,6 @@ export function DevicesView() {
                       </Table.Td>
                       <Table.Td>
                         <BatteryIndicator level={device.battery_level} />
-                      </Table.Td>
-                      <Table.Td>
-                        <Badge color={status.color}>{status.label}</Badge>
                       </Table.Td>
                       <Table.Td>
                         <Tooltip label={device.docs_ingested ? `Ingested at ${new Date(device.docs_ingested_at).toLocaleString()}` : 'Awaiting documentation ingestion'}>
@@ -595,7 +543,6 @@ export function DevicesView() {
       ) : (
         <Grid>
           {filteredDevices.map((device: any) => {
-            const status = getDeviceStatus(device.last_seen);
             return (
               <Grid.Col key={device.id} span={{ base: 12, xs: 6, sm: 4, md: 3 }}>
                 <Card
@@ -607,12 +554,9 @@ export function DevicesView() {
                   <Stack gap="sm">
                     <Group justify="space-between">
                       {getDeviceIcon(device.type, 24)}
-                      <Group gap="xs">
-                        {device.battery_level !== undefined && (
-                          <BatteryIndicator level={device.battery_level} />
-                        )}
-                        <Badge color={status.color} size="sm">{status.label}</Badge>
-                      </Group>
+                      {device.battery_level !== undefined && (
+                        <BatteryIndicator level={device.battery_level} />
+                      )}
                     </Group>
                     <div>
                       <Text fw={600} lineClamp={1}>{device.display_name || device.alias || device.name}</Text>

@@ -216,7 +216,16 @@ func (c *Consumer) handleDiscovery(integration, deviceID string, payload []byte)
 	log.Printf("[MQTT-CONSUMER] Discovery: %s (%s) - %s %s", msg.DeviceID, msg.Integration, msg.Manufacturer, msg.Model)
 
 	// Try to fetch existing device to preserve metadata (e.g., battery_level from Z-Wave)
-	existingDevice, _ := c.deviceRepo.Get(c.ctx, msg.DeviceID)
+	existingDevice, err := c.deviceRepo.Get(c.ctx, msg.DeviceID)
+	if err != nil {
+		log.Printf("[MQTT-CONSUMER] Error fetching existing device %s: %v", msg.DeviceID, err)
+	}
+
+	if existingDevice != nil {
+		log.Printf("[MQTT-CONSUMER] Found existing device %s: alias=%q, zone=%s", msg.DeviceID, existingDevice.Alias, existingDevice.ZoneID)
+	} else {
+		log.Printf("[MQTT-CONSUMER] No existing device found for %s (creating new)", msg.DeviceID)
+	}
 
 	// Convert to model.Device
 	device := &model.Device{
@@ -250,6 +259,7 @@ func (c *Consumer) handleDiscovery(integration, deviceID string, payload []byte)
 				device.Metadata[k] = v
 			}
 		}
+		log.Printf("[MQTT-CONSUMER] After preservation: alias=%q, zone=%s", device.Alias, device.ZoneID)
 	}
 
 	if device.Name == "" {

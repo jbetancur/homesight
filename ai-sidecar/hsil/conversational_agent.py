@@ -442,33 +442,56 @@ Now provide your response to the user in plain English:"""
         if self.ontology._loaded:
             from dataclasses import asdict
             
-            # Serialize all devices
-            context["devices"] = [asdict(device) for device in self.ontology.devices.values()]
+            # Serialize all devices and enrich with current readings from home_state
+            context["devices"] = []
+            for device in self.ontology.devices.values():
+                device_dict = asdict(device)
+                
+                # Enrich with current readings if available in home_state
+                if home_state and "devices" in home_state:
+                    for state_dev in home_state["devices"]:
+                        # Match by device_id from ontology
+                        if state_dev.get("id") == device_dict.get("device_id"):
+                            # Add current readings to device context
+                            device_dict["current_value"] = state_dev.get("value")
+                            device_dict["current_state"] = state_dev.get("state")
+                            device_dict["readings"] = state_dev.get("readings", {})
+                            break
+                
+                context["devices"].append(device_dict)
             
-            # Zones with dynamic attributes
+            # Zones with dynamic attributes - ALWAYS fetch fresh from API to get newly created zones
             context["zones"] = []
-            async with httpx.AsyncClient(timeout=2.0) as client:
-                for zone_id, zone in self.ontology.zones.items():
-                    # Start with full zone data
-                    zone_context = asdict(zone)
-                    
-                    # Add device list for this zone
-                    zone_devices = self.ontology.devices_by_zone.get(zone_id, [])
-                    zone_context["device_list"] = [d.name for d in zone_devices]
-                    
-                    # Fetch dynamic zone attributes (extensible user-defined attributes)
-                    try:
-                        attr_resp = await client.get(f"{self.backend_url}/api/zones/{zone_id}/attributes")
-                        if attr_resp.status_code == 200:
-                            dynamic_attrs = attr_resp.json()
-                            if dynamic_attrs:
-                                # Store as "attributes" so prompt builder can find them
-                                zone_context["attributes"] = dynamic_attrs
-                                logger.debug(f"Zone {zone_id} has attributes: {list(dynamic_attrs.keys())}")
-                    except Exception as e:
-                        logger.debug(f"Failed to fetch attributes for zone {zone_id}: {e}")
-                    
-                    context["zones"].append(zone_context)
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                # Fetch all zones fresh from API (not cached ontology)
+                try:
+                    zones_resp = await client.get(f"{self.backend_url}/api/zones")
+                    if zones_resp.status_code == 200:
+                        zones_data = zones_resp.json()
+                        for zone_data in zones_data:
+                            zone_id = zone_data.get("id", "")
+                            zone_context = {
+                                "id": zone_id,
+                                "name": zone_data.get("name", zone_id),
+                                "type": zone_data.get("type", ""),
+                                "attributes": zone_data.get("attributes", {}),
+                            }
+
+                            # Add device list for this zone from ontology cache
+                            zone_devices = self.ontology.devices_by_zone.get(zone_id, [])
+                            zone_context["device_list"] = [d.name for d in zone_devices]
+                            zone_context["devices"] = len(zone_devices)
+
+                            context["zones"].append(zone_context)
+                            logger.debug(f"Zone {zone_id} - {zone_data.get('name')} loaded with {len(zone_devices)} devices")
+                except Exception as e:
+                    logger.warning(f"Failed to fetch zones from API: {e}, falling back to cached ontology")
+                    # Fallback to cached ontology
+                    for zone_id, zone in self.ontology.zones.items():
+                        zone_context = asdict(zone)
+                        zone_devices = self.ontology.devices_by_zone.get(zone_id, [])
+                        zone_context["device_list"] = [d.name for d in zone_devices]
+                        context["zones"].append(zone_context)
         
         # 2. Home Health - current status
         try:
@@ -616,11 +639,31 @@ Now provide your response to the user in plain English:"""
             parts.append(f"### Devices ({len(context['devices'])} sensors)")
             parts.append("Device ID mapping (use these IDs when calling tools):")
             for dev in context.get("devices", []):
-                dev_id = dev.get("id", "")
+                dev_id = dev.get("device_id", "")
                 dev_name = dev.get("name", dev_id)
                 dev_type = dev.get("type", "sensor")
-                zone = dev.get("zone", "")
-                parts.append(f"  - {dev_id}: {dev_name} ({dev_type}) in {zone}")
+                zone = dev.get("zone_id", "")
+                
+                # Build device line with basic info
+                device_line = f"  - {dev_id}: {dev_name} ({dev_type}) in {zone}"
+                
+                # Add current readings if available
+                readings = dev.get("readings", {})
+                if readings:
+                    reading_parts = []
+                    # Show key readings in a compact format
+                    if "temperature" in readings:
+                        reading_parts.append(f"{readings['temperature']}°F")
+                    if "humidity" in readings:
+                        reading_parts.append(f"{readings['humidity']}% humidity")
+                    if "water" in readings or "Water Alarm" in readings:
+                        water_val = readings.get("water", readings.get("Water Alarm", 0))
+                        reading_parts.append("LEAK DETECTED" if water_val else "dry")
+                    
+                    if reading_parts:
+                        device_line += f" - Current: {', '.join(reading_parts)}"
+                
+                parts.append(device_line)
             parts.append("")
         
         # Zones with attributes
@@ -636,8 +679,9 @@ Now provide your response to the user in plain English:"""
                 logger.debug(f"Zone {zone_id} - Name: {zone_name}, Has attributes: {bool(zone_attrs)}, Keys: {list(zone_attrs.keys()) if zone_attrs else []}")
                 
                 zone_desc = f"  - {zone_name} (ID: {zone_id}): {zone.get('type', '')} zone"
-                if zone.get("devices"):
-                    zone_desc += f" with {len(zone['devices'])} device(s)"
+                device_count = zone.get("devices")
+                if device_count and isinstance(device_count, int):
+                    zone_desc += f" with {device_count} device(s)"
                 parts.append(zone_desc)
                 
                 # Add dynamic zone attributes if available - BE EXPLICIT

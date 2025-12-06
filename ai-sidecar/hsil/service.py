@@ -283,7 +283,8 @@ class HSILService:
                     active=device.get("active", False),
                     location=device.get("zone_id", "Unknown"),
                     last_updated=datetime.now(),
-                    trend=device.get("trend")
+                    trend=device.get("trend"),
+                    readings=device.get("readings")  # Include all sensor readings
                 )
                 device_states.append(state)
 

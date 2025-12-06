@@ -1,6 +1,6 @@
 import { useDraggable } from '@dnd-kit/core';
 import { CSS } from '@dnd-kit/utilities';
-import { Paper, Group, Text, ThemeIcon } from '@mantine/core';
+import { Paper, Group, Text, ThemeIcon, Badge, Stack } from '@mantine/core';
 import {
   Thermometer,
   Droplet,
@@ -9,8 +9,10 @@ import {
   BatteryLow,
   AlertTriangle,
   GripVertical,
+  Activity,
+  Radio,
 } from 'lucide-react';
-import type { Device } from './types';
+import type { Device, DeviceReadings } from './types';
 
 interface DraggableSensorProps {
   device: Device;
@@ -19,27 +21,97 @@ interface DraggableSensorProps {
   isRecentlyUpdated?: boolean;
 }
 
-const DEVICE_ICONS: Record<string, any> = {
-  temp: Thermometer,
-  temperature: Thermometer,
-  humidity: Droplet,
-  leak: Droplet,
-  motion: Zap,
-  water_leak: Droplet,
-};
+// Determine device icon based on readings/metadata/type
+function getDeviceIcon(device: Device) {
+  const readings = device.readings || {};
+  const metadata = device.metadata || {};
+  const model = (metadata.model || '').toLowerCase();
+  const name = (device.name || '').toLowerCase();
+  const alias = (device.alias || '').toLowerCase();
 
-const getStateColor = (state: string) => {
-  switch (state) {
-    case 'critical':
-      return 'red';
-    case 'warning':
-      return 'yellow';
-    case 'normal':
-      return 'green';
-    default:
-      return 'gray';
+  // Check for water/leak sensors
+  if (
+    'Water Alarm' in readings ||
+    'water' in readings ||
+    model.includes('water') ||
+    model.includes('leak') ||
+    name.includes('leak') ||
+    alias.includes('leak') ||
+    alias.includes('water')
+  ) {
+    return { icon: Droplet, color: 'blue' };
   }
-};
+
+  // Check for temperature sensors
+  if (
+    'Air temperature' in readings ||
+    'temperature' in readings ||
+    model.includes('temp') ||
+    model.includes('zse44') ||
+    name.includes('temp')
+  ) {
+    return { icon: Thermometer, color: 'orange' };
+  }
+
+  // Check for humidity sensors
+  if ('Humidity' in readings || 'humidity' in readings) {
+    return { icon: Droplet, color: 'cyan' };
+  }
+
+  // Check for motion sensors
+  if (model.includes('motion') || name.includes('motion')) {
+    return { icon: Activity, color: 'violet' };
+  }
+
+  // Default based on device type
+  if (device.type === 'sensor') {
+    return { icon: Radio, color: 'gray' };
+  }
+
+  return { icon: Zap, color: 'gray' };
+}
+
+// Extract meaningful readings to display
+function getDisplayReadings(readings: DeviceReadings | undefined): Array<{ label: string; value: string; icon: any }> {
+  if (!readings) return [];
+
+  const display: Array<{ label: string; value: string; icon: any }> = [];
+
+  // Temperature - prefer "Air temperature" over raw "temperature"
+  const temp = readings['Air temperature'] ?? readings['temperature'];
+  if (temp !== undefined && temp !== 0) {
+    // If value looks like Celsius (typically < 50), it's likely raw; "Air temperature" is usually Fahrenheit
+    const isFahrenheit = readings['Air temperature'] !== undefined;
+    display.push({
+      label: 'Temp',
+      value: isFahrenheit ? `${temp.toFixed(1)}°F` : `${temp.toFixed(1)}°C`,
+      icon: Thermometer,
+    });
+  }
+
+  // Humidity - prefer "Humidity" over raw "humidity"
+  const humidity = readings['Humidity'] ?? readings['humidity'];
+  if (humidity !== undefined && humidity !== 0) {
+    display.push({
+      label: 'Humidity',
+      value: `${humidity}%`,
+      icon: Droplet,
+    });
+  }
+
+  // Water leak status
+  const water = readings['Water Alarm'] ?? readings['water'];
+  if (water !== undefined) {
+    display.push({
+      label: 'Water',
+      value: water === 0 ? 'Dry' : 'LEAK!',
+      icon: Droplet,
+    });
+  }
+
+  return display;
+}
+
 
 export function DraggableSensor({
   device,
@@ -83,7 +155,8 @@ export function DraggableSensor({
           : undefined,
   };
 
-  const Icon = DEVICE_ICONS[device.type] || Zap;
+  const { icon: DeviceIcon, color: iconColor } = getDeviceIcon(device);
+  const displayReadings = getDisplayReadings(device.readings);
 
   return (
     <Paper
@@ -95,66 +168,85 @@ export function DraggableSensor({
       onClick={editMode ? undefined : onClick}
       {...(editMode ? { ...listeners, ...attributes } : {})}
     >
-      <Group justify="space-between">
-        <Group gap="xs">
-          {editMode && (
-            <GripVertical
-              size={14}
-              style={{ color: 'var(--mantine-color-dimmed)', cursor: 'grab' }}
-            />
-          )}
-          <ThemeIcon size="sm" variant="light" color={getStateColor(device.state)}>
-            <Icon size={14} />
-          </ThemeIcon>
-          <Text size="sm" fw={500}>
-            {device.alias ? `${device.alias} (${device.name})` : device.name}
-          </Text>
-        </Group>
-        <Group gap="xs">
-          {device.battery_level !== undefined && (
-            <Group gap={2}>
-              {device.battery_level < 20 ? (
-                <BatteryLow size={14} color="var(--mantine-color-red-6)" />
-              ) : (
-                <Battery
-                  size={14}
-                  color={
-                    device.battery_level < 40
-                      ? 'var(--mantine-color-yellow-6)'
-                      : 'var(--mantine-color-green-6)'
-                  }
-                />
-              )}
-              <Text
-                size="xs"
-                c={
-                  device.battery_level < 20
-                    ? 'red'
-                    : device.battery_level < 40
-                      ? 'yellow'
-                      : 'dimmed'
-                }
-              >
-                {device.battery_level}%
-              </Text>
-            </Group>
-          )}
-          {device.value !== null && device.value !== undefined && (
-            <Text size="sm" fw={600}>
-              {typeof device.value === 'boolean'
-                ? device.value
-                  ? 'Active'
-                  : 'Inactive'
-                : `${device.value}${device.unit || ''}`}
-            </Text>
-          )}
-          {device.active && (
-            <ThemeIcon size="xs" color="red" variant="filled">
-              <AlertTriangle size={10} />
+      <Stack gap={4}>
+        {/* Header row: icon, name, battery, alert */}
+        <Group justify="space-between">
+          <Group gap="xs">
+            {editMode && (
+              <GripVertical
+                size={14}
+                style={{ color: 'var(--mantine-color-dimmed)', cursor: 'grab' }}
+              />
+            )}
+            <ThemeIcon
+              size="sm"
+              variant="light"
+              color={device.state === 'critical' || device.active ? 'red' : iconColor}
+            >
+              <DeviceIcon size={14} />
             </ThemeIcon>
-          )}
+            <Text size="sm" fw={500}>
+              {device.alias || device.name}
+            </Text>
+          </Group>
+          <Group gap="xs">
+            {device.battery_level !== undefined && (
+              <Group gap={2}>
+                {device.battery_level < 20 ? (
+                  <BatteryLow size={14} color="var(--mantine-color-red-6)" />
+                ) : (
+                  <Battery
+                    size={14}
+                    color={
+                      device.battery_level < 40
+                        ? 'var(--mantine-color-yellow-6)'
+                        : 'var(--mantine-color-green-6)'
+                    }
+                  />
+                )}
+                <Text
+                  size="xs"
+                  c={
+                    device.battery_level < 20
+                      ? 'red'
+                      : device.battery_level < 40
+                        ? 'yellow'
+                        : 'dimmed'
+                  }
+                >
+                  {device.battery_level}%
+                </Text>
+              </Group>
+            )}
+            {device.active && (
+              <ThemeIcon size="xs" color="red" variant="filled">
+                <AlertTriangle size={10} />
+              </ThemeIcon>
+            )}
+          </Group>
         </Group>
-      </Group>
+
+        {/* Readings row */}
+        {displayReadings.length > 0 && (
+          <Group gap="xs" ml={editMode ? 28 : 22}>
+            {displayReadings.map((reading) => {
+              const ReadingIcon = reading.icon;
+              const isAlert = reading.value === 'LEAK!';
+              return (
+                <Badge
+                  key={reading.label}
+                  size="sm"
+                  variant="light"
+                  color={isAlert ? 'red' : 'gray'}
+                  leftSection={<ReadingIcon size={10} />}
+                >
+                  {reading.value}
+                </Badge>
+              );
+            })}
+          </Group>
+        )}
+      </Stack>
     </Paper>
   );
 }

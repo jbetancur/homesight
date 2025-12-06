@@ -264,6 +264,7 @@ func (s *Server) handleZWaveNodeReady(event zwave.Event) {
 		if existingDevice.Name != "" && !strings.HasPrefix(existingDevice.Name, "Node ") {
 			device.Name = existingDevice.Name
 		}
+		device.Alias = existingDevice.Alias // Preserve user-set alias
 		device.ZoneID = existingDevice.ZoneID
 		device.AssetID = existingDevice.AssetID
 		device.CreatedAt = existingDevice.CreatedAt

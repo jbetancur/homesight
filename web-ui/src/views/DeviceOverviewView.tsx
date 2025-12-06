@@ -93,6 +93,7 @@ function normalizeReadingKey(key: string): string {
   const keyMap: Record<string, string> = {
     'water_alarm': 'water',
     'water_leak': 'water',
+    'air_temperature': 'air_temperature', // Keep air_temperature separate to detect Fahrenheit
   };
   return keyMap[normalized] || normalized;
 }
@@ -108,7 +109,19 @@ function formatSensorReading(key: string, value: any): { icon: React.ReactNode; 
   
   switch (normalizedKey) {
     case 'temperature':
-      return { icon: <Thermometer size={20} color="#228be6" />, display: `${value}°`, label: 'Temperature' };
+    case 'air_temperature': {
+      // Check if value is already in Fahrenheit (typically > 50) or needs conversion from Celsius
+      const isFahrenheit = normalizedKey === 'air_temperature' || (typeof value === 'number' && value > 50);
+      const tempValue = typeof value === 'number' ? value : parseFloat(String(value));
+      if (isNaN(tempValue)) return null;
+
+      const displayValue = isFahrenheit ? tempValue : (tempValue * 9/5) + 32;
+      return {
+        icon: <Thermometer size={20} color="#228be6" />,
+        display: `${displayValue.toFixed(1)}°F`,
+        label: 'Temperature'
+      };
+    }
     case 'humidity':
       return { icon: <Droplets size={20} color="#228be6" />, display: `${value}%`, label: 'Humidity' };
     case 'leak':
@@ -170,20 +183,6 @@ function formatSensorReading(key: string, value: any): { icon: React.ReactNode; 
         display: String(value),
         label: key.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())
       };
-  }
-}
-
-function getDeviceStatus(lastSeen: string) {
-  const lastSeenDate = new Date(lastSeen);
-  const now = new Date();
-  const diffMinutes = (now.getTime() - lastSeenDate.getTime()) / (1000 * 60);
-
-  if (diffMinutes < 5) {
-    return { label: 'Online', color: 'green' };
-  } else if (diffMinutes < 30) {
-    return { label: 'Recent', color: 'yellow' };
-  } else {
-    return { label: 'Offline', color: 'red' };
   }
 }
 
@@ -390,7 +389,6 @@ export function DeviceOverviewView() {
     );
   }
 
-  const status = getDeviceStatus(device.last_seen);
   const capabilities = device.capabilities || device.metadata?.capabilities || [];
 
   const handleRefresh = async () => {
@@ -507,7 +505,6 @@ export function DeviceOverviewView() {
                     <Edit2 size={16} />
                   </ActionIcon>
                 </Tooltip>
-                <Badge color={status.color}>{status.label}</Badge>
               </Group>
               <Group gap="sm">
                 <Badge variant="light" color="blue">{device.type}</Badge>

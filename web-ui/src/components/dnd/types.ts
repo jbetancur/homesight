@@ -1,3 +1,20 @@
+export interface DeviceReadings {
+  // Temperature sensors
+  'Air temperature'?: number;
+  temperature?: number;
+  // Humidity sensors
+  Humidity?: number;
+  humidity?: number;
+  // Water leak sensors
+  'Water Alarm'?: number;
+  water?: number;
+  // Generic alarm values
+  alarmLevel?: number;
+  alarmType?: number;
+  // Allow other readings
+  [key: string]: number | undefined;
+}
+
 export interface Device {
   id: string;
   name: string;
@@ -13,6 +30,7 @@ export interface Device {
   trend?: 'up' | 'down' | 'stable';
   battery_level?: number;
   metadata?: Record<string, any>;
+  readings?: DeviceReadings;
 }
 
 export interface ZoneAttributes {
