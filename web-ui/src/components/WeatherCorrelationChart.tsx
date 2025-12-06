@@ -9,7 +9,7 @@ interface Device {
   type: string;
   value: number | boolean | null;
   state: 'normal' | 'warning' | 'critical' | 'unknown';
-  location: string;
+  location?: string;
   zone_id?: string;
   unit?: string;
   trend?: 'up' | 'down' | 'stable';
@@ -19,6 +19,7 @@ interface Device {
 interface Room {
   id: string;
   name: string;
+  type?: string;
   devices: Device[];
 }
 

@@ -2,7 +2,6 @@ import { useState, useEffect, useCallback } from 'react';
 import {
   Container,
   Grid,
-  Card,
   Text,
   Badge,
   Group,
@@ -15,79 +14,42 @@ import {
   Divider,
   NumberInput,
   MultiSelect,
-  ActionIcon,
   Tabs,
   Button,
+  Tooltip,
 } from '@mantine/core';
+import {
+  DndContext,
+  DragOverlay,
+  PointerSensor,
+  useSensor,
+  useSensors,
+} from '@dnd-kit/core';
+import type { DragEndEvent, DragStartEvent } from '@dnd-kit/core';
 import {
   Thermometer,
   Droplet,
-  Flame,
-  Zap,
-  AlertTriangle,
   Brain,
   Cloud,
   Wind,
   Sunrise,
   Sunset,
-  Settings,
-  Battery,
-  BatteryLow,
   LayoutGrid,
   TrendingUp,
   Activity,
+  GripVertical,
+  Check,
 } from 'lucide-react';
+import {
+  DroppableRoomCard,
+  UnassignedSensorTray,
+  DraggableSensor,
+} from '../components/dnd';
+import type { Device, Room, ZoneAttributes } from '../components/dnd';
 import { API_BASE } from '../apiConfig';
 import { useEventSubscription } from '../useEventSubscription';
 import WeatherCorrelationChart from '../components/WeatherCorrelationChart';
 import LearningProgressChart from '../components/LearningProgressChart';
-
-interface Device {
-  id: string;
-  name: string;
-  alias?: string;
-  type: string;
-  value: number | boolean | null;
-  state: 'normal' | 'warning' | 'critical' | 'unknown';
-  location: string;
-  zone_id?: string;
-  unit?: string;
-  active: boolean;
-  last_updated: string;
-  trend?: 'up' | 'down' | 'stable';
-  battery_level?: number;
-  metadata?: Record<string, any>;
-}
-
-interface Room {
-  id: string;
-  name: string;
-  type: string;
-  devices: Device[];
-  attributes?: ZoneAttributes;
-}
-
-interface ZoneAttributes {
-  floor_type?: string;
-  square_feet?: number;
-  has_windows?: boolean;
-  has_fireplace?: boolean;
-  has_hvac_return?: boolean;
-  has_hvac_vent?: boolean;
-  has_radiant_heat?: boolean;
-  has_ceiling_fan?: boolean;
-  has_plumbing?: boolean;
-  has_water_heater?: boolean;
-  has_washer?: boolean;
-  has_sump_pump?: boolean;
-  has_valuables?: boolean;
-  has_pets?: boolean;
-  has_infant?: boolean;
-  has_elderly?: boolean;
-  is_occupied_daily?: boolean;
-  tags?: string[];
-  [key: string]: string | number | boolean | string[] | undefined; // Allow dynamic keys
-}
 
 interface ZoneAttributeOption {
   value: string;
@@ -108,37 +70,6 @@ interface ZoneSchema {
   attributes: ZoneAttributeField[];
 }
 
-const ZONE_ICONS: Record<string, any> = {
-  'living-room': Thermometer,
-  kitchen: Flame,
-  bedroom: Thermometer,
-  bathroom: Droplet,
-  basement: Droplet,
-  garage: Zap,
-};
-
-const DEVICE_ICONS: Record<string, any> = {
-  temp: Thermometer,
-  temperature: Thermometer,
-  humidity: Droplet,
-  leak: Droplet,
-  motion: Zap,
-  water_leak: Droplet,
-};
-
-const getStateColor = (state: string) => {
-  switch (state) {
-    case 'critical':
-      return 'red';
-    case 'warning':
-      return 'yellow';
-    case 'normal':
-      return 'green';
-    default:
-      return 'gray';
-  }
-};
-
 export default function HSILRoomView() {
   const [rooms, setRooms] = useState<Room[]>([]);
   const [availableZones, setAvailableZones] = useState<any[]>([]);
@@ -150,6 +81,17 @@ export default function HSILRoomView() {
   const [editingZone, setEditingZone] = useState<Room | null>(null);
   const [editedAttributes, setEditedAttributes] = useState<ZoneAttributes | null>(null);
   const [activeTab, setActiveTab] = useState<string>('rooms');
+  const [editMode, setEditMode] = useState(false);
+  const [activeDevice, setActiveDevice] = useState<Device | null>(null);
+
+  // DnD sensors with activation constraint to prevent accidental drags
+  const sensors = useSensors(
+    useSensor(PointerSensor, {
+      activationConstraint: {
+        distance: 8,
+      },
+    })
+  );
 
   // Helper to check if device was recently updated (within last 30 seconds)
   const isRecentlyUpdated = (lastUpdated: string | undefined) => {
@@ -313,6 +255,50 @@ export default function HSILRoomView() {
     }
   };
 
+  // DnD event handlers
+  const handleDragStart = (event: DragStartEvent) => {
+    const { active } = event;
+    const device = active.data.current?.device as Device;
+    if (device) {
+      setActiveDevice(device);
+    }
+  };
+
+  const handleDragEnd = async (event: DragEndEvent) => {
+    const { active, over } = event;
+    setActiveDevice(null);
+
+    if (!over) return;
+
+    const device = active.data.current?.device as Device;
+    const targetId = over.id as string;
+
+    if (!device) return;
+
+    // Skip if dropping on same zone
+    const currentZoneId = device.zone_id || 'unassigned';
+    if (currentZoneId === targetId) return;
+
+    // Update device zone (empty string for unassigned)
+    const newZoneId = targetId === 'unassigned' ? '' : targetId;
+
+    try {
+      await fetch(`${API_BASE}/api/devices/${device.id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ zone_id: newZoneId }),
+      });
+      fetchRoomsAndDevices();
+    } catch (error) {
+      console.error('Failed to update device zone:', error);
+    }
+  };
+
+  // Get unassigned devices for the tray
+  const unassignedRoom = rooms.find((r) => r.id === 'unassigned');
+  const unassignedDevices = unassignedRoom?.devices || [];
+  const assignedRooms = rooms.filter((r) => r.id !== 'unassigned');
+
   return (
     <Container size="xl" py="xl">
       <Stack gap="xl">
@@ -422,173 +408,74 @@ export default function HSILRoomView() {
           </Tabs.List>
 
           <Tabs.Panel value="rooms" pt="md">
-            {/* Room Grid */}
-            <Grid>
-              {rooms.map((room) => {
-                const hasCritical = room.devices.some(d => d.state === 'critical' || d.active);
-                const hasWarning = room.devices.some(d => d.state === 'warning');
-
-                return (
-                  <Grid.Col key={room.id} span={{ base: 12, sm: 6, md: 4 }}>
-                <Card
-                  shadow="sm"
-                  padding="lg"
-                  radius="md"
-                  withBorder
-                  style={{
-                    height: '100%',
-                    borderColor: hasCritical
-                      ? 'var(--mantine-color-red-6)'
-                      : hasWarning
-                        ? 'var(--mantine-color-yellow-6)'
-                        : undefined,
-                    borderWidth: hasCritical ? '2px' : '1px',
-                    transition: 'all 0.3s ease-in-out',
-                  }}
+            {/* Edit Mode Toggle */}
+            <Group justify="flex-end" mb="md">
+              <Tooltip
+                label={editMode ? 'Exit edit mode' : 'Enter edit mode to drag sensors between rooms'}
+              >
+                <Button
+                  variant={editMode ? 'filled' : 'light'}
+                  color={editMode ? 'green' : 'gray'}
+                  leftSection={editMode ? <Check size={16} /> : <GripVertical size={16} />}
+                  onClick={() => setEditMode(!editMode)}
                 >
-                  <Card.Section withBorder inheritPadding py="xs">
-                    <Group justify="space-between">
-                      <Group>
-                        {ZONE_ICONS[room.id] &&
-                          (() => {
-                            const Icon = ZONE_ICONS[room.id];
-                            return (
-                              <ThemeIcon
-                                variant="light"
-                                size="lg"
-                                color={hasCritical ? 'red' : hasWarning ? 'yellow' : undefined}
-                              >
-                                <Icon size={20} />
-                              </ThemeIcon>
-                            );
-                          })()}
-                        <Text fw={600}>{room.name}</Text>
-                      </Group>
-                      <Group gap="xs">
-                        <Badge
-                          size="sm"
-                          variant="light"
-                          color={hasCritical ? 'red' : hasWarning ? 'yellow' : undefined}
-                        >
-                          {room.devices.length} {room.devices.length === 1 ? 'device' : 'devices'}
-                        </Badge>
-                        {room.id !== 'unassigned' && (
-                          <ActionIcon
-                            variant="subtle"
-                            size="sm"
-                            onClick={() => {
-                              setEditingZone(room);
-                              setEditedAttributes(room.attributes || {});
-                            }}
-                          >
-                            <Settings size={16} />
-                          </ActionIcon>
-                        )}
-                      </Group>
-                    </Group>
-                  </Card.Section>
+                  {editMode ? 'Done' : 'Edit Layout'}
+                </Button>
+              </Tooltip>
+            </Group>
 
-                <Stack gap="xs" mt="md">
-                  {room.devices.length === 0 ? (
-                    <Text size="sm" c="dimmed" ta="center" py="md">
-                      No devices assigned
-                    </Text>
-                  ) : (
-                    room.devices.map((device) => {
-                      const Icon = DEVICE_ICONS[device.type] || Zap;
-                      const recentlyUpdated = isRecentlyUpdated(device.last_updated);
+            {/* Room Grid with DnD */}
+            <DndContext
+              sensors={sensors}
+              onDragStart={handleDragStart}
+              onDragEnd={handleDragEnd}
+            >
+              <Stack gap="lg">
+                <Grid>
+                  {assignedRooms.map((room) => (
+                    <Grid.Col key={room.id} span={{ base: 12, sm: 6, md: 4 }}>
+                      <DroppableRoomCard
+                        room={room}
+                        editMode={editMode}
+                        onDeviceClick={(device) => {
+                          setSelectedDevice(device);
+                          setSelectedZone(device.zone_id || '');
+                          setShowSettings(true);
+                        }}
+                        onSettingsClick={(room) => {
+                          setEditingZone(room);
+                          setEditedAttributes(room.attributes || {});
+                        }}
+                        isRecentlyUpdated={isRecentlyUpdated}
+                      />
+                    </Grid.Col>
+                  ))}
+                </Grid>
 
-                      return (
-                        <Paper
-                          key={device.id}
-                          p="sm"
-                          radius="md"
-                          withBorder
-                          style={{
-                            cursor: 'pointer',
-                            transition: 'all 0.3s ease-in-out',
-                            borderWidth: device.active || device.state === 'critical' ? '2px' : '1px',
-                            borderColor:
-                              device.active || device.state === 'critical'
-                                ? 'var(--mantine-color-red-6)'
-                                : device.state === 'warning'
-                                  ? 'var(--mantine-color-yellow-6)'
-                                  : recentlyUpdated
-                                    ? 'var(--mantine-color-blue-5)'
-                                    : undefined,
-                            backgroundColor:
-                              device.active || device.state === 'critical'
-                                ? 'var(--mantine-color-red-0)'
-                                : device.state === 'warning'
-                                  ? 'var(--mantine-color-yellow-0)'
-                                  : recentlyUpdated
-                                    ? 'var(--mantine-color-blue-0)'
-                                    : undefined,
-                            boxShadow:
-                              device.active || device.state === 'critical'
-                                ? '0 0 20px rgba(250, 82, 82, 0.5)'
-                                : device.state === 'warning'
-                                  ? '0 0 15px rgba(250, 176, 5, 0.3)'
-                                  : undefined,
-                          }}
-                          onClick={() => {
-                            setSelectedDevice(device);
-                            setSelectedZone(device.zone_id || '');
-                            setShowSettings(true);
-                          }}
-                        >
-                          <Group justify="space-between">
-                            <Group gap="xs">
-                              <ThemeIcon
-                                size="sm"
-                                variant="light"
-                                color={getStateColor(device.state)}
-                              >
-                                <Icon size={14} />
-                              </ThemeIcon>
-                              <Text size="sm" fw={500}>
-                                {device.alias ? `${device.alias} (${device.name})` : device.name}
-                              </Text>
-                            </Group>
-                            <Group gap="xs">
-                              {device.battery_level !== undefined && (
-                                <Group gap={2}>
-                                  {device.battery_level < 20 ? (
-                                    <BatteryLow size={14} color="var(--mantine-color-red-6)" />
-                                  ) : (
-                                    <Battery size={14} color={device.battery_level < 40 ? "var(--mantine-color-yellow-6)" : "var(--mantine-color-green-6)"} />
-                                  )}
-                                  <Text size="xs" c={device.battery_level < 20 ? "red" : device.battery_level < 40 ? "yellow" : "dimmed"}>
-                                    {device.battery_level}%
-                                  </Text>
-                                </Group>
-                              )}
-                              {device.value !== null && device.value !== undefined && (
-                                <Text size="sm" fw={600}>
-                                  {typeof device.value === 'boolean'
-                                    ? device.value
-                                      ? 'Active'
-                                      : 'Inactive'
-                                    : `${device.value}${device.unit || ''}`}
-                                </Text>
-                              )}
-                              {device.active && (
-                                <ThemeIcon size="xs" color="red" variant="filled">
-                                  <AlertTriangle size={10} />
-                                </ThemeIcon>
-                              )}
-                            </Group>
-                          </Group>
-                        </Paper>
-                      );
-                    })
-                  )}
-                </Stack>
-              </Card>
-            </Grid.Col>
-                );
-              })}
-            </Grid>
+                {/* Unassigned Sensor Tray */}
+                <UnassignedSensorTray
+                  devices={unassignedDevices}
+                  editMode={editMode}
+                  onDeviceClick={(device) => {
+                    setSelectedDevice(device);
+                    setSelectedZone(device.zone_id || '');
+                    setShowSettings(true);
+                  }}
+                  isRecentlyUpdated={isRecentlyUpdated}
+                />
+              </Stack>
+
+              {/* Drag Overlay - shows ghost of dragged item */}
+              <DragOverlay>
+                {activeDevice && (
+                  <DraggableSensor
+                    device={activeDevice}
+                    editMode={true}
+                    isRecentlyUpdated={false}
+                  />
+                )}
+              </DragOverlay>
+            </DndContext>
           </Tabs.Panel>
 
           <Tabs.Panel value="correlation" pt="md">

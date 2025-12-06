@@ -187,9 +187,23 @@ class ConversationalAgentService:
 
                 # Add tool results to context
                 messages.append({"role": "assistant", "content": llm_response})
+                
+                # Format tool results in a more structured way
+                tool_summary = self._format_tool_results_for_synthesis(tool_results)
+                
                 messages.append({
                     "role": "user",
-                    "content": f"Tool results:\n\n{json.dumps(tool_results, indent=2)}\n\nNow provide a helpful, conversational response to the user based on these results."
+                    "content": f"""Here are the results from the tools you called:
+
+{tool_summary}
+
+IMPORTANT: Do NOT just repeat the JSON data! Instead:
+1. Analyze the data and extract key insights
+2. Present the information in natural, conversational language
+3. Focus on what's relevant to the user's question
+4. Be concise and friendly
+
+Now provide your response to the user in plain English:"""
                 })
 
                 # Second LLM call: synthesis with tool results
@@ -222,6 +236,108 @@ class ConversationalAgentService:
             })
 
         return results
+
+    def _format_tool_results_for_synthesis(self, tool_results: List[Dict[str, Any]]) -> str:
+        """Format tool results in a more readable way for LLM synthesis"""
+        formatted = []
+        
+        for result in tool_results:
+            tool_name = result.get("tool", "unknown")
+            
+            # Create a readable summary instead of raw JSON
+            if "error" in result:
+                formatted.append(f"❌ {tool_name}: Error - {result['error']}")
+            else:
+                # Extract key information based on tool type
+                if tool_name == "get_recent_incidents":
+                    incidents = result.get("incidents", [])
+                    if incidents:
+                        formatted.append(f"📋 Found {len(incidents)} recent incident(s):")
+                        for inc in incidents[:5]:  # Limit to 5 most recent
+                            status = inc.get("status", "unknown")
+                            title = inc.get("title", "")
+                            zone = inc.get("zone_id", "")
+                            time = inc.get("time_ago", inc.get("created_at", ""))
+                            formatted.append(f"  • {title} in {zone} - {status} ({time})")
+                    else:
+                        formatted.append("✅ No recent incidents found")
+                
+                elif tool_name == "list_zones":
+                    zones = result.get("zones", [])
+                    if zones:
+                        formatted.append(f"🏠 Found {len(zones)} zone(s):")
+                        for zone in zones:
+                            name = zone.get("name", "")
+                            zone_type = zone.get("type", "")
+                            attrs = zone.get("attributes", {})
+                            formatted.append(f"  • {name} ({zone_type})")
+                            if attrs:
+                                formatted.append(f"    Attributes: {', '.join([f'{k}={v}' for k, v in attrs.items() if v])}")
+                    else:
+                        formatted.append("No zones found")
+                
+                elif tool_name == "list_devices":
+                    devices = result.get("devices", [])
+                    if devices:
+                        formatted.append(f"🔌 Found {len(devices)} device(s):")
+                        for dev in devices[:10]:  # Limit to 10
+                            name = dev.get("name", "")
+                            zone = dev.get("zone", "")
+                            dev_type = dev.get("type", "")
+                            formatted.append(f"  • {name} ({dev_type}) in {zone}")
+                    else:
+                        formatted.append("No devices found")
+                
+                elif tool_name == "get_device_status":
+                    dev_name = result.get("device_name", "Device")
+                    battery = result.get("battery_level")
+                    state = result.get("state", {})
+                    formatted.append(f"📊 {dev_name} status:")
+                    if battery is not None:
+                        formatted.append(f"  • Battery: {battery}%")
+                    if state:
+                        for key, val in state.items():
+                            formatted.append(f"  • {key}: {val}")
+                
+                elif tool_name == "get_device_incidents":
+                    # Check for false positive pattern analysis
+                    pattern = result.get("pattern_analysis", "")
+                    likely_false_positive = result.get("likely_false_positive", False)
+                    incidents = result.get("incidents", [])
+                    
+                    if likely_false_positive:
+                        formatted.append(f"⚠️ WARNING: Sensor may be malfunctioning (false positives detected)")
+                    
+                    formatted.append(f"📋 Found {len(incidents)} incident(s) for device {result.get('device_id', 'unknown')}")
+                    
+                    if pattern:
+                        formatted.append(f"  {pattern}")
+                    
+                    # Show first few incidents
+                    for inc in incidents[:5]:
+                        status = inc.get("status", "unknown")
+                        title = inc.get("title", "")
+                        time = inc.get("time_ago", "")
+                        formatted.append(f"  • {title} - {status} ({time})")
+                
+                elif tool_name == "check_erratic_behavior":
+                    is_erratic = result.get("is_erratic", False)
+                    if is_erratic:
+                        formatted.append(f"⚠️ Erratic behavior detected!")
+                        formatted.append(f"  Score: {result.get('erratic_score', 0):.2f}")
+                    else:
+                        formatted.append(f"✅ No current erratic behavior detected")
+                        formatted.append(f"  Note: Check incident history for past rapid-fire events")
+                
+                else:
+                    # For other tools, just show a summary
+                    formatted.append(f"✅ {tool_name} completed")
+                    # Include first few keys of result
+                    keys = [k for k in result.keys() if k not in ["tool", "arguments"]]
+                    if keys:
+                        formatted.append(f"  Data: {', '.join(keys[:5])}")
+        
+        return "\n".join(formatted)
 
     def _extract_tool_calls(self, llm_response: str) -> List[Dict[str, Any]]:
         """

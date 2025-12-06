@@ -129,7 +129,7 @@ class ToolRegistry:
         # Device-specific incidents
         self.register_tool(Tool(
             name="get_device_incidents",
-            description="Get incident history for a specific device, including timestamps of anomalies/leaks.",
+            description="Get incident history for a specific device, including timestamps of anomalies/leaks. CRITICAL: Use this to detect FALSE POSITIVES or SENSOR MALFUNCTIONS by checking if multiple incidents occurred within seconds of each other (indicating sensor problems, not real events). This is more reliable than check_erratic_behavior for recent activity.",
             parameters=[
                 ToolParameter("device_id", "string", "The device ID to query"),
                 ToolParameter("limit", "number", "Maximum number of incidents to return", required=False),
@@ -476,11 +476,76 @@ class ToolRegistry:
                     "device_id": device_id,
                     "total_count": len(device_incidents),
                     "returned_count": len(formatted),
-                    "incidents": formatted
+                    "incidents": formatted,
+                    **self._analyze_incident_pattern(formatted)
                 }
         except Exception as e:
             logger.error(f"Error fetching device incidents: {e}")
             return {"error": str(e)}
+
+    def _analyze_incident_pattern(self, incidents: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Analyze incident pattern to detect false positives or sensor malfunctions"""
+        from datetime import datetime
+        
+        if len(incidents) < 2:
+            return {
+                "pattern_analysis": "Not enough incidents to detect pattern",
+                "likely_false_positive": False
+            }
+        
+        # Parse timestamps and calculate intervals
+        timestamps = []
+        for inc in incidents:
+            created_at = inc.get("created_at", "")
+            if created_at:
+                try:
+                    dt = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+                    timestamps.append(dt)
+                except Exception:
+                    pass
+        
+        if len(timestamps) < 2:
+            return {
+                "pattern_analysis": "Could not parse timestamps",
+                "likely_false_positive": False
+            }
+        
+        # Sort by time (most recent first)
+        timestamps.sort(reverse=True)
+        
+        # Check for false positive pattern: multiple incidents within 10 seconds
+        # This suggests sensor malfunction or interference, not real events
+        consecutive_quick_triggers = 0
+        for i in range(len(timestamps) - 1):
+            delta = timestamps[i] - timestamps[i + 1]
+            if delta.total_seconds() < 10:
+                consecutive_quick_triggers += 1
+        
+        likely_false_positive = consecutive_quick_triggers >= 3  # 3+ incidents within 10 seconds each
+        
+        # Calculate average interval for recent incidents
+        recent_intervals = []
+        for i in range(min(5, len(timestamps) - 1)):
+            delta = timestamps[i] - timestamps[i + 1]
+            recent_intervals.append(delta.total_seconds())
+        
+        avg_interval = sum(recent_intervals) / len(recent_intervals) if recent_intervals else 0
+        
+        analysis = {
+            "likely_false_positive": likely_false_positive,
+            "suspicious_trigger_count": consecutive_quick_triggers,
+            "average_interval_seconds": round(avg_interval, 1),
+            "pattern_analysis": ""
+        }
+        
+        if likely_false_positive:
+            analysis["pattern_analysis"] = f"⚠️ LIKELY FALSE POSITIVE: {consecutive_quick_triggers} incidents triggered within seconds of each other (avg {avg_interval:.1f}s apart). This pattern suggests sensor malfunction or interference, not real events. Consider checking sensor battery, placement, or replacing the sensor."
+        elif avg_interval < 60:
+            analysis["pattern_analysis"] = f"⚠️ Frequent triggers: Incidents occurring every {avg_interval:.1f} seconds on average. May indicate high sensor sensitivity or need for adjustment."
+        else:
+            analysis["pattern_analysis"] = f"✅ Normal pattern: Incidents spaced reasonably apart ({avg_interval:.1f}s average). Sensor appears to be functioning correctly."
+        
+        return analysis
 
     async def _get_device_baseline(self, device_id: str, metric: str) -> Dict[str, Any]:
         """Get device baseline statistics"""
