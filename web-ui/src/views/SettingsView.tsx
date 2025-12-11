@@ -40,6 +40,7 @@ interface HomeProfile {
   has_ac?: boolean;
   ac_type?: string;
   heating_type?: string;
+  heating_system_type?: string;
   thermostat_type?: string;
   has_humidifier?: boolean;
   has_dehumidifier?: boolean;
@@ -78,6 +79,7 @@ interface Zone {
   id: string;
   name: string;
   type: string;
+  hidden?: boolean;
 }
 
 interface ZoneTypeOption {
@@ -102,6 +104,17 @@ export default function SettingsView() {
   const [addZoneModalOpen, setAddZoneModalOpen] = useState(false);
   const [newZoneType, setNewZoneType] = useState<string>('');
   const [newZoneName, setNewZoneName] = useState<string>('');
+  
+  // Add attribute modal state
+  const [addAttributeModalOpen, setAddAttributeModalOpen] = useState(false);
+  const [newAttribute, setNewAttribute] = useState({
+    name: '',
+    label: '',
+    type: 'text' as 'text' | 'number' | 'boolean' | 'select',
+    category: '',
+    description: '',
+    options: [] as string[],
+  });
 
   useEffect(() => {
     loadHomeProfile();
@@ -122,9 +135,34 @@ export default function SettingsView() {
 
   const loadAttributeDefinitions = async () => {
     try {
-      const response = await fetch(`${API_BASE}/api/zone-attributes/definitions?scope=zone`);
+      // Load zone schema which contains the attribute definitions
+      const response = await fetch(`${API_BASE}/api/zones/schema`);
       const data = await response.json();
-      setAttributeDefs(data || []);
+      
+      // Convert ZoneAttributeField to AttributeDefinition format for compatibility
+      interface ZoneAttr {
+        name: string;
+        label: string;
+        type: string;
+        category: string;
+        description?: string;
+        options?: Array<{ value: string; label: string }>;
+      }
+      
+      const defs: AttributeDefinition[] = (data?.attributes || []).map((attr: ZoneAttr) => ({
+        id: attr.name,
+        name: attr.name,
+        label: attr.label,
+        type: attr.type === 'select' ? 'select' : attr.type === 'number' ? 'number' : attr.type === 'boolean' ? 'boolean' : 'text',
+        scope: 'zone' as const,
+        category: attr.category,
+        description: attr.description || '',
+        options: attr.options?.map((opt) => opt.value) || [],
+        default_value: '',
+        required: false,
+      }));
+      
+      setAttributeDefs(defs);
     } catch (error) {
       console.error('Failed to load attribute definitions:', error);
     }
@@ -146,17 +184,16 @@ export default function SettingsView() {
       const data = await response.json();
       setZones(data || []);
       
-      // Load attributes for each zone
+      // Extract attributes from zone.attributes field (not separate table)
       const attrs: Record<string, Record<string, string>> = {};
       for (const zone of data || []) {
-        try {
-          const attrResponse = await fetch(`${API_BASE}/api/zones/${zone.id}/attributes`);
-          const attrData = await attrResponse.json();
-          attrs[zone.id] = attrData || {};
-        } catch (error) {
-          console.error(`Failed to load attributes for zone ${zone.id}:`, error);
-          attrs[zone.id] = {};
+        // Convert zone.attributes object to string values for compatibility with form inputs
+        const zoneAttrs = zone.attributes || {};
+        const stringAttrs: Record<string, string> = {};
+        for (const [key, value] of Object.entries(zoneAttrs)) {
+          stringAttrs[key] = String(value);
         }
+        attrs[zone.id] = stringAttrs;
       }
       setZoneAttributes(attrs);
     } catch (error) {
@@ -185,7 +222,7 @@ export default function SettingsView() {
       } else {
         throw new Error('Failed to save');
       }
-    } catch (error) {
+    } catch {
       notifications.show({
         title: 'Error',
         message: 'Failed to save home profile',
@@ -200,10 +237,37 @@ export default function SettingsView() {
   const saveZoneAttributes = async (zoneId: string) => {
     setLoading(true);
     try {
-      const response = await fetch(`${API_BASE}/api/zones/${zoneId}/attributes`, {
+      // Get the current zone data
+      const zone = zones.find(z => z.id === zoneId);
+      if (!zone) {
+        throw new Error('Zone not found');
+      }
+
+      // Convert string attributes back to appropriate types
+      const attrs = zoneAttributes[zoneId] || {};
+      const typedAttributes: Record<string, string | number | boolean> = {};
+      for (const [key, value] of Object.entries(attrs)) {
+        // Convert "true"/"false" strings to booleans
+        if (value === 'true') {
+          typedAttributes[key] = true;
+        } else if (value === 'false') {
+          typedAttributes[key] = false;
+        } else if (!isNaN(Number(value)) && value !== '') {
+          // Convert numeric strings to numbers
+          typedAttributes[key] = Number(value);
+        } else {
+          typedAttributes[key] = value;
+        }
+      }
+
+      // Update the entire zone with attributes
+      const response = await fetch(`${API_BASE}/api/zones/${zoneId}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(zoneAttributes[zoneId] || {}),
+        body: JSON.stringify({
+          ...zone,
+          attributes: typedAttributes,
+        }),
       });
       
       if (response.ok) {
@@ -213,10 +277,12 @@ export default function SettingsView() {
           color: 'green',
           icon: <Check size={18} />,
         });
+        // Reload zones to get updated data
+        loadZones();
       } else {
         throw new Error('Failed to save');
       }
-    } catch (error) {
+    } catch {
       notifications.show({
         title: 'Error',
         message: 'Failed to save zone attributes',
@@ -283,8 +349,80 @@ export default function SettingsView() {
     }
   }, [newZoneType, newZoneName]);
 
+  const handleAddAttribute = async () => {
+    if (!newAttribute.name || !newAttribute.label || !newAttribute.category) return;
+    
+    try {
+      const response = await fetch(`${API_BASE}/api/zone-attributes/definitions`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          id: newAttribute.name,
+          name: newAttribute.name,
+          label: newAttribute.label,
+          type: newAttribute.type,
+          scope: 'zone',
+          category: newAttribute.category,
+          description: newAttribute.description,
+          options: newAttribute.options.filter(o => o.trim()),
+          required: false,
+          default_value: '',
+        }),
+      });
+      
+      if (response.ok) {
+        notifications.show({
+          title: 'Success',
+          message: 'Attribute added successfully',
+          color: 'green',
+        });
+        setAddAttributeModalOpen(false);
+        setNewAttribute({
+          name: '',
+          label: '',
+          type: 'text',
+          category: '',
+          description: '',
+          options: [],
+        });
+        loadAttributeDefinitions();
+      }
+    } catch {
+      notifications.show({
+        title: 'Error',
+        message: 'Failed to add attribute',
+        color: 'red',
+      });
+    }
+  };
+
+  const handleDeleteAttribute = async (id: string) => {
+    if (!confirm('Delete this attribute? This will remove it from all zones.')) return;
+    
+    try {
+      const response = await fetch(`${API_BASE}/api/zone-attributes/definitions/${id}`, {
+        method: 'DELETE',
+      });
+      
+      if (response.ok) {
+        notifications.show({
+          title: 'Success',
+          message: 'Attribute deleted successfully',
+          color: 'green',
+        });
+        loadAttributeDefinitions();
+      }
+    } catch {
+      notifications.show({
+        title: 'Error',
+        message: 'Failed to delete attribute',
+        color: 'red',
+      });
+    }
+  };
+
   const renderAttributeInput = (zoneId: string, def: AttributeDefinition) => {
-    const value = zoneAttributes[zoneId]?.[def.id] || '';
+    const value = zoneAttributes[zoneId]?.[def.name] || '';
     
     switch (def.type) {
       case 'boolean':
@@ -293,7 +431,7 @@ export default function SettingsView() {
             label={def.label}
             description={def.description}
             checked={value === 'true'}
-            onChange={(e) => updateZoneAttribute(zoneId, def.id, e.currentTarget.checked ? 'true' : 'false')}
+            onChange={(e) => updateZoneAttribute(zoneId, def.name, e.currentTarget.checked ? 'true' : 'false')}
           />
         );
       case 'number':
@@ -302,7 +440,7 @@ export default function SettingsView() {
             label={def.label}
             description={def.description}
             value={value ? parseInt(value) : undefined}
-            onChange={(val) => updateZoneAttribute(zoneId, def.id, val?.toString() || '')}
+            onChange={(val) => updateZoneAttribute(zoneId, def.name, val?.toString() || '')}
           />
         );
       case 'select':
@@ -312,7 +450,7 @@ export default function SettingsView() {
             description={def.description}
             data={def.options || []}
             value={value}
-            onChange={(val) => updateZoneAttribute(zoneId, def.id, val || '')}
+            onChange={(val) => updateZoneAttribute(zoneId, def.name, val || '')}
             clearable
           />
         );
@@ -322,7 +460,7 @@ export default function SettingsView() {
             label={def.label}
             description={def.description}
             value={value}
-            onChange={(e) => updateZoneAttribute(zoneId, def.id, e.currentTarget.value)}
+            onChange={(e) => updateZoneAttribute(zoneId, def.name, e.currentTarget.value)}
           />
         );
     }
@@ -459,10 +597,28 @@ export default function SettingsView() {
                   </Grid.Col>
                   <Grid.Col span={6}>
                     <Select
-                      label="Heating Type"
-                      data={['gas', 'electric', 'oil', 'heat-pump', 'wood']}
+                      label="Heating Fuel"
+                      description="What fuel powers your heating system?"
+                      data={['gas', 'electric', 'oil', 'heat-pump', 'wood', 'propane']}
                       value={homeProfile.heating_type}
                       onChange={(val) => setHomeProfile({ ...homeProfile, heating_type: val || undefined })}
+                      clearable
+                    />
+                  </Grid.Col>
+                  <Grid.Col span={6}>
+                    <Select
+                      label="Heating System Type"
+                      description="How is heat distributed?"
+                      data={[
+                        { value: 'forced-air', label: 'Forced Air (Ducts)' },
+                        { value: 'steam', label: 'Steam Radiators' },
+                        { value: 'hot-water', label: 'Hot Water Radiators/Baseboard' },
+                        { value: 'radiant-floor', label: 'Radiant Floor' },
+                        { value: 'electric-baseboard', label: 'Electric Baseboard' },
+                        { value: 'heat-pump', label: 'Heat Pump' },
+                      ]}
+                      value={homeProfile.heating_system_type}
+                      onChange={(val) => setHomeProfile({ ...homeProfile, heating_system_type: val || undefined })}
                       clearable
                     />
                   </Grid.Col>
@@ -587,13 +743,47 @@ export default function SettingsView() {
                   <Paper key={zone.id} p="md" withBorder>
                     <Group justify="space-between">
                       <Stack gap={4}>
-                        <Text fw={500}>{zone.name}</Text>
+                        <Group gap="xs">
+                          <Text fw={500}>{zone.name}</Text>
+                          {zone.hidden && <Badge size="sm" color="gray">Hidden</Badge>}
+                        </Group>
                         <Group gap="xs">
                           <Badge size="sm" variant="light">{zone.type}</Badge>
                           <Text size="sm" c="dimmed">ID: {zone.id}</Text>
                         </Group>
                       </Stack>
                       <Group gap="xs">
+                        <Switch
+                          label="Visible"
+                          size="sm"
+                          checked={!zone.hidden}
+                          onChange={(e) => {
+                            const newHidden = !e.currentTarget.checked;
+                            fetch(`${API_BASE}/api/zones/${zone.id}`, {
+                              method: 'PUT',
+                              headers: { 'Content-Type': 'application/json' },
+                              body: JSON.stringify({
+                                ...zone,
+                                hidden: newHidden,
+                              }),
+                            })
+                              .then(() => {
+                                notifications.show({
+                                  title: 'Success',
+                                  message: `Zone ${newHidden ? 'hidden' : 'shown'}`,
+                                  color: 'green',
+                                });
+                                loadZones();
+                              })
+                              .catch(() => {
+                                notifications.show({
+                                  title: 'Error',
+                                  message: 'Failed to update zone',
+                                  color: 'red',
+                                });
+                              });
+                          }}
+                        />
                         <Button
                           size="xs"
                           variant="light"
@@ -728,23 +918,53 @@ export default function SettingsView() {
 
         <Tabs.Panel value="schema" pt="lg">
           <Paper shadow="sm" p="xl" withBorder>
-            <Alert color="blue" icon={<AlertCircle size={18} />} mb="md">
-              Attribute schema management coming soon. Currently showing {attributeDefs.length} zone attributes.
-            </Alert>
-            
-            <Stack gap="sm">
-              {Object.entries(groupedAttributes).map(([category, defs]) => (
-                <div key={category}>
-                  <Text fw={600} mb="xs">{category}</Text>
-                  <Group gap="xs">
-                    {defs.map((def) => (
-                      <Badge key={def.id} variant="light">
-                        {def.label} ({def.type})
-                      </Badge>
-                    ))}
-                  </Group>
+            <Stack gap="lg">
+              <Group justify="space-between">
+                <div>
+                  <Title order={3}>Attribute Schema</Title>
+                  <Text size="sm" c="dimmed">
+                    Define custom attributes for zone configuration
+                  </Text>
                 </div>
-              ))}
+                <Button
+                  leftSection={<Plus size={16} />}
+                  onClick={() => setAddAttributeModalOpen(true)}
+                >
+                  Add Attribute
+                </Button>
+              </Group>
+
+              <Stack gap="md">
+                {Object.entries(groupedAttributes).map(([category, defs]) => (
+                  <Paper key={category} p="md" withBorder>
+                    <Text fw={600} mb="md">{category}</Text>
+                    <Stack gap="xs">
+                      {defs.map((def) => (
+                        <Group key={def.id} justify="space-between" p="xs" style={{ borderRadius: 4, background: 'var(--mantine-color-gray-0)' }}>
+                          <div>
+                            <Text fw={500}>{def.label}</Text>
+                            <Group gap="xs">
+                              <Badge size="sm" variant="light">{def.type}</Badge>
+                              {def.description && (
+                                <Text size="xs" c="dimmed">{def.description}</Text>
+                              )}
+                            </Group>
+                          </div>
+                          <Button
+                            size="xs"
+                            color="red"
+                            variant="subtle"
+                            leftSection={<Trash2 size={14} />}
+                            onClick={() => handleDeleteAttribute(def.id)}
+                          >
+                            Delete
+                          </Button>
+                        </Group>
+                      ))}
+                    </Stack>
+                  </Paper>
+                ))}
+              </Stack>
             </Stack>
           </Paper>
         </Tabs.Panel>
@@ -796,6 +1016,107 @@ export default function SettingsView() {
               disabled={!newZoneType || !newZoneName}
             >
               Add Zone
+            </Button>
+          </Group>
+        </Stack>
+      </Modal>
+
+      {/* Add Attribute Modal */}
+      <Modal
+        opened={addAttributeModalOpen}
+        onClose={() => {
+          setAddAttributeModalOpen(false);
+          setNewAttribute({
+            name: '',
+            label: '',
+            type: 'text',
+            category: '',
+            description: '',
+            options: [],
+          });
+        }}
+        title="Add New Attribute"
+        size="md"
+      >
+        <Stack gap="md">
+          <TextInput
+            label="Attribute Name"
+            placeholder="e.g., has_ceiling_fan"
+            description="Internal name (snake_case recommended)"
+            value={newAttribute.name}
+            onChange={(e) => setNewAttribute({ ...newAttribute, name: e.currentTarget.value })}
+            required
+          />
+          
+          <TextInput
+            label="Display Label"
+            placeholder="e.g., Has Ceiling Fan"
+            value={newAttribute.label}
+            onChange={(e) => setNewAttribute({ ...newAttribute, label: e.currentTarget.value })}
+            required
+          />
+
+          <Select
+            label="Field Type"
+            value={newAttribute.type}
+            onChange={(value) => setNewAttribute({ ...newAttribute, type: value as any })}
+            data={[
+              { value: 'text', label: 'Text' },
+              { value: 'number', label: 'Number' },
+              { value: 'boolean', label: 'Boolean (Yes/No)' },
+              { value: 'select', label: 'Select (Dropdown)' },
+            ]}
+            required
+          />
+
+          <TextInput
+            label="Category"
+            placeholder="e.g., HVAC, Features, Safety"
+            value={newAttribute.category}
+            onChange={(e) => setNewAttribute({ ...newAttribute, category: e.currentTarget.value })}
+            required
+          />
+
+          <TextInput
+            label="Description"
+            placeholder="Optional description"
+            value={newAttribute.description}
+            onChange={(e) => setNewAttribute({ ...newAttribute, description: e.currentTarget.value })}
+          />
+
+          {newAttribute.type === 'select' && (
+            <TextInput
+              label="Options (comma-separated)"
+              placeholder="e.g., option1, option2, option3"
+              onChange={(e) => setNewAttribute({ 
+                ...newAttribute, 
+                options: e.currentTarget.value.split(',').map(o => o.trim()).filter(Boolean)
+              })}
+            />
+          )}
+
+          <Group justify="flex-end" mt="md">
+            <Button
+              variant="subtle"
+              onClick={() => {
+                setAddAttributeModalOpen(false);
+                setNewAttribute({
+                  name: '',
+                  label: '',
+                  type: 'text',
+                  category: '',
+                  description: '',
+                  options: [],
+                });
+              }}
+            >
+              Cancel
+            </Button>
+            <Button
+              onClick={handleAddAttribute}
+              disabled={!newAttribute.name || !newAttribute.label || !newAttribute.category}
+            >
+              Add Attribute
             </Button>
           </Group>
         </Stack>

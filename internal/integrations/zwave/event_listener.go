@@ -158,11 +158,20 @@ func (s *Service) handleValueUpdated(event Event) {
 	newValue := args["newValue"]
 	propertyName, _ := args["propertyName"].(string)
 
-	log.Printf("[ZWAVE] Node %d value updated: %s (CC %d) = %v",
-		nodeID, property, int(commandClass), newValue)
+	// Extract unit metadata if available from Z-Wave JS
+	// The metadata contains the unit string (e.g., "°F", "°C", "%")
+	var unit string
+	if metadata, ok := args["metadata"].(map[string]interface{}); ok {
+		if unitStr, ok := metadata["unit"].(string); ok {
+			unit = unitStr
+		}
+	}
 
-	// Update device state in database (pass command class for context)
-	s.updateDeviceState(nodeID, int(commandClass), property, newValue, propertyName)
+	log.Printf("[ZWAVE] Node %d value updated: %s (CC %d) = %v unit=%s",
+		nodeID, property, int(commandClass), newValue, unit)
+
+	// Update device state in database (pass command class and unit for context)
+	s.updateDeviceStateWithUnit(nodeID, int(commandClass), property, newValue, propertyName, unit)
 
 	// Emit device event
 	deviceID := fmt.Sprintf("zwave-%d", nodeID)

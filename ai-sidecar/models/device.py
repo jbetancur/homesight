@@ -8,16 +8,16 @@ class DeviceInfo(BaseModel):
     """Device information"""
     device_id: str
     name: Optional[str] = None  # Original device name from integration
-    alias: Optional[str] = None  # User-defined friendly name
-    display_name: Optional[str] = None  # Computed: alias if set, else name
+    display_name: Optional[str] = None  # User-defined friendly name
+    display_name: Optional[str] = None  # Computed: display_name if set, else name
     manufacturer: Optional[str] = None
     model: Optional[str] = None
     type: Optional[str] = None
     metadata: Optional[Dict[str, Any]] = None
 
     def get_display_name(self) -> str:
-        """Returns alias if set, otherwise name, otherwise device_id"""
-        return self.alias or self.name or self.device_id
+        """Returns display_name if set, otherwise name, otherwise device_id"""
+        return self.display_name or self.name or self.device_id
 
 
 class DeviceEvent(BaseModel):

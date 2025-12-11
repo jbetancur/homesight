@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/homesight/homesight/internal/ai"
 	"github.com/homesight/homesight/internal/api"
@@ -51,11 +52,6 @@ func main() {
 	attributeDefinitionRepo := db.NewAttributeDefinitionRepo(database)
 	zoneAttributeValueRepo := db.NewZoneAttributeValueRepo(database)
 
-	// Seed default zones if none exist
-	if err := zoneRepo.SeedDefaultZones(context.Background()); err != nil {
-		log.Printf("Warning: Failed to seed default zones: %v", err)
-	}
-
 	// Initialize metrics sink
 	var metricsSink metrics.MetricsSink
 	metricsSink, err = metrics.NewPrometheusMetricsSink(cfg.Prometheus.URL)
@@ -87,11 +83,15 @@ func main() {
 		mqttBrokerURL = "tcp://localhost:1883" // Default internal broker
 	}
 
+	// Initialize sensor reading repository for thermal analysis
+	readingRepo := db.NewSensorReadingRepo(database)
+
 	// Initialize MQTT consumer for integration messages
 	mqttConsumer, err := mqttint.NewConsumer(
 		mqttBrokerURL,
 		"homesight-consumer",
 		deviceRepo,
+		readingRepo,
 		eventBus,
 		incidentService,
 	)
@@ -103,6 +103,23 @@ func main() {
 		} else {
 			log.Println("MQTT consumer started - listening for integration messages")
 			defer mqttConsumer.Stop()
+
+			// Start background task to cleanup old sensor readings (older than 7 days)
+			go func() {
+				ticker := time.NewTicker(24 * time.Hour)
+				defer ticker.Stop()
+				for {
+					select {
+					case <-ticker.C:
+						deleted, err := readingRepo.CleanupOld(context.Background(), 7*24*time.Hour)
+						if err != nil {
+							log.Printf("Failed to cleanup old sensor readings: %v", err)
+						} else if deleted > 0 {
+							log.Printf("Cleaned up %d old sensor readings", deleted)
+						}
+					}
+				}
+			}()
 		}
 	}
 
@@ -136,6 +153,7 @@ func main() {
 		incidentService,
 		deviceRepo,
 		sensorRepo,
+		readingRepo,
 		zoneRepo,
 		knowledgeBaseRepo,
 		homeProfileRepo,

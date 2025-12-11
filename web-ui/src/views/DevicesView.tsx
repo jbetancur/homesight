@@ -8,7 +8,7 @@ import {
 import {
   Wifi, Activity, Trash2, RefreshCw, FileText, Search,
   Filter, Grid3x3, List, Power, Lock, Lightbulb, Thermometer, Home, Battery,
-  Droplets, Zap
+  Droplets, Zap, ToggleLeft
 } from 'lucide-react';
 import { useEventSubscription } from '../useEventSubscription';
 import { API_BASE_WITH_PATHS } from '../apiConfig';
@@ -35,9 +35,12 @@ function getBatteryColor(level: number): string {
   return 'green';
 }
 
-function BatteryIndicator({ level }: { level: number | undefined }) {
-  if (level === undefined || level === null) return null;
-  
+function BatteryIndicator({ level, metadata }: { level: number | undefined; metadata?: Record<string, any> }) {
+  // Only show battery for battery-powered devices (not mains-powered)
+  // Skip if: level is undefined/null, level is 0, or device is mains-powered (is_listening = true)
+  if (level === undefined || level === null || level === 0) return null;
+  if (metadata?.is_listening === 'true') return null;
+
   const color = getBatteryColor(level);
   return (
     <Tooltip label={`Battery: ${level}%`}>
@@ -54,8 +57,8 @@ function formatReading(key: string, value: any): { icon: React.ReactNode; displa
   if (value === undefined || value === null) return null;
   
   switch (key) {
-    case 'temperature':
-      return { icon: <Thermometer size={12} />, display: `${value}°` };
+    case 'temperature_f':
+      return { icon: <Thermometer size={12} />, display: `${value.toFixed ? value.toFixed(1) : value}°F` };
     case 'humidity':
       return { icon: <Droplets size={12} />, display: `${value}%` };
     case 'leak':
@@ -102,8 +105,8 @@ function formatReading(key: string, value: any): { icon: React.ReactNode; displa
 function SensorReadings({ readings, compact = false }: { readings?: Record<string, any>; compact?: boolean }) {
   if (!readings || Object.keys(readings).length === 0) return null;
 
-  // Priority order for display
-  const priorityKeys = ['temperature', 'humidity', 'leak', 'motion', 'contact', 'power', 'on', 'brightness'];
+  // Priority order for display - use standardized temperature_f (backend converts to Fahrenheit)
+  const priorityKeys = ['temperature_f', 'humidity', 'leak', 'motion', 'contact', 'power', 'on', 'brightness'];
   const maxDisplay = compact ? 2 : 3;
   
   const displayReadings: Array<{ key: string; formatted: NonNullable<ReturnType<typeof formatReading>> }> = [];
@@ -458,8 +461,11 @@ export function DevicesView() {
               <Table.Thead>
                 <Table.Tr>
                   <Table.Th>Name</Table.Th>
+                  <Table.Th>Model</Table.Th>
+                  <Table.Th>ID</Table.Th>
                   <Table.Th>Type</Table.Th>
                   <Table.Th>Integration</Table.Th>
+                  <Table.Th>Controls</Table.Th>
                   <Table.Th>Battery</Table.Th>
                   <Table.Th>Documentation</Table.Th>
                   <Table.Th style={{ textAlign: 'center' }}>Actions</Table.Th>
@@ -472,17 +478,36 @@ export function DevicesView() {
                       <Table.Td>
                         <Group gap="xs">
                           {getDeviceIcon(device.type, 16)}
-                          <Text fw={500} style={{ color: '#228be6', textDecoration: 'underline' }}>{device.display_name || device.alias || device.name}</Text>
+                          <Text fw={500} style={{ color: '#228be6' }}>{device.alias || device.name}</Text>
                         </Group>
+                      </Table.Td>
+                      <Table.Td>
+                          <Text fw={500}>{device.name}</Text>
+                      </Table.Td>    
+                      <Table.Td>
+                          <Text fw={500}>{device.id}</Text>
                       </Table.Td>
                       <Table.Td>
                         <Badge variant="light" color="blue">{device.type}</Badge>
                       </Table.Td>
+               
                       <Table.Td>
                         <Badge variant="outline">{device.integration}</Badge>
                       </Table.Td>
                       <Table.Td>
-                        <BatteryIndicator level={device.battery_level} />
+                        {device.controllable || device.metadata?.controllable === 'true' ? (
+                          <Tooltip label={`Capabilities: ${device.capabilities?.join(', ') || device.metadata?.capabilities || 'switch'}`}>
+                            <Group gap={4}>
+                              <ToggleLeft size={16} color="#40c057" />
+                              <Text size="xs" c="green" fw={500}>Controllable</Text>
+                            </Group>
+                          </Tooltip>
+                        ) : (
+                          <Text size="xs" c="dimmed">Read-only</Text>
+                        )}
+                      </Table.Td>
+                      <Table.Td>
+                        <BatteryIndicator level={device.battery?.level} metadata={device.metadata} />
                       </Table.Td>
                       <Table.Td>
                         <Tooltip label={device.docs_ingested ? `Ingested at ${new Date(device.docs_ingested_at).toLocaleString()}` : 'Awaiting documentation ingestion'}>
@@ -554,9 +579,7 @@ export function DevicesView() {
                   <Stack gap="sm">
                     <Group justify="space-between">
                       {getDeviceIcon(device.type, 24)}
-                      {device.battery_level !== undefined && (
-                        <BatteryIndicator level={device.battery_level} />
-                      )}
+                      <BatteryIndicator level={device.battery?.level} metadata={device.metadata} />
                     </Group>
                     <div>
                       <Text fw={600} lineClamp={1}>{device.display_name || device.alias || device.name}</Text>
@@ -566,9 +589,14 @@ export function DevicesView() {
                     {device.readings && Object.keys(device.readings).length > 0 && (
                       <SensorReadings readings={device.readings} compact />
                     )}
-                    <Group gap="xs">
+                    <Group gap="xs" wrap="wrap">
                       <Badge variant="light" color="blue" size="xs">{device.type}</Badge>
                       <Badge variant="outline" size="xs">{device.integration}</Badge>
+                      {(device.controllable || device.metadata?.controllable === 'true') && (
+                        <Badge variant="light" color="green" size="xs" leftSection={<ToggleLeft size={12} />}>
+                          Controllable
+                        </Badge>
+                      )}
                     </Group>
                     <Group gap={4} justify="flex-end" onClick={(e) => e.stopPropagation()}>
                       <Tooltip label="Re-ingest Docs">

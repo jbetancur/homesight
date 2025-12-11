@@ -45,12 +45,23 @@ curl -s -X POST "$API_URL/api/zone-attributes/definitions" \
 curl -s -X POST "$API_URL/api/zone-attributes/definitions" \
   -H "Content-Type: application/json" \
   -d '{
-    "name": "has_hvac_return",
-    "label": "Has HVAC Return",
+    "name": "has_hvac_vent",
+    "label": "Has HVAC Vent",
     "type": "boolean",
     "scope": "zone",
     "category": "HVAC",
-    "description": "Whether the zone has HVAC return vent"
+    "description": "Whether the zone has HVAC vent"
+  }'
+
+curl -s -X POST "$API_URL/api/zone-attributes/definitions" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "has_radiators",
+    "label": "Has Radiators",
+    "type": "boolean",
+    "scope": "zone",
+    "category": "HVAC",
+    "description": "Whether the zone has radiators"
   }'
 
 curl -s -X POST "$API_URL/api/zone-attributes/definitions" \
@@ -118,6 +129,133 @@ curl -s -X POST "$API_URL/api/zone-attributes/definitions" \
     "scope": "zone",
     "category": "Environment",
     "description": "Whether the zone is prone to moisture issues"
+  }'
+
+# HVAC attributes
+curl -s -X POST "$API_URL/api/zone-attributes/definitions" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "has_hvac_return",
+    "label": "Has HVAC Return",
+    "type": "boolean",
+    "scope": "zone",
+    "category": "HVAC",
+    "description": "Whether the zone has an HVAC return vent"
+  }'
+
+curl -s -X POST "$API_URL/api/zone-attributes/definitions" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "has_radiant_heat",
+    "label": "Has Radiant Heat",
+    "type": "boolean",
+    "scope": "zone",
+    "category": "HVAC",
+    "description": "Whether the zone has radiant floor heating"
+  }'
+
+curl -s -X POST "$API_URL/api/zone-attributes/definitions" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "has_ceiling_fan",
+    "label": "Has Ceiling Fan",
+    "type": "boolean",
+    "scope": "zone",
+    "category": "HVAC",
+    "description": "Whether the zone has a ceiling fan"
+  }'
+
+curl -s -X POST "$API_URL/api/zone-attributes/definitions" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "has_heating_system",
+    "label": "Has Heating System",
+    "type": "select",
+    "scope": "zone",
+    "category": "HVAC",
+    "description": "Central heating equipment located in this zone",
+    "options": ["furnace", "boiler", "heat_pump", "none"]
+  }'
+
+curl -s -X POST "$API_URL/api/zone-attributes/definitions" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "has_cooling_system",
+    "label": "Has Cooling System",
+    "type": "select",
+    "scope": "zone",
+    "category": "HVAC",
+    "description": "Central cooling equipment located in this zone",
+    "options": ["central_ac", "heat_pump", "evaporative_cooler", "none"]
+  }'
+  
+# Appliances and fixtures
+curl -s -X POST "$API_URL/api/zone-attributes/definitions" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "has_water_heater",
+    "label": "Has Water Heater",
+    "type": "boolean",
+    "scope": "zone",
+    "category": "Infrastructure",
+    "description": "Whether the zone contains a water heater"
+  }'
+
+curl -s -X POST "$API_URL/api/zone-attributes/definitions" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "has_washer",
+    "label": "Has Washer/Dryer",
+    "type": "boolean",
+    "scope": "zone",
+    "category": "Infrastructure",
+    "description": "Whether the zone contains washing/drying appliances"
+  }'
+
+curl -s -X POST "$API_URL/api/zone-attributes/definitions" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "has_sump_pump",
+    "label": "Has Sump Pump",
+    "type": "boolean",
+    "scope": "zone",
+    "category": "Infrastructure",
+    "description": "Whether the zone has a sump pump"
+  }'
+
+# Occupancy attributes
+curl -s -X POST "$API_URL/api/zone-attributes/definitions" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "has_infant",
+    "label": "Has Infant",
+    "type": "boolean",
+    "scope": "zone",
+    "category": "Occupancy",
+    "description": "Whether an infant regularly uses this zone"
+  }'
+
+curl -s -X POST "$API_URL/api/zone-attributes/definitions" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "has_elderly",
+    "label": "Has Elderly",
+    "type": "boolean",
+    "scope": "zone",
+    "category": "Occupancy",
+    "description": "Whether elderly person regularly uses this zone"
+  }'
+
+# Additional metadata
+curl -s -X POST "$API_URL/api/zone-attributes/definitions" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "tags",
+    "label": "Tags",
+    "type": "text",
+    "scope": "zone",
+    "category": "Metadata",
+    "description": "Comma-separated tags for categorization"
   }'
 
 echo "✅ Zone attribute definitions bootstrapped!"

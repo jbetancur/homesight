@@ -13,17 +13,62 @@ import remarkGfm from 'remark-gfm';
 import { useEventSubscription } from '../useEventSubscription';
 import { API_BASE_WITH_PATHS } from '../apiConfig';
 import { CapabilityWidget } from '../components/DeviceCapabilityWidgets';
+import { EntityGrid } from '../components/EntityGrid';
 
 const API_BASE = API_BASE_WITH_PATHS;
 
-interface Sensor {
+interface DeviceReadings {
+  temperature_f?: number;
+  humidity?: number;
+  water?: boolean;
+  motion?: boolean;
+  contact?: boolean;
+  tamper?: boolean;
+  smoke?: boolean;
+  co?: boolean;
+  power_w?: number;
+  energy_kwh?: number;
+  voltage_v?: number;
+  current_a?: number;
+  illuminance?: number;
+  co2?: number;
+  voc?: number;
+  pm25?: number;
+  pressure?: number;
+  uv_index?: number;
+}
+
+interface DeviceBattery {
+  level: number;
+  is_low: boolean;
+  is_charging: boolean;
+}
+
+interface DeviceConnectivity {
+  online: boolean;
+  signal_strength?: number;
+  last_seen: string;
+  firmware_version?: string;
+}
+
+interface DeviceControls {
+  switch?: { value: boolean; settable: boolean };
+  level?: { value: number; settable: boolean; min: number; max: number };
+  color?: { r: number; g: number; b: number; settable: boolean };
+  thermostat?: { mode: string; setpoint_heat?: number; setpoint_cool?: number; settable: boolean };
+  lock?: { locked: boolean; settable: boolean };
+}
+
+interface DeviceEntity {
   id: string;
   device_id: string;
+  entity_type: 'sensor' | 'binary_sensor' | 'switch' | 'number' | 'alarm' | 'diagnostic' | 'config';
   name: string;
-  type: string;
+  category: string;
+  value: any;
   unit: string;
-  metadata: Record<string, string>;
-  created_at: string;
+  settable: boolean;
+  metadata: Record<string, any>;
   updated_at: string;
 }
 
@@ -34,12 +79,22 @@ interface Device {
   display_name?: string;
   type: string;
   integration: string;
-  metadata: Record<string, any>;
+  manufacturer?: string;
+  model?: string;
   capabilities?: string[];
+
+  // Unified contract
+  readings?: DeviceReadings;
+  controls?: DeviceControls;
+  battery?: DeviceBattery;
+  connectivity?: DeviceConnectivity;
+  raw_data?: Record<string, any>;
+
+  // Entity-Based Model (New - more flexible)
+  entities?: DeviceEntity[];
+
+  // Backward compatibility (API still includes these)
   state?: Record<string, any>;
-  readings?: Record<string, any>;
-  battery_level?: number;
-  battery_low?: boolean;
   docs_ingested: boolean;
   docs_ingested_at: string;
   docs_status: string;
@@ -60,16 +115,6 @@ interface KnowledgeBase {
   model?: string;
 }
 
-function getSensorIcon(type: string) {
-  switch (type?.toLowerCase()) {
-    case 'humidity':
-      return <Droplets size={16} />;
-    case 'temperature':
-      return <Thermometer size={16} />;
-    default:
-      return <Activity size={16} />;
-  }
-}
 
 function getBatteryColor(level: number): string {
   if (level <= 20) return 'red';
@@ -108,17 +153,14 @@ function formatSensorReading(key: string, value: any): { icon: React.ReactNode; 
   const normalizedKey = normalizeReadingKey(key);
   
   switch (normalizedKey) {
-    case 'temperature':
-    case 'air_temperature': {
-      // Check if value is already in Fahrenheit (typically > 50) or needs conversion from Celsius
-      const isFahrenheit = normalizedKey === 'air_temperature' || (typeof value === 'number' && value > 50);
+    case 'temperature_f': {
+      // Use standardized Fahrenheit temperature (backend converts all temps to F)
       const tempValue = typeof value === 'number' ? value : parseFloat(String(value));
       if (isNaN(tempValue)) return null;
 
-      const displayValue = isFahrenheit ? tempValue : (tempValue * 9/5) + 32;
       return {
         icon: <Thermometer size={20} color="#228be6" />,
-        display: `${displayValue.toFixed(1)}°F`,
+        display: `${tempValue.toFixed(1)}°F`,
         label: 'Temperature'
       };
     }
@@ -178,8 +220,11 @@ function formatSensorReading(key: string, value: any): { icon: React.ReactNode; 
     }
     default:
       // Generic display for unknown readings - use formatted key as label
-      return { 
-        icon: <Activity size={20} color="#868e96" />, 
+      // Skip object values (e.g., complex Z-Wave values)
+      if (typeof value === 'object') return null;
+
+      return {
+        icon: <Activity size={20} color="#868e96" />,
         display: String(value),
         label: key.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())
       };
@@ -190,7 +235,6 @@ export function DeviceOverviewView() {
   const { deviceId } = useParams<{ deviceId: string }>();
   const navigate = useNavigate();
   const [device, setDevice] = useState<Device | null>(null);
-  const [sensors, setSensors] = useState<Sensor[]>([]);
   const [knowledgeBase, setKnowledgeBase] = useState<KnowledgeBase | null>(null);
   const [incidents, setIncidents] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
@@ -230,19 +274,6 @@ export function DeviceOverviewView() {
           console.log('Knowledge base not available:', e);
         }
 
-        // Fetch sensors - try the new endpoint first, fall back to mock data
-        try {
-          const sensorsRes = await fetch(`${API_BASE}/devices/${deviceId}/sensors`);
-          if (sensorsRes.ok) {
-            setSensors(await sensorsRes.json());
-          } else {
-            // Fallback: create mock sensors based on device type
-            setSensors(createMockSensors(deviceId));
-          }
-        } catch {
-          // If endpoint doesn't exist yet, create mock sensors
-          setSensors(createMockSensors(deviceId));
-        }
 
         // Fetch incidents for this device
         try {
@@ -318,47 +349,6 @@ export function DeviceOverviewView() {
   }, [deviceId]);
   useEventSubscription(handleEvent);
 
-  function createMockSensors(devId: string): Sensor[] {
-    const mockSensors: Record<string, Sensor[]> = {
-      'temp_sensor': [
-        {
-          id: `${devId}-temp`,
-          device_id: devId,
-          name: 'Temperature',
-          type: 'temperature',
-          unit: '°C',
-          metadata: { min: '-10', max: '50', accuracy: '±0.5' },
-          created_at: new Date().toISOString(),
-          updated_at: new Date().toISOString(),
-        },
-      ],
-      'humidity_sensor': [
-        {
-          id: `${devId}-humidity`,
-          device_id: devId,
-          name: 'Humidity',
-          type: 'humidity',
-          unit: '%',
-          metadata: { min: '0', max: '100', accuracy: '±3' },
-          created_at: new Date().toISOString(),
-          updated_at: new Date().toISOString(),
-        },
-      ],
-      'leak_sensor': [
-        {
-          id: `${devId}-leak`,
-          device_id: devId,
-          name: 'Leak Detection',
-          type: 'leak',
-          unit: 'Status',
-          metadata: { values: 'Dry, Wet' },
-          created_at: new Date().toISOString(),
-          updated_at: new Date().toISOString(),
-        },
-      ],
-    };
-    return mockSensors[device?.type || 'temp_sensor'] || [];
-  }
 
   if (loading) {
     return (
@@ -389,7 +379,7 @@ export function DeviceOverviewView() {
     );
   }
 
-  const capabilities = device.capabilities || device.metadata?.capabilities || [];
+  const capabilities = device.capabilities || [];
 
   const handleRefresh = async () => {
     setRefreshing(true);
@@ -523,7 +513,7 @@ export function DeviceOverviewView() {
                   <Info size={16} color="#868e96" />
                   <div>
                     <Text size="xs" c="dimmed">Manufacturer</Text>
-                    <Text size="sm" fw={500}>{device.metadata?.manufacturer || '-'}</Text>
+                    <Text size="sm" fw={500}>{device.manufacturer || '-'}</Text>
                   </div>
                 </Group>
               </Paper>
@@ -535,7 +525,7 @@ export function DeviceOverviewView() {
                   <Info size={16} color="#868e96" />
                   <div>
                     <Text size="xs" c="dimmed">Model</Text>
-                    <Text size="sm" fw={500}>{device.metadata?.model || '-'}</Text>
+                    <Text size="sm" fw={500}>{device.model || '-'}</Text>
                   </div>
                 </Group>
               </Paper>
@@ -571,35 +561,45 @@ export function DeviceOverviewView() {
       </Card>
 
       {/* Current Readings - Always visible at the top */}
-      {((device.readings && Object.keys(device.readings).length > 0) || device.battery_level !== undefined) && (
+      {((device.readings && Object.keys(device.readings).length > 0) ||device.battery?.level !== undefined || device.battery) && (
         <Card withBorder p="lg">
           <Stack gap="md">
             <Text fw={600} size="lg">Current Readings</Text>
             <Grid>
-              {/* Battery Status */}
-              {device.battery_level !== undefined && (
-                <Grid.Col span={{ base: 12, sm: 6, md: 4 }}>
-                  <Paper p="md" withBorder bg={device.battery_low ? 'red.0' : 'green.0'} radius="md">
-                    <Group justify="space-between">
-                      <Group gap="sm">
-                        <Battery size={24} color={device.battery_low ? '#fa5252' : '#40c057'} />
-                        <div>
-                          <Text size="xs" c="dimmed">Battery</Text>
-                          <Text fw={600} size="lg" c={getBatteryColor(device.battery_level)}>
-                            {device.battery_level}%
-                          </Text>
-                        </div>
+              {/* Battery Status - check both unified contract and legacy field */}
+              {(device.battery || device.battery.level !== undefined) && (() => {
+                const batteryLevel = device.battery?.level;
+                const batteryLow = device.battery?.is_low 
+
+                if (batteryLevel === undefined) return null;
+
+                return (
+                  <Grid.Col span={{ base: 12, sm: 6, md: 4 }}>
+                    <Paper p="md" withBorder bg={batteryLow ? 'red.0' : 'green.0'} radius="md">
+                      <Group justify="space-between">
+                        <Group gap="sm">
+                          <Battery size={24} color={batteryLow ? '#fa5252' : '#40c057'} />
+                          <div>
+                            <Text size="xs" c="dimmed">Battery</Text>
+                            <Text fw={600} size="lg" c={getBatteryColor(batteryLevel)}>
+                              {batteryLevel}%
+                            </Text>
+                            {device.battery?.is_charging && (
+                              <Text size="xs" c="green">Charging</Text>
+                            )}
+                          </div>
+                        </Group>
+                        <Progress
+                          value={batteryLevel}
+                          size="xl"
+                          w={60}
+                          color={getBatteryColor(batteryLevel)}
+                        />
                       </Group>
-                      <Progress 
-                        value={device.battery_level} 
-                        size="xl" 
-                        w={60}
-                        color={getBatteryColor(device.battery_level)}
-                      />
-                    </Group>
-                  </Paper>
-                </Grid.Col>
-              )}
+                    </Paper>
+                  </Grid.Col>
+                );
+              })()}
               {/* Sensor Readings */}
               {device.readings && Object.entries(device.readings).map(([key, value]) => {
                 const reading = formatSensorReading(key, value);
@@ -626,10 +626,17 @@ export function DeviceOverviewView() {
       )}
 
       {/* Device Details Grid */}
-      <Tabs defaultValue="controls">
+      <Tabs defaultValue={device.entities && device.entities.length > 0 ? "entities" : "controls"}>
         <Tabs.List>
+          {device.entities && device.entities.length > 0 && (
+            <Tabs.Tab value="entities">
+              All Entities
+              <Badge size="sm" color="blue" ml={5}>
+                {device.entities.length}
+              </Badge>
+            </Tabs.Tab>
+          )}
           <Tabs.Tab value="controls">Controls</Tabs.Tab>
-          <Tabs.Tab value="sensors">Sensors</Tabs.Tab>
           <Tabs.Tab value="incidents">
             Incidents
             {incidents.filter(i => i.status !== 'resolved').length > 0 && (
@@ -642,101 +649,110 @@ export function DeviceOverviewView() {
           <Tabs.Tab value="docs">Documentation</Tabs.Tab>
         </Tabs.List>
 
-        {/* Controls Tab - Capability-driven widgets */}
+        {/* Entities Tab - New entity-based model */}
+        {device.entities && device.entities.length > 0 && (
+          <Tabs.Panel value="entities" pt="md">
+            <Card withBorder p="lg">
+              <EntityGrid entities={device.entities} onUpdate={handleRefresh} />
+            </Card>
+          </Tabs.Panel>
+        )}
+
+        {/* Controls Tab - Unified contract controls */}
         <Tabs.Panel value="controls" pt="md">
-          {(!device.capabilities || device.capabilities.length === 0) ? (
+          {(!device.controls || Object.keys(device.controls).length === 0) ? (
             <Card withBorder p="xl">
               <Stack align="center" gap="md">
                 <Activity size={48} color="#868e96" />
                 <div style={{ textAlign: 'center' }}>
                   <Text size="lg" fw={600}>No Controls Available</Text>
                   <Text size="sm" c="dimmed">
-                    This device hasn't reported any controllable capabilities yet
+                    This device doesn't have any controllable features
                   </Text>
                 </div>
               </Stack>
             </Card>
           ) : (
             <Grid>
-              {device.capabilities.map((capability: string, idx: number) => (
+              {/* Switch Control */}
+              {device.controls.switch && (
+                <Grid.Col span={{ base: 12, sm: 6, md: 4 }}>
+                  <Card withBorder p="md">
+                    <Stack gap="sm">
+                      <Group justify="space-between">
+                        <Text fw={600}>Switch</Text>
+                        <Badge color={device.controls.switch.value ? 'green' : 'gray'}>
+                          {device.controls.switch.value ? 'ON' : 'OFF'}
+                        </Badge>
+                      </Group>
+                      {device.controls.switch.settable && (
+                        <Button
+                          fullWidth
+                          variant={device.controls.switch.value ? 'light' : 'filled'}
+                          color={device.controls.switch.value ? 'red' : 'green'}
+                          onClick={async () => {
+                            if (!device.controls?.switch) return;
+                            const newValue = !device.controls.switch.value;
+                            try {
+                              const response = await fetch(`${API_BASE}/devices/${device.id}/command`, {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({
+                                  command: 'set_switch',
+                                  args: { on: newValue }
+                                })
+                              });
+                              if (!response.ok) throw new Error('Failed to send command');
+                              console.log('Switch command sent successfully');
+                              // Refresh device state after a delay to allow Z-Wave to update
+                              setTimeout(async () => {
+                                const deviceRes = await fetch(`${API_BASE}/devices/${device.id}`);
+                                if (deviceRes.ok) {
+                                  const deviceData = await deviceRes.json();
+                                  setDevice(deviceData);
+                                }
+                              }, 1000);
+                            } catch (error) {
+                              console.error('Failed to toggle switch:', error);
+                            }
+                          }}
+                        >
+                          Turn {device.controls.switch.value ? 'Off' : 'On'}
+                        </Button>
+                      )}
+                    </Stack>
+                  </Card>
+                </Grid.Col>
+              )}
+
+              {/* Level Control */}
+              {device.controls.level && (
+                <Grid.Col span={{ base: 12, sm: 6, md: 4 }}>
+                  <Card withBorder p="md">
+                    <Stack gap="sm">
+                      <Text fw={600}>Level</Text>
+                      <Progress value={device.controls.level.value} size="lg" />
+                      <Text size="sm" c="dimmed">
+                        {device.controls.level.value}% ({device.controls.level.min}-{device.controls.level.max})
+                      </Text>
+                    </Stack>
+                  </Card>
+                </Grid.Col>
+              )}
+
+              {/* Capability widgets for backward compatibility */}
+              {device.capabilities && device.capabilities.map((capability: string, idx: number) => (
                 <Grid.Col key={idx} span={{ base: 12, sm: 6, md: 4 }}>
                   <CapabilityWidget
                     deviceId={device.id}
                     capability={capability}
-                    state={device.state}
-                    metadata={device.metadata}
+                    state={device.readings || {}}
+                    metadata={device.raw_data}
                   />
                 </Grid.Col>
               ))}
             </Grid>
           )}
-        </Tabs.Panel>
-
-        <Tabs.Panel value="sensors" pt="md">
-          <Stack gap="md">
-            {/* Sensor Details Table */}
-            {sensors.length === 0 ? (
-              <Card withBorder p="xl">
-                <Stack align="center" gap="md">
-                  <Activity size={48} color="#868e96" />
-                  <div style={{ textAlign: 'center' }}>
-                    <Text size="lg" fw={600}>No Sensor Details</Text>
-                    <Text size="sm" c="dimmed">This device hasn't reported detailed sensor metadata yet</Text>
-                  </div>
-                </Stack>
-              </Card>
-            ) : (
-              <Card withBorder p={0}>
-                  <Table highlightOnHover striped>
-                    <Table.Thead>
-                      <Table.Tr>
-                        <Table.Th>Sensor Name</Table.Th>
-                        <Table.Th>Type</Table.Th>
-                        <Table.Th>Unit</Table.Th>
-                        <Table.Th>Created</Table.Th>
-                        <Table.Th style={{ textAlign: 'center' }}>Action</Table.Th>
-                      </Table.Tr>
-                    </Table.Thead>
-                    <Table.Tbody>
-                      {sensors.map((sensor) => (
-                        <Table.Tr key={sensor.id}>
-                          <Table.Td>
-                            <Group gap="xs">
-                              {getSensorIcon(sensor.type)}
-                              <Text fw={500}>{sensor.name}</Text>
-                            </Group>
-                          </Table.Td>
-                          <Table.Td>
-                            <Badge variant="light" size="sm">
-                              {sensor.type}
-                            </Badge>
-                          </Table.Td>
-                          <Table.Td>
-                            <Text size="sm">{sensor.unit}</Text>
-                          </Table.Td>
-                          <Table.Td>
-                            <Text size="sm" c="dimmed">
-                              {new Date(sensor.created_at).toLocaleDateString()}
-                            </Text>
-                          </Table.Td>
-                          <Table.Td style={{ textAlign: 'center' }}>
-                            <Button
-                              size="xs"
-                              variant="light"
-                              onClick={() =>
-                                navigate(`/devices/${deviceId}/sensors/${sensor.id}`)
-                              }
-                            >
-                              View Details
-                            </Button>
-                          </Table.Td>
-                        </Table.Tr>
-                      ))}
-                    </Table.Tbody>
-                  </Table>
-                </Card>
-            )}
-          </Stack>
         </Tabs.Panel>
 
         {/* Incidents Tab */}
@@ -846,29 +862,46 @@ export function DeviceOverviewView() {
             <Group>
               <div style={{ flex: 1 }}>
                 <Text size="sm" c="dimmed">Manufacturer</Text>
-                <Text fw={500}>{device.metadata?.manufacturer || '-'}</Text>
+                <Text fw={500}>{device.manufacturer || '-'}</Text>
               </div>
               <div style={{ flex: 1 }}>
                 <Text size="sm" c="dimmed">Model</Text>
-                <Text fw={500}>{device.metadata?.model || '-'}</Text>
+                <Text fw={500}>{device.model || '-'}</Text>
               </div>
             </Group>
-            {Object.keys(device.metadata || {}).length > 0 && (
+            {Object.keys(device.raw_data || {}).length > 0 && (
               <div>
                 <Text size="sm" c="dimmed" mb="xs">
-                  Additional Metadata
+                  Raw Integration Data
                 </Text>
                 <Stack gap="xs">
-                  {Object.entries(device.metadata)
-                    .filter(([key]) => key !== 'manufacturer' && key !== 'model' && key !== 'battery_level' && key !== 'battery_low')
-                    .map(([key, value]) => (
-                      <Group key={key} justify="space-between">
-                        <Text size="sm" c="dimmed">
-                          {key.replace(/_/g, ' ')}
-                        </Text>
-                        <Text size="sm">{String(value)}</Text>
-                      </Group>
-                    ))}
+                  {Object.entries(device.raw_data || {})
+                    .filter(([key]) => !key.startsWith('_'))
+                    .map(([key, value]) => {
+                      // Format value based on type
+                      let displayValue: string;
+                      if (value === null || value === undefined) {
+                        displayValue = '-';
+                      } else if (typeof value === 'object') {
+                        // For objects/arrays, show JSON or count
+                        if (Array.isArray(value)) {
+                          displayValue = `[${value.length} items]`;
+                        } else {
+                          displayValue = `{${Object.keys(value).length} properties}`;
+                        }
+                      } else {
+                        displayValue = String(value);
+                      }
+
+                      return (
+                        <Group key={key} justify="space-between">
+                          <Text size="sm" c="dimmed">
+                            {key.replace(/_/g, ' ')}
+                          </Text>
+                          <Text size="sm">{displayValue}</Text>
+                        </Group>
+                      );
+                    })}
                 </Stack>
               </div>
             )}
@@ -934,11 +967,11 @@ export function DeviceOverviewView() {
               <Text size="sm" c="dimmed">
                 {device.name} is a {device.type} device integrated via{' '}
                 {device.integration}.
-                {device.metadata?.manufacturer && (
-                  <> Manufactured by {device.metadata.manufacturer}</>
+                {device.manufacturer && (
+                  <> Manufactured by {device.manufacturer}</>
                 )}
-                {device.metadata?.model && (
-                  <>, Model: {device.metadata.model}</>
+                {device.model && (
+                  <>, Model: {device.model}</>
                 )}.
               </Text>
             </div>

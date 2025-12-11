@@ -24,8 +24,9 @@ type Config struct {
 	} `yaml:"prometheus"`
 
 	System struct {
-		Timezone string `yaml:"timezone"`
-		NTP      struct {
+		Timezone       string `yaml:"timezone"`
+		TemperatureUnit string `yaml:"temperature_unit"` // "celsius" or "fahrenheit"
+		NTP            struct {
 			Enabled           bool     `yaml:"enabled"`
 			Servers           []string `yaml:"servers"`
 			SyncIntervalHours int      `yaml:"sync_interval_hours"`
@@ -103,6 +104,12 @@ func Load(path string) (*Config, error) {
 	}
 	cfg.ZWave.WebSocketURL = getEnvOrDefault("ZWAVE_WEBSOCKET_URL", cfg.ZWave.WebSocketURL)
 
+	// Default to Fahrenheit if not specified
+	if cfg.System.TemperatureUnit == "" {
+		cfg.System.TemperatureUnit = "fahrenheit"
+	}
+	cfg.System.TemperatureUnit = getEnvOrDefault("TEMPERATURE_UNIT", cfg.System.TemperatureUnit)
+
 	return &cfg, nil
 }
 
@@ -116,5 +123,6 @@ func Default() *Config {
 	cfg.API.Addr = getEnvOrDefault("API_ADDR", ":8080")
 	cfg.ZWave.Enabled = false
 	cfg.ZWave.WebSocketURL = getEnvOrDefault("ZWAVE_WEBSOCKET_URL", "ws://localhost:3001")
+	cfg.System.TemperatureUnit = getEnvOrDefault("TEMPERATURE_UNIT", "fahrenheit")
 	return cfg
 }

@@ -385,7 +385,7 @@ class GenericFetcher(ManufacturerFetcher):
         # -------------------------------
         logger.info(f"[Tier 1] Checking vendor index for {manufacturer} {model}")
 
-        indexed_docs = self.vendor_storage.lookup_docs(manufacturer, model)
+        indexed_docs = self.vendor_storage.lookup_docs(manufacturer, model, device_name)
 
         if indexed_docs:
             logger.info(f"[Tier 1] Found {len(indexed_docs)} indexed docs")

@@ -188,6 +188,50 @@ class ToolRegistry:
             function=self._list_zones
         ))
 
+        # Get sensor readings (time-series data)
+        self.register_tool(Tool(
+            name="get_sensor_readings",
+            description="Get time-series sensor readings for temperature, humidity, etc. Use this to see historical trends or recent values over time. Returns readings with timestamps for charting and analysis.",
+            parameters=[
+                ToolParameter("device_id", "string", "The device ID (e.g., 'zwave-31')"),
+                ToolParameter("reading_type", "string", "The type of reading (e.g., 'temperature', 'humidity')", required=False),
+                ToolParameter("hours_back", "number", "How many hours of history to retrieve (default: 24)", required=False),
+            ],
+            function=self._get_sensor_readings
+        ))
+
+        # Control devices
+        self.register_tool(Tool(
+            name="set_device_value",
+            description="Control a device by setting an entity value (turn on/off lights, adjust thermostats, etc.). Use this when the user asks to control or change a device. Check device entities first to see which are settable.",
+            parameters=[
+                ToolParameter("device_id", "string", "The device ID (e.g., 'zwave-31')"),
+                ToolParameter("entity_id", "string", "The entity ID to set (e.g., 'switch', 'targetValue')"),
+                # OpenAI doesn't support "any" - use string to represent all value types
+                # The API will handle type coercion (e.g., "true" -> boolean, "75" -> number)
+                ToolParameter("value", "string", "The value to set. For switches: 'true' or 'false'. For numbers: '75', '68', etc. For strings: pass as-is."),
+            ],
+            function=self._set_device_value
+        ))
+
+        # List controllable devices
+        self.register_tool(Tool(
+            name="list_controllable_devices",
+            description="List all devices that can be controlled (lights, switches, thermostats, valves). Use this to see what devices the user can control.",
+            parameters=[],
+            function=self._list_controllable_devices
+        ))
+
+        # Get device controls - shows what can be controlled on a specific device
+        self.register_tool(Tool(
+            name="get_device_controls",
+            description="Get all controllable entities for a specific device (switches, valves, thermostats). ALWAYS use this before set_device_value to find the correct entity_id to control. Returns entity IDs, current values, and what they control.",
+            parameters=[
+                ToolParameter("device_id", "string", "The device ID (e.g., 'zwave-44')"),
+            ],
+            function=self._get_device_controls
+        ))
+
     def register_tool(self, tool: Tool):
         """Register a tool in the registry"""
         self.tools[tool.name] = tool
@@ -588,31 +632,62 @@ class ToolRegistry:
 
         try:
             async with httpx.AsyncClient() as client:
+                # Fetch zones first to build ID -> name mapping
+                zones_url = "http://api:8080/api/zones"
+                zones_resp = await client.get(zones_url, timeout=5.0)
+                zone_map = {}  # zone_id -> zone_name
+                if zones_resp.status_code == 200:
+                    zones_data = zones_resp.json()
+                    zone_map = {z.get("id"): z.get("name") for z in zones_data if z.get("id")}
+                    logger.debug(f"Loaded {len(zone_map)} zones for name mapping")
+
+                # Fetch devices
                 devices_url = "http://api:8080/api/devices"
                 resp = await client.get(devices_url, timeout=5.0)
 
                 if resp.status_code != 200:
+                    logger.error(f"Failed to fetch devices: {resp.status_code}")
                     return {"error": f"Failed to fetch devices: {resp.status_code}"}
 
                 all_devices = resp.json()
+                logger.info(f"Fetched {len(all_devices)} total devices from API")
 
                 # Filter by zone if specified
                 if zone:
                     zone_normalized = zone.lower().strip()
-                    devices = [
-                        d for d in all_devices
-                        if d.get("zone_id", "").lower() == zone_normalized
-                    ]
-                    
+
+                    # Match against both zone_id and zone display name (fuzzy matching)
+                    # Examples:
+                    #   User: "basement" matches zone_id="basement" or name="Basement"
+                    #   User: "attic office" matches zone_id="attic-office" or name="Attic Office"
+                    devices = []
+                    for d in all_devices:
+                        zone_id = d.get("zone_id", "")
+                        zone_name = zone_map.get(zone_id, "")
+
+                        # Normalize with hyphens replaced by spaces for fuzzy matching
+                        zone_id_normalized = zone_id.lower().replace("-", " ")
+                        zone_name_normalized = zone_name.lower().replace("-", " ")
+
+                        if zone_id_normalized == zone_normalized or zone_name_normalized == zone_normalized:
+                            devices.append(d)
+
+                    logger.info(f"Filtered to {len(devices)} devices in zone '{zone}' (normalized: '{zone_normalized}')")
+
                     if not devices:
+                        # Log all available zones for debugging
+                        available_zones = [f"{zid} ({zone_map.get(zid, zid)})" for zid in zone_map.keys()]
+                        logger.warning(f"No devices found in zone '{zone}'. Available zones: {available_zones}")
                         return {
                             "zone": zone,
                             "count": 0,
                             "devices": [],
-                            "message": f"No devices found in {zone}"
+                            "message": f"No devices found in {zone}",
+                            "available_zones": available_zones
                         }
                 else:
                     devices = all_devices
+                    logger.info(f"Returning all {len(devices)} devices (no zone filter)")
 
                 # Format device list
                 device_list = []
@@ -624,32 +699,74 @@ class ToolRegistry:
                         "zone": d.get("zone_id"),
                         "integration": d.get("integration"),
                     }
-                    
+
                     # Add manufacturer/model if available
                     metadata = d.get("metadata", {})
                     if metadata.get("manufacturer"):
                         device_info["manufacturer"] = metadata["manufacturer"]
                     if metadata.get("model"):
                         device_info["model"] = metadata["model"]
-                    
+
                     # Add battery level if available
                     if "battery_level" in d:
                         device_info["battery_level"] = d["battery_level"]
-                    
+
+                    # CRITICAL: Add sensor capabilities so LLM knows what protection this provides
+                    # Detect capabilities from readings/entities
+                    capabilities = []
+                    readings = d.get("readings", {})
+                    entities = d.get("entities", [])
+
+                    # Water/leak detection
+                    if "water" in readings or any(e.get("id") == "Water Alarm" for e in entities):
+                        capabilities.append("water_leak_detector")
+
+                    # Temperature sensing
+                    if "temperature" in readings or "temperature_f" in readings:
+                        capabilities.append("temperature_sensor")
+
+                    # Humidity sensing
+                    if "humidity" in readings:
+                        capabilities.append("humidity_sensor")
+
+                    # Motion detection
+                    if "motion" in readings or any(e.get("id") == "Motion" for e in entities):
+                        capabilities.append("motion_sensor")
+
+                    # Door/window sensors
+                    if "door" in readings or "window" in readings:
+                        capabilities.append("contact_sensor")
+
+                    # Smoke/CO detection
+                    if "smoke" in readings or any(e.get("id") == "Smoke" for e in entities):
+                        capabilities.append("smoke_detector")
+                    if "co" in readings or "carbon_monoxide" in readings:
+                        capabilities.append("co_detector")
+
+                    # Valve control
+                    if any("valve" in e.get("id", "").lower() for e in entities):
+                        capabilities.append("water_valve")
+
+                    if capabilities:
+                        device_info["capabilities"] = capabilities
+
                     device_list.append(device_info)
 
-                return {
+                result = {
                     "zone": zone or "all",
                     "count": len(device_list),
                     "devices": device_list
                 }
+                
+                logger.info(f"list_devices returning {len(device_list)} devices for zone '{zone or 'all'}'")
+                return result
 
         except Exception as e:
-            logger.error(f"Error listing devices: {e}")
+            logger.error(f"Error listing devices: {e}", exc_info=True)
             return {"error": str(e)}
 
     async def _get_device_status(self, device_id: str) -> Dict[str, Any]:
-        """Get current device status including battery, readings, and state"""
+        """Get current device status including battery, sensor readings, and entity states"""
         import httpx
 
         try:
@@ -670,24 +787,65 @@ class ToolRegistry:
                     "device_id": device_id,
                     "name": device.get("display_name") or device.get("name", device_id),
                     "type": device.get("type"),
-                    "state": device.get("state"),
                     "zone": device.get("zone_id"),
                     "last_seen": device.get("last_seen"),
+                    "integration": device.get("integration"),
                 }
 
-                # Battery info if available
-                if "battery_level" in device:
-                    result["battery_level"] = device["battery_level"]
-                    result["battery_low"] = device.get("battery_low", False)
+                # Extract battery info from battery object (current model)
+                battery_obj = device.get("battery")
+                if battery_obj and isinstance(battery_obj, dict):
+                    result["battery_level"] = battery_obj.get("level")
+                    result["battery_low"] = battery_obj.get("is_low", False)
+                    result["battery_charging"] = battery_obj.get("is_charging", False)
 
-                # Current readings
-                if device.get("readings"):
-                    result["readings"] = device["readings"]
+                # Current readings from root level
+                readings = device.get("readings")
+                if readings and isinstance(readings, dict):
+                    result["readings"] = readings
+                    # Extract key readings to root level for easier access
+                    if "temperature_f" in readings:
+                        result["temperature"] = readings["temperature_f"]
+                    elif "temperature" in readings:
+                        result["temperature"] = readings["temperature"]
+                    if "humidity" in readings:
+                        result["humidity"] = readings["humidity"]
+
+                # Extract from entities (alternative location)
+                entities = device.get("entities", [])
+                if entities:
+                    result["entities"] = {}
+                    for entity in entities:
+                        entity_id = entity.get("id", "")
+                        entity_type = entity.get("type") or entity.get("entity_type", "")
+                        value = entity.get("value")
+
+                        # Add to entities dict
+                        result["entities"][entity_id] = {
+                            "type": entity_type,
+                            "value": value,
+                            "unit": entity.get("unit"),
+                            "settable": entity.get("settable", False)
+                        }
+
+                        # Extract key sensor types to root level if not already set
+                        if entity_type == "battery" and "battery_level" not in result:
+                            result["battery_level"] = value
+                            result["battery_unit"] = entity.get("unit", "%")
+                        elif "temperature" in entity_type.lower() and "temperature" not in result:
+                            result["temperature"] = value
+                            result["temperature_unit"] = entity.get("unit", "°F")
+                        elif "humidity" in entity_type.lower() and "humidity" not in result:
+                            result["humidity"] = value
+                            result["humidity_unit"] = entity.get("unit", "%")
+
+                # Legacy: Check for battery_level field for backward compatibility
+                if "battery_level" in device and "battery_level" not in result:
+                    result["battery_level"] = device["battery_level"]
 
                 # Metadata with useful info
                 metadata = device.get("metadata", {})
                 if metadata:
-                    # Extract commonly needed metadata
                     useful_metadata = {}
                     for key in ["manufacturer", "model", "firmware", "location"]:
                         if key in metadata:
@@ -769,7 +927,7 @@ class ToolRegistry:
             return {"error": str(e)}
 
     async def _list_zones(self, search: Optional[str] = None) -> Dict[str, Any]:
-        """List all zones/rooms in the home, optionally filtered by search term"""
+        """List all zones/rooms in the home with attributes and device counts"""
         import httpx
 
         try:
@@ -792,9 +950,11 @@ class ToolRegistry:
                 enriched_zones = []
                 for zone in zones:
                     zone_id = zone.get("id", "")
+
+                    # Fetch zone attributes from dedicated endpoint
                     attrs_url = f"http://api:8080/api/zones/{zone_id}/attributes"
                     attrs_resp = await client.get(attrs_url, timeout=2.0)
-                    
+
                     zone_info = {
                         "id": zone_id,
                         "name": zone.get("name", ""),
@@ -802,11 +962,26 @@ class ToolRegistry:
                         "home_id": zone.get("home_id", ""),
                         "attributes": {}
                     }
-                    
+
+                    # Parse attributes response
                     if attrs_resp.status_code == 200:
-                        attrs = attrs_resp.json()
-                        zone_info["attributes"] = attrs
-                    
+                        try:
+                            attrs_data = attrs_resp.json()
+                            # Convert attribute values to simple dict
+                            zone_info["attributes"] = {
+                                attr.get("name"): attr.get("value")
+                                for attr in attrs_data
+                                if attr.get("value") is not None
+                            }
+                        except Exception as e:
+                            logger.warning(f"Failed to parse attributes for zone {zone_id}: {e}")
+
+                    # Count devices in this zone using ontology
+                    if self.ontology:
+                        devices_in_zone = self.ontology.devices_by_zone.get(zone_id, [])
+                        zone_info["device_count"] = len(devices_in_zone)
+                        zone_info["devices"] = [d.display_name for d in devices_in_zone]
+
                     enriched_zones.append(zone_info)
 
                 return {
@@ -816,4 +991,230 @@ class ToolRegistry:
                 }
         except Exception as e:
             logger.error(f"Error listing zones: {e}")
+            return {"error": str(e)}
+
+    async def _get_sensor_readings(self, device_id: str, reading_type: str = "temperature", hours_back: int = 24) -> Dict[str, Any]:
+        """Get time-series sensor readings from the database"""
+        import httpx
+        from datetime import datetime, timedelta
+
+        try:
+            async with httpx.AsyncClient() as client:
+                # Calculate since timestamp
+                since = datetime.now() - timedelta(hours=hours_back)
+                since_str = since.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+                # Query sensor readings API
+                readings_url = f"http://api:8080/api/sensors/{device_id}/readings"
+                params = {
+                    "type": reading_type,
+                    "since": since_str,
+                    "limit": 1000
+                }
+
+                resp = await client.get(readings_url, params=params, timeout=5.0)
+
+                if resp.status_code != 200:
+                    return {
+                        "error": f"Failed to fetch sensor readings: {resp.status_code}",
+                        "device_id": device_id
+                    }
+
+                readings = resp.json()
+
+                # Handle null response
+                if readings is None:
+                    readings = []
+
+                # Calculate summary statistics if we have readings
+                summary = {
+                    "device_id": device_id,
+                    "reading_type": reading_type,
+                    "hours_back": hours_back,
+                    "total_readings": len(readings),
+                    "readings": readings
+                }
+
+                if readings and len(readings) > 0:
+                    values = [r.get("value") for r in readings if r.get("value") is not None]
+                    if values:
+                        summary["min"] = round(min(values), 2)
+                        summary["max"] = round(max(values), 2)
+                        summary["avg"] = round(sum(values) / len(values), 2)
+                        summary["latest"] = values[-1] if values else None
+                        summary["oldest"] = values[0] if values else None
+
+                return summary
+
+        except Exception as e:
+            logger.error(f"Error fetching sensor readings: {e}")
+            return {"error": str(e), "device_id": device_id}
+
+    async def _set_device_value(self, device_id: str, entity_id: str, value: str) -> Dict[str, Any]:
+        """Set a device entity value (control a device)"""
+        import httpx
+        import json
+
+        try:
+            # Convert string value to appropriate type
+            # OpenAI passes everything as string due to tool schema limitation
+            parsed_value = value
+            if value.lower() == "true":
+                parsed_value = True
+            elif value.lower() == "false":
+                parsed_value = False
+            else:
+                # Try to parse as number
+                try:
+                    if '.' in value:
+                        parsed_value = float(value)
+                    else:
+                        parsed_value = int(value)
+                except ValueError:
+                    # Keep as string
+                    pass
+
+            async with httpx.AsyncClient() as client:
+                # Call the set entity API endpoint
+                set_url = f"http://api:8080/api/devices/{device_id}/set-entity"
+                payload = {
+                    "entity_id": entity_id,
+                    "value": parsed_value
+                }
+
+                resp = await client.post(set_url, json=payload, timeout=5.0)
+
+                if resp.status_code == 202:  # Accepted (queued)
+                    result = resp.json()
+                    return {
+                        "success": True,
+                        "device_id": device_id,
+                        "entity_id": entity_id,
+                        "value": value,
+                        "status": "queued",
+                        "message": f"Command sent to {device_id}: set {entity_id} to {value}"
+                    }
+                else:
+                    error_detail = resp.text
+                    return {
+                        "success": False,
+                        "error": f"Failed to set device value: {resp.status_code} - {error_detail}",
+                        "device_id": device_id
+                    }
+
+        except Exception as e:
+            logger.error(f"Error setting device value: {e}")
+            return {"success": False, "error": str(e), "device_id": device_id}
+
+    async def _list_controllable_devices(self) -> Dict[str, Any]:
+        """List all controllable devices with their settable entities"""
+        import httpx
+
+        try:
+            async with httpx.AsyncClient() as client:
+                # Get all devices
+                devices_url = f"http://api:8080/api/devices"
+                resp = await client.get(devices_url, timeout=5.0)
+
+                if resp.status_code != 200:
+                    return {"error": f"Failed to fetch devices: {resp.status_code}"}
+
+                devices_data = resp.json()
+                devices_list = devices_data.get("devices", []) if isinstance(devices_data, dict) else devices_data
+
+                # Filter for devices with settable entities
+                controllable = []
+                for device in devices_list:
+                    entities = device.get("entities", [])
+                    settable_entities = [
+                        {
+                            "id": entity.get("id"),
+                            "type": entity.get("type") or entity.get("entity_type"),
+                            "value": entity.get("value"),
+                            "unit": entity.get("unit"),
+                        }
+                        for entity in entities
+                        if entity.get("settable", False)
+                    ]
+
+                    if settable_entities:
+                        controllable.append({
+                            "device_id": device.get("id"),
+                            "name": device.get("display_name") or device.get("name"),
+                            "type": device.get("type"),
+                            "zone": device.get("zone_id"),
+                            "settable_entities": settable_entities
+                        })
+
+                return {
+                    "total_controllable": len(controllable),
+                    "devices": controllable
+                }
+
+        except Exception as e:
+            logger.error(f"Error listing controllable devices: {e}")
+            return {"error": str(e)}
+
+    async def _get_device_controls(self, device_id: str) -> Dict[str, Any]:
+        """Get all controllable entities for a specific device"""
+        import httpx
+
+        try:
+            async with httpx.AsyncClient() as client:
+                # Get device details
+                device_url = f"http://api:8080/api/devices/{device_id}"
+                resp = await client.get(device_url, timeout=5.0)
+
+                if resp.status_code != 200:
+                    return {"error": f"Device not found: {device_id}"}
+
+                device = resp.json()
+
+                # Extract controllable entities with detailed info
+                entities = device.get("entities", [])
+                controls = []
+
+                for entity in entities:
+                    if entity.get("settable", False):
+                        entity_info = {
+                            "entity_id": entity.get("id"),
+                            "name": entity.get("name"),
+                            "type": entity.get("entity_type") or entity.get("type"),
+                            "category": entity.get("category"),
+                            "current_value": entity.get("value"),
+                            "unit": entity.get("unit"),
+                            "metadata": entity.get("metadata", {})
+                        }
+
+                        # Add helpful label from metadata if available
+                        metadata = entity.get("metadata", {})
+                        if "label" in metadata:
+                            entity_info["label"] = metadata["label"]
+
+                        controls.append(entity_info)
+
+                # Also check for simplified controls object
+                device_controls = device.get("controls", {})
+                for control_key, control_val in device_controls.items():
+                    if isinstance(control_val, dict) and control_val.get("settable"):
+                        controls.append({
+                            "entity_id": control_key,
+                            "name": control_key,
+                            "type": control_key,
+                            "category": "control",
+                            "current_value": control_val.get("value"),
+                            "settable": True,
+                            "simplified_control": True
+                        })
+
+                return {
+                    "device_id": device_id,
+                    "device_name": device.get("display_name") or device.get("name"),
+                    "controllable": device.get("controllable", False),
+                    "controls": controls,
+                    "total_controls": len(controls)
+                }
+
+        except Exception as e:
+            logger.error(f"Error getting device controls for {device_id}: {e}")
             return {"error": str(e)}

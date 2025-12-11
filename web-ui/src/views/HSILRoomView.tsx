@@ -49,7 +49,7 @@ import {
 import type { Device, Room, ZoneAttributes } from '../components/dnd';
 import { API_BASE } from '../apiConfig';
 import { useEventSubscription } from '../useEventSubscription';
-import WeatherCorrelationChart from '../components/WeatherCorrelationChart';
+import ClimateInsights from '../components/ClimateInsights';
 import LearningProgressChart from '../components/LearningProgressChart';
 
 interface ZoneAttributeOption {
@@ -80,6 +80,7 @@ export default function HSILRoomView() {
   const [selectedZone, setSelectedZone] = useState<string>('');
   const [editingAlias, setEditingAlias] = useState<string>('');
   const [weather, setWeather] = useState<any>(null);
+  const [heatingSystemType, setHeatingSystemType] = useState<string | undefined>(undefined);
   const [editingZone, setEditingZone] = useState<Room | null>(null);
   const [editedAttributes, setEditedAttributes] = useState<ZoneAttributes | null>(null);
   const [activeTab, setActiveTab] = useState<string>('rooms');
@@ -108,11 +109,24 @@ export default function HSILRoomView() {
     fetchRoomsAndDevices();
     fetchZoneSchema();
     fetchWeather();
+    fetchHomeProfile();
     const weatherInterval = setInterval(fetchWeather, 900000); // 15 minutes
     return () => {
       clearInterval(weatherInterval);
     };
   }, []);
+
+  const fetchHomeProfile = async () => {
+    try {
+      const res = await fetch(`${API_BASE}/api/home/profile`);
+      if (res.ok) {
+        const profile = await res.json();
+        setHeatingSystemType(profile.heating_system_type);
+      }
+    } catch (error) {
+      console.error('Failed to fetch home profile:', error);
+    }
+  };
 
   // Real-time event handling
   const handleEvent = useCallback((event: any) => {
@@ -122,7 +136,10 @@ export default function HSILRoomView() {
         event.type === "incident_updated" ||
         event.type === "device_updated" ||
         event.type === "device_added" ||
-        event.type === "device_removed") {
+        event.type === "device_removed" ||
+        event.type === "zone_added" ||
+        event.type === "zone_updated" ||
+        event.type === "zone_removed") {
       fetchRoomsAndDevices();
     }
   }, []);
@@ -165,14 +182,16 @@ export default function HSILRoomView() {
       let zones = [];
       if (zonesRes && zonesRes.ok) {
         zones = await zonesRes.json();
-        setAvailableZones(zones);
+        // Filter out hidden zones
+        const visibleZones = zones.filter((z: any) => !z.hidden);
+        setAvailableZones(visibleZones);
       }
 
       // Group devices by room/zone
       const roomMap = new Map<string, Room>();
 
-      // Add all available zones as rooms with attributes
-      zones.forEach((zone: any) => {
+      // Add all available (visible) zones as rooms with attributes
+      zones.filter((zone: any) => !zone.hidden).forEach((zone: any) => {
         roomMap.set(zone.id, {
           id: zone.id,
           name: zone.name,
@@ -194,11 +213,9 @@ export default function HSILRoomView() {
             attributes: {},
           });
         }
-        // Extract battery level from metadata
-        const batteryLevel = device.metadata?.battery_level 
-          ? parseInt(device.metadata.battery_level, 10) 
-          : undefined;
-        
+        // Extract battery level from unified contract
+        const batteryLevel = device.battery?.level;
+
         roomMap.get(zoneId)!.devices.push({
           id: device.id,
           name: device.name,
@@ -213,8 +230,9 @@ export default function HSILRoomView() {
           last_updated: device.last_seen || device.last_updated,
           trend: device.trend,
           battery_level: batteryLevel,
-          metadata: device.metadata,
+          raw_data: device.raw_data,
           readings: device.readings,
+          battery: device.battery,
         });
       });
 
@@ -406,7 +424,7 @@ export default function HSILRoomView() {
               Room Grid
             </Tabs.Tab>
             <Tabs.Tab value="correlation" leftSection={<TrendingUp size={16} />}>
-              Weather Correlation
+              Climate Insights
             </Tabs.Tab>
             <Tabs.Tab value="learning" leftSection={<Activity size={16} />}>
               Learning Progress
@@ -487,7 +505,7 @@ export default function HSILRoomView() {
           </Tabs.Panel>
 
           <Tabs.Panel value="correlation" pt="md">
-            <WeatherCorrelationChart rooms={rooms} weather={weather} />
+            <ClimateInsights rooms={rooms} weather={weather} heatingSystemType={heatingSystemType} />
           </Tabs.Panel>
 
           <Tabs.Panel value="learning" pt="md">
@@ -648,17 +666,21 @@ export default function HSILRoomView() {
                   {/* Tags */}
                   {categoryFields
                     .filter(f => f.type === 'tags')
-                    .map(field => (
-                      <MultiSelect
-                        key={field.name}
-                        label={field.label}
-                        placeholder={field.description || `Add ${field.label.toLowerCase()}`}
-                        data={editedAttributes.tags || []}
-                        value={editedAttributes.tags || []}
-                        onChange={(value) => setEditedAttributes({ ...editedAttributes, tags: value })}
-                        searchable
-                      />
-                    ))}
+                    .map(field => {
+                      const tags = editedAttributes.tags;
+                      const tagArray = Array.isArray(tags) ? tags : [];
+                      return (
+                        <MultiSelect
+                          key={field.name}
+                          label={field.label}
+                          placeholder={field.description || `Add ${field.label.toLowerCase()}`}
+                          data={tagArray}
+                          value={tagArray}
+                          onChange={(value) => setEditedAttributes({ ...editedAttributes, tags: value })}
+                          searchable
+                        />
+                      );
+                    })}
                 </div>
               );
             })}

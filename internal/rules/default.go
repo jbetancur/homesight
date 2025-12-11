@@ -251,6 +251,23 @@ func (e *DefaultRuleEngine) checkBatteryLow(event model.DeviceEvent) *model.Inci
 		return nil
 	}
 
+	// Check if device uses backup battery (AC-powered)
+	// Skip battery incidents for AC-powered devices with backup batteries
+	if e.deviceRepo != nil {
+		device, err := e.deviceRepo.Get(context.Background(), event.DeviceID)
+		if err == nil && device != nil && device.Entities != nil {
+			for _, entity := range device.Entities {
+				// Check for backup battery indicator
+				if entity.Name == "backup" {
+					if backup, ok := entity.Value.(bool); ok && backup {
+						log.Printf("[RULES] Skipping battery incident for %s - device uses backup battery (AC-powered)", event.DeviceID)
+						return nil
+					}
+				}
+			}
+		}
+	}
+
 	incidentKey := fmt.Sprintf("battery_%s", event.DeviceID)
 	threshold := 20.0
 

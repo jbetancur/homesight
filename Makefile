@@ -103,6 +103,10 @@ docker-logs-ai:
 	@echo "Showing AI sidecar logs..."
 	@docker compose logs -f ai-sidecar
 
+docker-logs-zwave:
+	@echo "Showing zwave logs..."
+	@docker compose logs -f zwavejs
+	
 docker-stop:
 	@echo "Stopping all containers..."
 	@docker compose down

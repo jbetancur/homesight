@@ -44,8 +44,7 @@ function getDeviceIcon(device: Device) {
 
   // Check for temperature sensors
   if (
-    'Air temperature' in readings ||
-    'temperature' in readings ||
+    'temperature_f' in readings ||
     model.includes('temp') ||
     model.includes('zse44') ||
     name.includes('temp')
@@ -77,21 +76,19 @@ function getDisplayReadings(readings: DeviceReadings | undefined): Array<{ label
 
   const display: Array<{ label: string; value: string; icon: any }> = [];
 
-  // Temperature - prefer "Air temperature" over raw "temperature"
-  const temp = readings['Air temperature'] ?? readings['temperature'];
-  if (temp !== undefined && temp !== 0) {
-    // If value looks like Celsius (typically < 50), it's likely raw; "Air temperature" is usually Fahrenheit
-    const isFahrenheit = readings['Air temperature'] !== undefined;
+  // Temperature - use standardized temperature_f property (backend converts all temps to Fahrenheit)
+  const temp = readings['temperature_f'];
+  if (temp !== undefined && temp !== 0 && typeof temp === 'number') {
     display.push({
       label: 'Temp',
-      value: isFahrenheit ? `${temp.toFixed(1)}°F` : `${temp.toFixed(1)}°C`,
+      value: `${temp.toFixed(1)}°F`,
       icon: Thermometer,
     });
   }
 
   // Humidity - prefer "Humidity" over raw "humidity"
-  const humidity = readings['Humidity'] ?? readings['humidity'];
-  if (humidity !== undefined && humidity !== 0) {
+  const humidity = readings.humidity
+  if (humidity !== undefined && humidity !== 0 && typeof humidity === 'number') {
     display.push({
       label: 'Humidity',
       value: `${humidity}%`,
@@ -100,11 +97,13 @@ function getDisplayReadings(readings: DeviceReadings | undefined): Array<{ label
   }
 
   // Water leak status
-  const water = readings['Water Alarm'] ?? readings['water'];
+  const water = readings.water;
   if (water !== undefined) {
+    // Handle boolean or number values (objects are ignored)
+    const waterValue = typeof water === 'object' ? false : water;
     display.push({
       label: 'Water',
-      value: water === 0 ? 'Dry' : 'LEAK!',
+      value: waterValue === 0 || waterValue === false ? 'Dry' : 'LEAK!',
       icon: Droplet,
     });
   }
@@ -185,20 +184,29 @@ export function DraggableSensor({
             >
               <DeviceIcon size={14} />
             </ThemeIcon>
-            <Text size="sm" fw={500}>
-              {device.alias || device.name}
-            </Text>
+            <div>
+              <Text size="sm" fw={500}>
+                {device.alias || device.name}
+              </Text>
+              {device.metadata?.node_id && (
+                <Text size="xs" c="dimmed">
+                  Node {device.metadata.node_id}
+                </Text>
+              )}
+            </div>
           </Group>
           <Group gap="xs">
-            {device.battery_level !== undefined && (
+            {device.battery?.level !== undefined &&
+             device.battery?.level > 0 &&
+             device.metadata?.is_listening !== 'true' && (
               <Group gap={2}>
-                {device.battery_level < 20 ? (
+                {device.battery?.level < 20 ? (
                   <BatteryLow size={14} color="var(--mantine-color-red-6)" />
                 ) : (
                   <Battery
                     size={14}
                     color={
-                      device.battery_level < 40
+                      device.battery?.level < 40
                         ? 'var(--mantine-color-yellow-6)'
                         : 'var(--mantine-color-green-6)'
                     }
@@ -207,14 +215,14 @@ export function DraggableSensor({
                 <Text
                   size="xs"
                   c={
-                    device.battery_level < 20
+                    device.battery?.level < 20
                       ? 'red'
-                      : device.battery_level < 40
+                      : device.battery?.level < 40
                         ? 'yellow'
                         : 'dimmed'
                   }
                 >
-                  {device.battery_level}%
+                  {device.battery?.level}%
                 </Text>
               </Group>
             )}

@@ -1,6 +1,10 @@
 package mqtt
 
-import "time"
+import (
+	"time"
+
+	"github.com/homesight/homesight/internal/model"
+)
 
 // DiscoveryMessage represents a device discovery message
 type DiscoveryMessage struct {
@@ -11,6 +15,13 @@ type DiscoveryMessage struct {
 	Model        string   `json:"model,omitempty"`
 	HwID         string   `json:"hw_id,omitempty"`
 	Capabilities []string `json:"capabilities"`
+	// Unified contract fields (optional - from Z-Wave mapper)
+	Readings     *model.DeviceReadings     `json:"readings,omitempty"`
+	Controls     *model.DeviceControls     `json:"controls,omitempty"`
+	Battery      *model.DeviceBattery      `json:"battery,omitempty"`
+	Connectivity *model.DeviceConnectivity `json:"connectivity,omitempty"`
+
+	Entities []model.DeviceEntity `json:"entities,omitempty"`
 }
 
 // RemovedMessage represents a device removal message

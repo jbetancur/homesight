@@ -195,10 +195,15 @@ class VendorDocumentStorage:
     # Lookup
     # -------------------------------------------------------------------
 
-    def lookup_docs(self, manufacturer: str, model: Optional[str] = None) -> List[IndexedDocument]:
+    def lookup_docs(self, manufacturer: str, model: Optional[str] = None, device_name: Optional[str] = None) -> List[IndexedDocument]:
         """
         Lookup documents for a manufacturer (with optional model filter).
-        Returns list of IndexedDocument objects.
+        Returns list of IndexedDocument objects, prioritizing exact matches and PDFs.
+        
+        Args:
+            manufacturer: Device manufacturer name
+            model: Device model name/description
+            device_name: Device name which may contain model identifier (e.g., "ZSE44")
         """
 
         try:
@@ -207,23 +212,99 @@ class VendorDocumentStorage:
             cursor = conn.cursor()
 
             if model:
-                cursor.execute("""
-                    SELECT * FROM indexed_documents
-                    WHERE LOWER(manufacturer) = LOWER(?)
-                    AND (LOWER(model) = LOWER(?) OR model IS NULL)
-                    ORDER BY discovered_at DESC
-                """, (manufacturer, model))
+                # Extract potential model identifiers from both model and device_name
+                # e.g., "ZSE44" from device name "ZSE44" or model "Temperature Humidity XS Sensor ZSE44"
+                import re
+                search_text = f"{model} {device_name or ''}"
+                model_identifiers = re.findall(r'[A-Z]{2,4}\d{2,3}', search_text.upper())
+                
+                # Remove duplicates while preserving order
+                seen = set()
+                model_identifiers = [x for x in model_identifiers if not (x in seen or seen.add(x))]
+                
+                if model_identifiers:
+                    logger.debug(f"Extracted model identifiers for lookup: {model_identifiers}")
+                
+                # Build query to match:
+                # 1. Exact model match (highest priority)
+                # 2. Model identifier match (e.g., ZSE44)
+                # 3. Partial model match (contains)
+                # 4. NULL model (fallback, lowest priority)
+                # Then order by: PDF > HTML, recent first
+                
+                if model_identifiers:
+                    # If we extracted a model identifier (like ZSE44), prioritize it
+                    identifier_conditions = " OR ".join(["UPPER(model) = ?" for _ in model_identifiers])
+                    query = f"""
+                        SELECT *, 
+                            CASE 
+                                WHEN UPPER(model) = UPPER(?) THEN 1
+                                WHEN {identifier_conditions} THEN 2
+                                WHEN model IS NOT NULL AND INSTR(UPPER(model), UPPER(?)) > 0 THEN 3
+                                WHEN model IS NOT NULL AND INSTR(UPPER(?), UPPER(model)) > 0 THEN 4
+                                WHEN model IS NULL THEN 9
+                                ELSE 10
+                            END as match_priority,
+                            CASE document_type 
+                                WHEN 'pdf' THEN 1 
+                                WHEN 'html' THEN 2 
+                                ELSE 3 
+                            END as doc_priority
+                        FROM indexed_documents
+                        WHERE LOWER(manufacturer) = LOWER(?)
+                        ORDER BY match_priority ASC, doc_priority ASC, discovered_at DESC
+                    """
+                    params = [model] + model_identifiers + [model, model, manufacturer]
+                else:
+                    # No identifier extracted, simpler matching
+                    query = """
+                        SELECT *, 
+                            CASE 
+                                WHEN UPPER(model) = UPPER(?) THEN 1
+                                WHEN model IS NOT NULL AND INSTR(UPPER(model), UPPER(?)) > 0 THEN 3
+                                WHEN model IS NOT NULL AND INSTR(UPPER(?), UPPER(model)) > 0 THEN 4
+                                WHEN model IS NULL THEN 9
+                                ELSE 10
+                            END as match_priority,
+                            CASE document_type 
+                                WHEN 'pdf' THEN 1 
+                                WHEN 'html' THEN 2 
+                                ELSE 3 
+                            END as doc_priority
+                        FROM indexed_documents
+                        WHERE LOWER(manufacturer) = LOWER(?)
+                        ORDER BY match_priority ASC, doc_priority ASC, discovered_at DESC
+                    """
+                    params = [model, model, model, manufacturer]
+                
+                cursor.execute(query, params)
             else:
+                # No model filter - just return all for manufacturer, PDFs first
                 cursor.execute("""
-                    SELECT * FROM indexed_documents
+                    SELECT *,
+                        CASE document_type 
+                            WHEN 'pdf' THEN 1 
+                            WHEN 'html' THEN 2 
+                            ELSE 3 
+                        END as doc_priority
+                    FROM indexed_documents
                     WHERE LOWER(manufacturer) = LOWER(?)
-                    ORDER BY discovered_at DESC
+                    ORDER BY doc_priority ASC, discovered_at DESC
                 """, (manufacturer,))
 
             rows = cursor.fetchall()
             conn.close()
 
-            return [IndexedDocument.from_dict(dict(row)) for row in rows]
+            # Convert to IndexedDocument objects, excluding the priority columns
+            docs = []
+            for row in rows:
+                row_dict = dict(row)
+                # Remove our temporary priority columns
+                row_dict.pop('match_priority', None)
+                row_dict.pop('doc_priority', None)
+                docs.append(IndexedDocument.from_dict(row_dict))
+            
+            return docs
 
         except Exception as e:
             logger.error(f"Lookup failed: {e}")

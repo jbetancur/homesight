@@ -411,6 +411,18 @@ func (c *Client) Call(command string, args map[string]interface{}) (interface{},
 				msg["nodeId"] = nid
 				delete(argsCopy, "nodeId")
 			}
+
+			// For node.set_value, valueId and value go to top level, not in args
+			if command == "node.set_value" {
+				if vid, ok := argsCopy["valueId"]; ok {
+					msg["valueId"] = vid
+					delete(argsCopy, "valueId")
+				}
+				if val, ok := argsCopy["value"]; ok {
+					msg["value"] = val
+					delete(argsCopy, "value")
+				}
+			}
 		}
 
 		if len(argsCopy) > 0 {
@@ -452,6 +464,9 @@ func (c *Client) Call(command string, args map[string]interface{}) (interface{},
 			log.Printf("[ZWAVE] Command failed response: messageId=%s error=%s message=%s", resp.MessageID, resp.Error, resp.Message)
 			return nil, fmt.Errorf("command failed: %s", resp.Error)
 		}
+		// Log successful responses to see what Z-Wave JS actually returns
+		resultJSON, _ := json.Marshal(resp.Result)
+		log.Printf("[ZWAVE] Command success response: messageId=%s result=%s", resp.MessageID, string(resultJSON))
 		return resp.Result, nil
 
 	case <-time.After(30 * time.Second):

@@ -70,6 +70,11 @@ func (s *Server) handleWeather(w http.ResponseWriter, r *http.Request) {
 	s.proxyToHSIL(w, r, "/weather")
 }
 
+// hsilGetClimateInsights gets AI-powered climate insights
+func (s *Server) hsilGetClimateInsights(w http.ResponseWriter, r *http.Request) {
+	s.proxyToHSIL(w, r, "/climate-insights")
+}
+
 // proxyToHSIL is a generic proxy helper for HSIL endpoints
 func (s *Server) proxyToHSIL(w http.ResponseWriter, r *http.Request, path string) {
 	// Build target URL

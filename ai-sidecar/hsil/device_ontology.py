@@ -17,78 +17,144 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class Device:
-    """Device representation"""
+    """Device representation with entity support"""
     device_id: str
     name: str  # Original device name from integration
     type: str
-    alias: Optional[str] = None  # User-defined friendly name
+    display_name: Optional[str] = None  # User-defined friendly name
     location: Optional[str] = None
     zone_id: Optional[str] = None
     capabilities: Optional[List[str]] = None
     metadata: Optional[Dict[str, Any]] = None
+    entities: Optional[List[Dict[str, Any]]] = None  # New entity model
+    battery: Optional[Dict[str, Any]] = None  # Battery info at root level
+    battery_level: Optional[float] = None  # Legacy field
+    battery_low: Optional[bool] = None
+    readings: Optional[Dict[str, Any]] = None  # Current sensor readings at root level
 
     @property
     def display_name(self) -> str:
-        """Returns alias if set, otherwise the original name"""
-        return self.alias if self.alias else self.name
+        """Returns display_name if set, otherwise the original name"""
+        return self.display_name if self.display_name else self.name
+
+    def get_battery_level(self) -> Optional[float]:
+        """Extract battery level from multiple possible locations"""
+        # First try battery object at root level (current model)
+        if self.battery and isinstance(self.battery, dict):
+            level = self.battery.get("level")
+            if level is not None:
+                return level
+
+        # Then try battery_level field at root level (legacy)
+        if self.battery_level is not None:
+            return self.battery_level
+
+        # Try entities
+        if self.entities:
+            for entity in self.entities:
+                if entity.get("type") == "battery" or entity.get("entity_type") == "battery":
+                    value = entity.get("value")
+                    if value is not None:
+                        return value
+
+        # Fallback to metadata for backward compatibility
+        if self.metadata:
+            battery_obj = self.metadata.get("battery")
+            if isinstance(battery_obj, dict):
+                level = battery_obj.get("level")
+                if level is not None:
+                    return level
+
+            if "battery_level" in self.metadata:
+                try:
+                    return float(self.metadata["battery_level"])
+                except (ValueError, TypeError):
+                    pass
+
+        return None
+
+    def get_sensor_value(self, sensor_type: str) -> Optional[float]:
+        """Extract sensor reading (temperature, humidity, etc.) from multiple possible locations"""
+        # First try readings object at root level (current model)
+        if self.readings and isinstance(self.readings, dict):
+            # Try temperature_f for temperature
+            if sensor_type == "temperature":
+                temp = self.readings.get("temperature_f") or self.readings.get("temperature")
+                if temp is not None:
+                    return temp
+            # Try direct key
+            value = self.readings.get(sensor_type)
+            if value is not None:
+                return value
+
+        # Try entities (new model)
+        if self.entities:
+            for entity in self.entities:
+                entity_id = entity.get("id", "").lower()
+                entity_type = (entity.get("type") or entity.get("entity_type", "")).lower()
+
+                # Match by entity type or ID containing the sensor type
+                if sensor_type.lower() in entity_type or sensor_type.lower() in entity_id:
+                    value = entity.get("value")
+                    if value is not None:
+                        return value
+
+        # Fallback: Try readings in metadata (legacy)
+        if self.metadata:
+            readings = self.metadata.get("readings")
+            if isinstance(readings, dict):
+                # Try temperature_f for temperature
+                if sensor_type == "temperature":
+                    temp = readings.get("temperature_f") or readings.get("temperature")
+                    if temp is not None:
+                        return temp
+                # Try direct key
+                value = readings.get(sensor_type)
+                if value is not None:
+                    return value
+
+            # Legacy: Try metadata directly
+            if sensor_type in self.metadata:
+                try:
+                    return float(self.metadata[sensor_type])
+                except (ValueError, TypeError):
+                    pass
+
+        return None
+
+    def get_temperature(self) -> Optional[float]:
+        """Get temperature reading in Fahrenheit"""
+        return self.get_sensor_value("temperature")
+
+    def get_humidity(self) -> Optional[float]:
+        """Get humidity reading in percentage"""
+        return self.get_sensor_value("humidity")
 
 
 @dataclass
 class ZoneAttributes:
-    """Zone attributes for HIL reasoning"""
-    # Physical characteristics
-    floor_type: Optional[str] = None  # hardwood, tile, carpet, concrete, laminate
-    square_feet: int = 0
-    has_windows: bool = False
-    has_fireplace: bool = False
+    """
+    Zone attributes wrapper for dynamic attribute system.
+    All attributes are now dynamically defined via the backend API.
+    """
+    _data: Dict[str, Any] = field(default_factory=dict)
     
-    # HVAC/Climate
-    has_hvac_return: bool = False
-    has_hvac_vent: bool = False
-    has_radiant_heat: bool = False
-    has_ceiling_fan: bool = False
+    def get(self, key: str, default: Any = None) -> Any:
+        """Get attribute value by key"""
+        return self._data.get(key, default)
     
-    # Water/Plumbing
-    has_plumbing: bool = False
-    has_water_heater: bool = False
-    has_washer: bool = False
-    has_sump_pump: bool = False
-    
-    # Risk factors & Occupancy
-    has_valuables: bool = False
-    has_pets: bool = False
-    has_infant: bool = False
-    has_elderly: bool = False
-    is_occupied_daily: bool = False
-    
-    # Custom tags
-    tags: List[str] = field(default_factory=list)
+    def __getattr__(self, name: str) -> Any:
+        """Allow attribute-style access for backward compatibility"""
+        if name.startswith('_'):
+            return object.__getattribute__(self, name)
+        return self._data.get(name)
     
     @classmethod
     def from_dict(cls, data: Optional[Dict[str, Any]]) -> "ZoneAttributes":
-        """Create from API response dict"""
+        """Create from API response dict - accepts any attributes"""
         if not data:
             return cls()
-        return cls(
-            floor_type=data.get("floor_type"),
-            square_feet=data.get("square_feet", 0),
-            has_windows=data.get("has_windows", False),
-            has_fireplace=data.get("has_fireplace", False),
-            has_hvac_return=data.get("has_hvac_return", False),
-            has_hvac_vent=data.get("has_hvac_vent", False),
-            has_radiant_heat=data.get("has_radiant_heat", False),
-            has_ceiling_fan=data.get("has_ceiling_fan", False),
-            has_plumbing=data.get("has_plumbing", False),
-            has_water_heater=data.get("has_water_heater", False),
-            has_washer=data.get("has_washer", False),
-            has_sump_pump=data.get("has_sump_pump", False),
-            has_valuables=data.get("has_valuables", False),
-            has_pets=data.get("has_pets", False),
-            has_infant=data.get("has_infant", False),
-            has_elderly=data.get("has_elderly", False),
-            is_occupied_daily=data.get("is_occupied_daily", False),
-            tags=data.get("tags", []),
-        )
+        return cls(_data=dict(data))
 
 
 @dataclass
@@ -184,12 +250,17 @@ class DeviceOntology:
             device = Device(
                 device_id=dev_data.get("id", ""),
                 name=dev_data.get("name", ""),
-                alias=dev_data.get("alias"),  # User-defined friendly name
+                display_name=dev_data.get("display_name"),  # User-defined friendly name
                 type=dev_data.get("type", "unknown"),
                 location=dev_data.get("location"),
                 zone_id=dev_data.get("zone_id"),
                 capabilities=dev_data.get("capabilities", []),
-                metadata=dev_data.get("metadata", {})
+                metadata=dev_data.get("metadata", {}),
+                entities=dev_data.get("entities", []),  # New entity model
+                battery=dev_data.get("battery"),  # Battery object at root
+                battery_level=dev_data.get("battery_level"),  # Legacy field
+                battery_low=dev_data.get("battery_low"),
+                readings=dev_data.get("readings")  # Current sensor readings at root
             )
 
             self.devices[device.device_id] = device
@@ -205,22 +276,42 @@ class DeviceOntology:
 
     async def _process_zones(self, zones_data: List[Dict[str, Any]]):
         """Process zone data from backend with attributes"""
-        for zone_data in zones_data:
-            zone_id = zone_data.get("id")
-            if zone_id:
-                self.zone_ids.add(zone_id)
-                
-                # Parse zone attributes
-                attributes = ZoneAttributes.from_dict(zone_data.get("attributes"))
-                
-                zone = Zone(
-                    zone_id=zone_id,
-                    name=zone_data.get("name", zone_id),
-                    type=zone_data.get("type", "unknown"),
-                    home_id=zone_data.get("home_id", "default"),
-                    attributes=attributes
-                )
-                self.zones[zone_id] = zone
+        import httpx
+
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            for zone_data in zones_data:
+                zone_id = zone_data.get("id")
+                if zone_id:
+                    self.zone_ids.add(zone_id)
+
+                    # Fetch zone attributes from dedicated endpoint
+                    attrs_dict = {}
+                    try:
+                        attrs_url = f"{self.backend_url}/api/zones/{zone_id}/attributes"
+                        attrs_resp = await client.get(attrs_url, timeout=2.0)
+
+                        if attrs_resp.status_code == 200:
+                            attrs_data = attrs_resp.json()
+                            # Convert list of attribute objects to dict
+                            attrs_dict = {
+                                attr.get("name"): attr.get("value")
+                                for attr in attrs_data
+                                if attr.get("value") is not None
+                            }
+                    except Exception as e:
+                        logger.warning(f"Failed to fetch attributes for zone {zone_id}: {e}")
+
+                    # Parse zone attributes
+                    attributes = ZoneAttributes.from_dict(attrs_dict)
+
+                    zone = Zone(
+                        zone_id=zone_id,
+                        name=zone_data.get("name", zone_id),
+                        type=zone_data.get("type", "unknown"),
+                        home_id=zone_data.get("home_id", "default"),
+                        attributes=attributes
+                    )
+                    self.zones[zone_id] = zone
 
     def has_temperature_sensor(self, room: Optional[str] = None) -> bool:
         """
@@ -287,12 +378,26 @@ class DeviceOntology:
         return False
 
     def get_valves(self) -> List[Device]:
-        """Get all valve devices"""
+        """Get all valve devices (water shut-off valves)"""
         if not self._loaded:
             return []
 
-        return self.devices_by_type.get("valve", []) + \
-               self.devices_by_type.get("water_valve", [])
+        valves = []
+        valves.extend(self.devices_by_type.get("valve", []))
+        valves.extend(self.devices_by_type.get("water_valve", []))
+
+        # Also check for devices with 'switch' capability in metadata
+        for device in self.devices.values():
+            if device.metadata and device.metadata.get("controllable") == "true":
+                capabilities = device.metadata.get("capabilities", "").split(",")
+                if "switch" in capabilities:
+                    # Check if device name/type suggests valve
+                    name_lower = (device.name + " " + (device.alias or "")).lower()
+                    if "valve" in name_lower or device.type == "water_valve":
+                        if device not in valves:
+                            valves.append(device)
+
+        return valves
 
     def get_sensors_by_type(self, sensor_type: str) -> List[Device]:
         """Get all sensors of given type"""
@@ -375,6 +480,18 @@ class DeviceOntology:
 
         return False
 
+    def get_controllable_devices(self) -> List[Device]:
+        """Get all controllable devices (switches, valves, etc.)"""
+        if not self._loaded:
+            return []
+
+        controllable = []
+        for device in self.devices.values():
+            if device.metadata and device.metadata.get("controllable") == "true":
+                controllable.append(device)
+
+        return controllable
+
     def get_device_summary(self) -> Dict[str, Any]:
         """
         Get summary of device ontology for LLM context.
@@ -394,6 +511,20 @@ class DeviceOntology:
         # Count by type
         for device_type, devices in self.devices_by_type.items():
             summary["device_types"][device_type] = len(devices)
+
+        # Count controllable devices
+        controllable = self.get_controllable_devices()
+        if controllable:
+            summary["controllable_devices"] = len(controllable)
+            summary["controllable_device_list"] = [
+                f"{d.display_name} ({d.type})" for d in controllable
+            ]
+
+        # Valves
+        valves = self.get_valves()
+        if valves:
+            summary["water_valves"] = len(valves)
+            summary["water_valve_list"] = [d.display_name for d in valves]
 
         # Rooms with sensors
         rooms_with_temp = []
@@ -564,10 +695,11 @@ class DeviceOntology:
         """Get devices with low battery (below threshold percentage)"""
         low_battery = []
         for device in self.devices.values():
-            if device.metadata and device.metadata.get("battery_level"):
+            battery = device.get_battery_level()
+            if battery is not None:
                 try:
-                    battery = int(device.metadata.get("battery_level"))
-                    if battery < threshold:
+                    battery_pct = int(battery)
+                    if battery_pct < threshold:
                         low_battery.append(device)
                 except (ValueError, TypeError):
                     pass
@@ -577,24 +709,25 @@ class DeviceOntology:
         """Get summary of battery-powered devices"""
         battery_devices = []
         for device in self.devices.values():
-            if device.metadata and device.metadata.get("battery_level"):
+            battery = device.get_battery_level()
+            if battery is not None:
                 try:
-                    battery = int(device.metadata.get("battery_level"))
+                    battery_pct = int(battery)
                     battery_devices.append({
                         "device_id": device.device_id,
-                        "name": device.name,
+                        "name": device.display_name,
                         "type": device.type,
-                        "location": device.location,
-                        "battery_level": battery
+                        "zone": device.zone_id,
+                        "battery_level": battery_pct
                     })
                 except (ValueError, TypeError):
                     pass
-        
+
         # Sort by battery level (lowest first)
         battery_devices.sort(key=lambda d: d["battery_level"])
-        
+
         low_count = sum(1 for d in battery_devices if d["battery_level"] < 20)
-        
+
         return {
             "total_battery_devices": len(battery_devices),
             "low_battery_count": low_count,

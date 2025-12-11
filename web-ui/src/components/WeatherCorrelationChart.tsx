@@ -2,6 +2,12 @@ import { useMemo } from 'react';
 import { Paper, Text, Group, Stack, ThemeIcon, Badge, Box } from '@mantine/core';
 import { TrendingUp, TrendingDown, Minus, Thermometer, Droplet, Wind } from 'lucide-react';
 
+interface DeviceReadings {
+  temperature_f?: number;
+  humidity?: number;
+  [key: string]: number | boolean | undefined;
+}
+
 interface Device {
   id: string;
   name: string;
@@ -13,6 +19,7 @@ interface Device {
   zone_id?: string;
   unit?: string;
   trend?: 'up' | 'down' | 'stable';
+  readings?: DeviceReadings;
   metadata?: Record<string, string | number>;
 }
 
@@ -57,42 +64,24 @@ export default function WeatherCorrelationChart({ rooms, weather }: WeatherCorre
 
     rooms.forEach((room) => {
       room.devices.forEach((device) => {
-        // Check if device has temperature value - prefer readings over metadata
+        // Use standardized temperature_f from unified contract
         let indoorTemp: number | null = null;
 
-        // Check readings object first (newer API structure with proper units)
-        if (device.metadata?.readings && typeof device.metadata.readings === 'object') {
-          const readings = device.metadata.readings as Record<string, any>;
-          // "Air temperature" is in Fahrenheit, "temperature" is raw Celsius from sensor
-          if (readings['Air temperature'] !== undefined) {
-            indoorTemp = readings['Air temperature'];
-          } else if (readings['temperature'] !== undefined) {
-            // Convert Celsius to Fahrenheit
-            indoorTemp = (readings['temperature'] * 9/5) + 32;
-          }
+        // Check unified readings object for temperature_f
+        if (device.readings?.temperature_f !== undefined) {
+          indoorTemp = device.readings.temperature_f;
         }
-
-        // Fallback: Direct value
-        if (indoorTemp === null && (device.type === 'temperature' || device.type === 'temp')) {
-          indoorTemp = typeof device.value === 'number' ? device.value : null;
+        // Fallback: Direct value (if device type is temperature)
+        else if ((device.type === 'temperature' || device.type === 'temp') && typeof device.value === 'number') {
+          indoorTemp = device.value;
         }
-
-        // Fallback: Check metadata for temperature keys
-        if (indoorTemp === null && device.metadata) {
-          const airTemp = device.metadata['value_Air temperature'];
-          if (airTemp !== undefined) {
-            const parsed = typeof airTemp === 'number' ? airTemp : parseFloat(String(airTemp));
+        // Backward compatibility: Check metadata for temperature_f
+        else if (device.metadata) {
+          const tempF = device.metadata['value_temperature_f'];
+          if (tempF !== undefined) {
+            const parsed = typeof tempF === 'number' ? tempF : parseFloat(String(tempF));
             if (!isNaN(parsed)) {
               indoorTemp = parsed;
-            }
-          } else {
-            // Try raw temperature and convert from Celsius
-            const rawTemp = device.metadata['value_temperature'];
-            if (rawTemp !== undefined) {
-              const parsed = typeof rawTemp === 'number' ? rawTemp : parseFloat(String(rawTemp));
-              if (!isNaN(parsed)) {
-                indoorTemp = (parsed * 9/5) + 32;
-              }
             }
           }
         }
@@ -118,27 +107,19 @@ export default function WeatherCorrelationChart({ rooms, weather }: WeatherCorre
           });
         }
 
-        // Check for humidity - prefer readings over metadata
+        // Check for humidity from unified contract
         let indoorHumidity: number | null = null;
 
-        // Check readings object first (newer API structure)
-        if (device.metadata?.readings && typeof device.metadata.readings === 'object') {
-          const readings = device.metadata.readings as Record<string, any>;
-          // "Humidity" is the properly formatted value
-          if (readings['Humidity'] !== undefined) {
-            indoorHumidity = readings['Humidity'];
-          } else if (readings['humidity'] !== undefined) {
-            indoorHumidity = readings['humidity'];
-          }
+        // Check unified readings object for humidity
+        if (device.readings?.humidity !== undefined) {
+          indoorHumidity = device.readings.humidity;
         }
-
         // Fallback: Direct value
-        if (indoorHumidity === null && device.type === 'humidity') {
-          indoorHumidity = typeof device.value === 'number' ? device.value : null;
+        else if (device.type === 'humidity' && typeof device.value === 'number') {
+          indoorHumidity = device.value;
         }
-
-        // Fallback: Check metadata for humidity
-        if (indoorHumidity === null && device.metadata) {
+        // Backward compatibility: Check metadata for humidity
+        else if (device.metadata) {
           const humVal = device.metadata['value_Humidity'] || device.metadata['value_humidity'];
           if (humVal !== undefined) {
             const parsed = typeof humVal === 'number' ? humVal : parseFloat(String(humVal));

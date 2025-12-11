@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/homesight/homesight/internal/db"
@@ -119,14 +120,6 @@ func (s *Service) initialSync() {
 			device.DocsIngested = existingDevice.DocsIngested
 			device.DocsIngestedAt = existingDevice.DocsIngestedAt
 			device.DocsStatus = existingDevice.DocsStatus
-			// Preserve existing metadata entries
-			if existingDevice.Metadata != nil {
-				for k, v := range existingDevice.Metadata {
-					if _, exists := device.Metadata[k]; !exists {
-						device.Metadata[k] = v
-					}
-				}
-			}
 		}
 
 		// Set timestamps for initial discovery
@@ -164,8 +157,8 @@ func (s *Service) emitDiscovery(device *model.Device, source string) {
 		Value:     source,
 		Metadata: map[string]string{
 			"integration":  "zwave",
-			"manufacturer": device.Metadata["manufacturer"],
-			"model":        device.Metadata["model"],
+			"manufacturer": device.Manufacturer,
+			"model":        device.Model,
 			"type":         device.Type,
 		},
 	}
@@ -202,6 +195,11 @@ func (s *Service) publishDeviceEvent(deviceID string, property string, value int
 
 // updateDeviceState updates device state in the database
 func (s *Service) updateDeviceState(nodeID int, commandClass int, property string, value interface{}, propertyName string) {
+	s.updateDeviceStateWithUnit(nodeID, commandClass, property, value, propertyName, "")
+}
+
+// updateDeviceStateWithUnit updates device state in the database including unit metadata
+func (s *Service) updateDeviceStateWithUnit(nodeID int, commandClass int, property string, value interface{}, propertyName string, unit string) {
 	deviceID := fmt.Sprintf("zwave-%d", nodeID)
 
 	// Get device from database
@@ -215,27 +213,155 @@ func (s *Service) updateDeviceState(nodeID int, commandClass int, property strin
 		return
 	}
 
-	// Update metadata with property value
-	if device.Metadata == nil {
-		device.Metadata = make(map[string]string)
-	}
-
-	// Store as string in metadata
-	device.Metadata[fmt.Sprintf("value_%s", property)] = fmt.Sprintf("%v", value)
-	if propertyName != "" {
-		device.Metadata[fmt.Sprintf("name_%s", property)] = propertyName
-	}
-
-	// Special handling for battery level (CC_BATTERY = 0x80 = 128)
-	if commandClass == CC_BATTERY && property == "level" {
-		if floatVal, ok := value.(float64); ok {
-			device.Metadata["battery_level"] = fmt.Sprintf("%d", int(floatVal))
-			if floatVal < 20 {
-				device.Metadata["battery_low"] = "true"
-			} else {
-				delete(device.Metadata, "battery_low")
+	// Update unified contract fields based on command class and property
+	switch commandClass {
+	case CC_BATTERY:
+		if property == "level" {
+			if floatVal, ok := value.(float64); ok {
+				// Only update battery for battery-powered devices
+				if device.RawData != nil {
+					if isListening, ok := device.RawData["is_listening"].(bool); !ok || !isListening {
+						// Only store non-zero battery levels (0% often means bad/missing data)
+						if floatVal > 0 {
+							if device.Battery == nil {
+								device.Battery = &model.DeviceBattery{}
+							}
+							device.Battery.Level = int(floatVal)
+							device.Battery.IsLow = floatVal < 20
+							log.Printf("[ZWAVE] Updated battery level for device %s: %d%%", deviceID, int(floatVal))
+						}
+					}
+				}
 			}
-			log.Printf("[ZWAVE] Updated battery level for device %s: %d%%", deviceID, int(floatVal))
+		}
+
+	case CC_SENSOR_MULTILEVEL:
+		// Initialize readings if needed
+		if device.Readings == nil {
+			device.Readings = &model.DeviceReadings{}
+		}
+
+		// Temperature sensor
+		if strings.Contains(strings.ToLower(property), "temperature") {
+			if floatVal, ok := value.(float64); ok {
+				// Convert to Fahrenheit if needed based on unit
+				tempF := floatVal
+				if unit == "°C" || unit == "C" {
+					tempF = (floatVal * 9 / 5) + 32
+				}
+				device.Readings.TemperatureF = &tempF
+				log.Printf("[ZWAVE] Updated temperature for device %s: %.1f°F", deviceID, tempF)
+			}
+		}
+
+		// Humidity sensor
+		if strings.Contains(strings.ToLower(property), "humidity") {
+			if floatVal, ok := value.(float64); ok {
+				device.Readings.Humidity = &floatVal
+				log.Printf("[ZWAVE] Updated humidity for device %s: %.1f%%", deviceID, floatVal)
+			}
+		}
+
+		// Illuminance
+		if strings.Contains(strings.ToLower(property), "illuminance") {
+			if floatVal, ok := value.(float64); ok {
+				device.Readings.Illuminance = &floatVal
+			}
+		}
+
+		// Power
+		if strings.Contains(strings.ToLower(property), "power") {
+			if floatVal, ok := value.(float64); ok {
+				device.Readings.PowerW = &floatVal
+			}
+		}
+
+	case CC_NOTIFICATION:
+		// Initialize readings if needed
+		if device.Readings == nil {
+			device.Readings = &model.DeviceReadings{}
+		}
+
+		// Water leak sensor
+		if strings.Contains(strings.ToLower(property), "water") {
+			boolVal := false
+			switch v := value.(type) {
+			case float64:
+				boolVal = v > 0
+			case bool:
+				boolVal = v
+			}
+			device.Readings.Water = &boolVal
+			log.Printf("[ZWAVE] Updated water sensor for device %s: %v", deviceID, boolVal)
+		}
+
+		// Motion sensor
+		if strings.Contains(strings.ToLower(property), "motion") {
+			boolVal := false
+			switch v := value.(type) {
+			case float64:
+				boolVal = v > 0
+			case bool:
+				boolVal = v
+			}
+			device.Readings.Motion = &boolVal
+		}
+
+		// Tamper
+		if strings.Contains(strings.ToLower(property), "tamper") {
+			boolVal := false
+			switch v := value.(type) {
+			case float64:
+				boolVal = v > 0
+			case bool:
+				boolVal = v
+			}
+			device.Readings.Tamper = &boolVal
+		}
+
+	case CC_SENSOR_BINARY:
+		// Initialize readings if needed
+		if device.Readings == nil {
+			device.Readings = &model.DeviceReadings{}
+		}
+
+		if boolVal, ok := value.(bool); ok {
+			// Contact sensor
+			if strings.Contains(strings.ToLower(property), "contact") || strings.Contains(strings.ToLower(property), "door") {
+				device.Readings.Contact = &boolVal
+			}
+			// Motion sensor
+			if strings.Contains(strings.ToLower(property), "motion") {
+				device.Readings.Motion = &boolVal
+			}
+		}
+
+	case CC_SWITCH_BINARY:
+		// Initialize controls if needed
+		if device.Controls == nil {
+			device.Controls = &model.DeviceControls{}
+		}
+		if device.Controls.Switch == nil {
+			device.Controls.Switch = &model.SwitchControl{Settable: true}
+		}
+
+		if boolVal, ok := value.(bool); ok {
+			device.Controls.Switch.Value = boolVal
+			log.Printf("[ZWAVE] Updated switch state for device %s: %v", deviceID, boolVal)
+		}
+
+	case CC_SWITCH_MULTILEVEL:
+		// Initialize controls if needed
+		if device.Controls == nil {
+			device.Controls = &model.DeviceControls{}
+		}
+		if device.Controls.Level == nil {
+			device.Controls.Level = &model.LevelControl{Settable: true, Min: 0, Max: 100}
+		}
+
+		if floatVal, ok := value.(float64); ok {
+			device.Controls.Level.Value = int(floatVal)
+			log.Printf("[ZWAVE] Updated level for device %s: %d", deviceID, int(floatVal))
 		}
 	}
 
@@ -252,9 +378,20 @@ func (s *Service) updateDeviceState(nodeID int, commandClass int, property strin
 
 // checkIncident evaluates if a value update should trigger an incident
 func (s *Service) checkIncident(nodeID int, commandClass int, property string, value interface{}, args map[string]interface{}) {
-	// Low battery detection
+	// Low battery detection - only for battery-powered devices
 	if commandClass == CC_BATTERY && property == "level" {
-		if level, ok := value.(float64); ok && level < 20 {
+		deviceID := fmt.Sprintf("zwave-%d", nodeID)
+		device, _ := s.deviceRepo.Get(s.ctx, deviceID)
+
+		// Check if device is battery-powered (not listening)
+		isListening := false
+		if device != nil && device.RawData != nil {
+			if listening, ok := device.RawData["is_listening"].(bool); ok {
+				isListening = listening
+			}
+		}
+
+		if level, ok := value.(float64); ok && level < 20 && level > 0 && !isListening {
 			s.createIncident(nodeID, "Low Battery", fmt.Sprintf("Battery level is %d%%", int(level)), model.SeverityLow, map[string]any{
 				"battery_level": level,
 			})

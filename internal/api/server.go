@@ -9,8 +9,6 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"strconv"
-	"strings"
 	"sync"
 	"time"
 
@@ -35,6 +33,7 @@ type Server struct {
 	incidentService         incidents.IncidentService
 	deviceRepo              db.DeviceRepository
 	sensorRepo              db.SensorRepository
+	sensorReadingRepo       db.SensorReadingRepository
 	zoneRepo                db.ZoneRepository
 	knowledgeBaseRepo       db.KnowledgeBaseRepository
 	homeProfileRepo         db.HomeProfileRepository
@@ -66,6 +65,7 @@ func NewServer(
 	incidentService incidents.IncidentService,
 	deviceRepo db.DeviceRepository,
 	sensorRepo db.SensorRepository,
+	sensorReadingRepo db.SensorReadingRepository,
 	zoneRepo db.ZoneRepository,
 	knowledgeBaseRepo db.KnowledgeBaseRepository,
 	homeProfileRepo db.HomeProfileRepository,
@@ -80,6 +80,7 @@ func NewServer(
 		incidentService:         incidentService,
 		deviceRepo:              deviceRepo,
 		sensorRepo:              sensorRepo,
+		sensorReadingRepo:       sensorReadingRepo,
 		zoneRepo:                zoneRepo,
 		knowledgeBaseRepo:       knowledgeBaseRepo,
 		homeProfileRepo:         homeProfileRepo,
@@ -158,19 +159,30 @@ func (s *Server) setupRoutes() {
 
 		// Devices
 		r.Route("/devices", func(r chi.Router) {
+			// List all devices
 			r.Get("/", s.listDevices)
+			r.Post("/", s.createDevice) // Manual device creation (testing only - normally auto-discovered)
+
+			// Device with specific ID and sub-resources
 			r.Get("/{id}", s.getDevice)
-			r.Patch("/{id}", s.updateDevice) // Update device fields (alias, zone_id, etc.)
+			r.Patch("/{id}", s.updateDevice)
+			r.Delete("/{id}", s.deleteDevice)
 			r.Get("/{id}/sensors", s.listDeviceSensors)
 			r.Get("/{id}/sensors/{sensorID}", s.getDeviceSensor)
 			r.Get("/{id}/knowledge-base", s.getDeviceKnowledgeBase)
-			r.Get("/{id}/incidents", s.listDeviceIncidents)             // Get incidents for a specific device
-			r.Post("/{id}/command", s.handleDeviceCommand)              // Send command to device via MQTT
-			r.Post("/{id}/reingest-docs", s.handleReingestDeviceDocs)   // Re-trigger document discovery for a device
-			r.Post("/{id}/docs-status", s.handleUpdateDeviceDocsStatus) // Update device documentation status and generate KB articles (called by AI sidecar)
-			// Demo/Testing endpoints - In production, guard with admin authentication
-			r.Post("/", s.createDevice)       // Manual device creation (testing only - normally auto-discovered)
-			r.Delete("/{id}", s.deleteDevice) // Hard delete (testing/cleanup only)
+			r.Get("/{id}/incidents", s.listDeviceIncidents)
+			r.Post("/{id}/command", s.handleDeviceCommand) // legacy
+			r.Post("/{id}/reingest-docs", s.handleReingestDeviceDocs)
+			r.Post("/{id}/docs-status", s.handleUpdateDeviceDocsStatus)
+
+			// Entity control - using set-entity endpoint instead of nested path
+			r.Post("/{id}/set-entity", s.handleSetEntityValue)
+		})
+
+		// Sensor Readings (time-series data)
+		r.Route("/sensors", func(r chi.Router) {
+			r.Get("/{deviceId}/readings", s.handleGetSensorReadings)    // Query time-series readings
+			r.Post("/{deviceId}/readings", s.handleRecordSensorReading) // Record reading (testing/external integrations)
 		})
 
 		// Zones/Rooms
@@ -200,6 +212,13 @@ func (s *Server) setupRoutes() {
 		r.Route("/home", func(r chi.Router) {
 			r.Get("/profile", s.handleGetHomeProfile)
 			r.Put("/profile", s.handleUpdateHomeProfile)
+		})
+
+		// System Preferences & Configuration
+		r.Route("/system", func(r chi.Router) {
+			r.Get("/preferences", s.handleGetSystemPreferences)
+			r.Get("/timezone", s.handleGetTimezone)
+			r.Post("/timezone", s.handleSetTimezone)
 		})
 
 		// Metrics
@@ -243,18 +262,11 @@ func (s *Server) setupRoutes() {
 			r.Get("/model-health", s.hsilGetModelHealth)
 			r.Get("/device-health", s.hsilGetDeviceHealth)
 			r.Get("/weather", s.handleWeather)
+			r.Get("/climate-insights", s.hsilGetClimateInsights)
 		})
 
-		// Weather (also available at /api/weather for convenience)
 		r.Get("/weather", s.handleWeather)
 
-		// System configuration
-		r.Route("/system", func(r chi.Router) {
-			r.Get("/timezone", s.handleGetTimezone)
-			r.Post("/timezone", s.handleSetTimezone)
-		})
-
-		// Events
 		r.Get("/events", s.handleEvents)
 	})
 }
@@ -490,23 +502,23 @@ func (s *Server) updateIncidentAnalysis(w http.ResponseWriter, r *http.Request) 
 func (s *Server) enrichDeviceWithState(ctx context.Context, device model.Device) map[string]interface{} {
 	// Compute display name (alias if set, otherwise original name)
 	displayName := device.Name
-	if device.Alias != "" {
-		displayName = device.Alias
+	if device.DisplayName() != "" {
+		displayName = device.DisplayName()
 	}
 
 	// Start with all original device fields
 	enriched := map[string]interface{}{
 		"id":           device.ID,
 		"name":         device.Name,
-		"alias":        device.Alias,
 		"display_name": displayName,
 		"type":         device.Type,
 		"integration":  device.Integration,
+		"manufacturer": device.Manufacturer,
+		"model":        device.Model,
 		"zone_id":      device.ZoneID,
 		"asset_id":     device.AssetID,
 		"enabled":      device.Enabled,
 		"last_seen":    device.LastSeen,
-		"metadata":     device.Metadata,
 		"created_at":   device.CreatedAt,
 		"updated_at":   device.UpdatedAt,
 		// Add enrichment fields
@@ -515,6 +527,30 @@ func (s *Server) enrichDeviceWithState(ctx context.Context, device model.Device)
 		"value":  nil,
 		"unit":   "",
 		"trend":  nil,
+	}
+
+	// Include unified contract fields
+	if device.Readings != nil {
+		enriched["readings"] = device.Readings
+	}
+	if device.Controls != nil {
+		enriched["controls"] = device.Controls
+		// Determine controllable flag from controls
+		enriched["controllable"] = true
+	}
+	if device.Battery != nil {
+		enriched["battery"] = device.Battery
+		enriched["battery_level"] = device.Battery.Level
+		enriched["battery_low"] = device.Battery.IsLow
+	}
+	if device.Connectivity != nil {
+		enriched["connectivity"] = device.Connectivity
+	}
+	if len(device.Entities) > 0 {
+		enriched["entities"] = device.Entities
+	}
+	if device.RawData != nil {
+		enriched["raw_data"] = device.RawData
 	}
 
 	// Compute docs_status from KB table (source of truth) instead of device fields
@@ -530,56 +566,6 @@ func (s *Server) enrichDeviceWithState(ctx context.Context, device model.Device)
 		enriched["docs_status"] = "" // Empty = not yet ingested
 	}
 
-	// Extract battery level and sensor readings from metadata
-	if device.Metadata != nil {
-		// Battery level
-		if batteryStr, ok := device.Metadata["battery_level"]; ok {
-			if battery, err := strconv.Atoi(batteryStr); err == nil {
-				enriched["battery_level"] = battery
-				enriched["battery_low"] = battery < 20
-			}
-		}
-
-		// Extract sensor readings from metadata
-		// Z-Wave stores as: value_<property> (e.g., value_temperature, value_humidity)
-		// MQTT stores as: state_<key> (e.g., state_temperature, state_leak)
-		readings := make(map[string]interface{})
-
-		for key, val := range device.Metadata {
-			// Handle Z-Wave value_ prefix
-			if strings.HasPrefix(key, "value_") {
-				readingKey := strings.TrimPrefix(key, "value_")
-				// Skip internal properties
-				if readingKey == "level" || readingKey == "idle" {
-					continue
-				}
-				readings[readingKey] = parseReadingValue(val)
-			}
-			// Handle MQTT state_ prefix
-			if strings.HasPrefix(key, "state_") {
-				readingKey := strings.TrimPrefix(key, "state_")
-				readings[readingKey] = parseReadingValue(val)
-			}
-			// Handle MQTT attr_ prefix
-			if strings.HasPrefix(key, "attr_") {
-				readingKey := strings.TrimPrefix(key, "attr_")
-				readings[readingKey] = parseReadingValue(val)
-			}
-		}
-
-		// Also check for common direct metadata keys
-		commonReadings := []string{"temperature", "humidity", "leak", "motion", "contact", "tamper", "power", "energy", "brightness", "on"}
-		for _, key := range commonReadings {
-			if val, ok := device.Metadata[key]; ok {
-				readings[key] = parseReadingValue(val)
-			}
-		}
-
-		if len(readings) > 0 {
-			enriched["readings"] = readings
-		}
-	}
-
 	// Get latest sensor values from sensor repository (if any)
 	sensors, err := s.sensorRepo.ListByDevice(ctx, device.ID)
 	if err == nil && len(sensors) > 0 {
@@ -593,8 +579,6 @@ func (s *Server) enrichDeviceWithState(ctx context.Context, device model.Device)
 		if err == nil && len(metrics) > 0 {
 			// Get most recent metric
 			metric := metrics[len(metrics)-1]
-			enriched["value"] = metric.Value
-			enriched["unit"] = sensor.Unit
 			enriched["last_updated"] = metric.Timestamp
 		}
 	}
@@ -632,24 +616,6 @@ func (s *Server) enrichDeviceWithState(ctx context.Context, device model.Device)
 	}
 
 	return enriched
-}
-
-// parseReadingValue attempts to parse a string value into an appropriate type
-func parseReadingValue(val string) interface{} {
-	// Try parsing as float
-	if f, err := strconv.ParseFloat(val, 64); err == nil {
-		// Round to 1 decimal place for display
-		return float64(int(f*10)) / 10
-	}
-	// Try parsing as bool
-	if val == "true" {
-		return true
-	}
-	if val == "false" {
-		return false
-	}
-	// Return as string
-	return val
 }
 
 // enrichEventData enriches device events with battery_level, readings, etc.
@@ -977,16 +943,12 @@ func (s *Server) generateDeviceKnowledgeBase(w http.ResponseWriter, r *http.Requ
 
 	// Build device info for AI queries
 	deviceInfo := fmt.Sprintf("%s (%s) - %s device", device.Name, device.Type, device.Integration)
-	manufacturer := ""
-	modelName := ""
-	if device.Metadata != nil {
-		if mfg, ok := device.Metadata["manufacturer"]; ok {
-			manufacturer = mfg
-			if m, ok := device.Metadata["model"]; ok {
-				modelName = m
-				deviceInfo = fmt.Sprintf("%s - %s %s", device.Name, mfg, m)
-			}
-		}
+	manufacturer := device.Manufacturer
+	modelName := device.Model
+
+	// Update device info with manufacturer and model if available
+	if manufacturer != "" && modelName != "" {
+		deviceInfo = fmt.Sprintf("%s - %s %s", device.Name, manufacturer, modelName)
 	}
 
 	// Create a timeout context for AI call (45s to allow for OpenAI latency)
@@ -1263,39 +1225,6 @@ func (s *Server) deleteIncident(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.WriteHeader(http.StatusNoContent)
-}
-
-// getValueWithContext receives a value from a channel with a reasonable timeout
-func getValueWithContext(ctx context.Context, ch <-chan string, defaultValue string) string {
-	// Use a generous 60-second timeout to account for OpenAI API latency
-	// This is used for background knowledge base generation where we're not blocking HTTP requests
-	timer := time.NewTimer(60 * time.Second)
-	defer timer.Stop()
-
-	select {
-	case value, ok := <-ch:
-		if ok && value != "" {
-			return value
-		}
-		return defaultValue
-	case <-timer.C:
-		// Timeout - return default
-		return defaultValue
-	}
-}
-
-// getValue receives a value from a channel with a timeout fallback
-func getValue(ch <-chan string, defaultValue string) string {
-	select {
-	case value, ok := <-ch:
-		if ok && value != "" {
-			return value
-		}
-		return defaultValue
-	case <-time.After(12 * time.Second):
-		// Wait up to 12 seconds for AI sidecar response (15s context timeout - 3s buffer)
-		return defaultValue
-	}
 }
 
 // notifyAIIncidentCreated sends an incident creation event to the AI sidecar for background analysis

@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	mqtt "github.com/eclipse/paho.mqtt.golang"
@@ -19,15 +20,24 @@ import (
 	"github.com/homesight/homesight/internal/model"
 )
 
+// WeatherCache holds cached outdoor temperature data
+type WeatherCache struct {
+	Temperature float64
+	UpdatedAt   time.Time
+}
+
 // Consumer processes MQTT messages from integrations and updates the device registry
 type Consumer struct {
-	ctx          context.Context
-	cancel       context.CancelFunc
-	client       mqtt.Client
-	deviceRepo   db.DeviceRepository
-	eventBus     events.EventBus
-	incidentSvc  incidents.IncidentService
-	alarmManager *alarms.Manager
+	ctx            context.Context
+	cancel         context.CancelFunc
+	client         mqtt.Client
+	deviceRepo     db.DeviceRepository
+	readingRepo    db.SensorReadingRepository
+	eventBus       events.EventBus
+	incidentSvc    incidents.IncidentService
+	alarmManager   *alarms.Manager
+	weatherCache   *WeatherCache
+	weatherCacheMu sync.RWMutex
 }
 
 // NewConsumer creates a new MQTT consumer
@@ -35,6 +45,7 @@ func NewConsumer(
 	brokerURL string,
 	clientID string,
 	deviceRepo db.DeviceRepository,
+	readingRepo db.SensorReadingRepository,
 	eventBus events.EventBus,
 	incidentSvc incidents.IncidentService,
 ) (*Consumer, error) {
@@ -54,10 +65,15 @@ func NewConsumer(
 		cancel:       cancel,
 		client:       client,
 		deviceRepo:   deviceRepo,
+		readingRepo:  readingRepo,
 		eventBus:     eventBus,
 		incidentSvc:  incidentSvc,
 		alarmManager: alarms.NewManager(incidentSvc),
+		weatherCache: &WeatherCache{},
 	}
+
+	// Start background weather fetcher
+	go c.fetchWeatherPeriodically()
 
 	return c, nil
 }
@@ -85,11 +101,13 @@ func (c *Consumer) Start() error {
 
 	// Subscribe to integration topics
 	subscriptions := map[string]byte{
-		"homesight/+/+/discovery": 0,
-		"homesight/+/+/metadata":  0,
-		"homesight/+/+/state":     0,
-		"homesight/+/+/removed":   0,
-		"homesight/incidents/#":   0,
+		"homesight/+/+/discovery":    0,
+		"homesight/+/+/metadata":     0,
+		"homesight/+/+/state":        0,
+		"homesight/+/+/removed":      0,
+		"homesight/incidents/#":      0,
+		"homesight/entity/updated/#": 0, // Entity value updates
+		"homesight/entity/result/#":  0, // Entity set command results
 	}
 
 	for topic, qos := range subscriptions {
@@ -173,9 +191,33 @@ func (c *Consumer) handleMessage(client mqtt.Client, msg mqtt.Message) {
 		return
 	}
 
+	// Handle entity messages (homesight/entity/<type>/<deviceId>)
+	if parts[1] == "entity" {
+		if len(parts) < 4 {
+			log.Printf("[MQTT-CONSUMER] Invalid entity topic format: %s", topic)
+			return
+		}
+		entityMsgType := parts[2] // "updated" or "result"
+		deviceID := parts[3]
+		c.handleEntityMessage(entityMsgType, deviceID, payload)
+		return
+	}
+
 	integration := parts[1]
-	deviceID := parts[2]
+	nodeOrDeviceID := parts[2] // Could be just nodeID (e.g., "42") or full deviceID (e.g., "zwave-42")
 	messageType := parts[3]
+
+	// Construct full device ID if needed (some integrations use just nodeID in topics)
+	deviceID := nodeOrDeviceID
+	if integration == "zwave" {
+		// Z-Wave topics use node ID, so construct full device ID
+		deviceID = fmt.Sprintf("zwave-%s", nodeOrDeviceID)
+	}
+
+	// Debug logging for state messages
+	if messageType == "state" {
+		log.Printf("[MQTT-CONSUMER] State message received: topic=%s, deviceID=%s, integration=%s", topic, deviceID, integration)
+	}
 
 	switch messageType {
 	case "discovery":
@@ -229,18 +271,36 @@ func (c *Consumer) handleDiscovery(integration, deviceID string, payload []byte)
 
 	// Convert to model.Device
 	device := &model.Device{
-		ID:          msg.DeviceID,
-		Name:        msg.Name,
-		Type:        inferDeviceType(msg.Capabilities),
-		Integration: msg.Integration,
-		Enabled:     true,
-		LastSeen:    time.Now(),
-		Metadata:    make(map[string]string),
-		CreatedAt:   time.Now(),
-		UpdatedAt:   time.Now(),
+		ID:           msg.DeviceID,
+		Name:         msg.Name,
+		Type:         inferDeviceType(msg.Capabilities),
+		Integration:  msg.Integration,
+		Manufacturer: msg.Manufacturer,
+		Model:        msg.Model,
+		Enabled:      true,
+		LastSeen:     time.Now(),
+		CreatedAt:    time.Now(),
+		UpdatedAt:    time.Now(),
+		// Unified contract fields from discovery (e.g., Z-Wave mapper)
+		Readings:     msg.Readings,
+		Controls:     msg.Controls,
+		Battery:      msg.Battery,
+		Connectivity: msg.Connectivity,
+		Entities:     msg.Entities, // Entity-based model
 	}
 
-	// Preserve existing device state (zone_id, asset_id, metadata, docs status, etc.)
+	// Store raw MQTT discovery data
+	if device.RawData == nil {
+		device.RawData = make(map[string]interface{})
+	}
+	if msg.HwID != "" {
+		device.RawData["hw_id"] = msg.HwID
+	}
+	if len(msg.Capabilities) > 0 {
+		device.RawData["capabilities"] = msg.Capabilities
+	}
+
+	// Preserve existing device state (zone_id, asset_id, unified contract fields, docs status, etc.)
 	if existingDevice != nil {
 		// Preserve zone and asset assignments (user-defined)
 		device.ZoneID = existingDevice.ZoneID
@@ -253,10 +313,27 @@ func (c *Consumer) handleDiscovery(integration, deviceID string, payload []byte)
 		device.DocsIngested = existingDevice.DocsIngested
 		device.DocsIngestedAt = existingDevice.DocsIngestedAt
 		device.DocsStatus = existingDevice.DocsStatus
-		// Preserve existing metadata (e.g., battery_level, firmware_version from Z-Wave integration)
-		if existingDevice.Metadata != nil {
-			for k, v := range existingDevice.Metadata {
-				device.Metadata[k] = v
+		// Preserve unified contract fields ONLY if they have data
+		// Don't preserve null values - let integrations provide fresh data
+		if existingDevice.Readings != nil {
+			device.Readings = existingDevice.Readings
+		}
+		if existingDevice.Controls != nil {
+			device.Controls = existingDevice.Controls
+		}
+		if existingDevice.Battery != nil {
+			device.Battery = existingDevice.Battery
+		}
+		if existingDevice.Connectivity != nil {
+			device.Connectivity = existingDevice.Connectivity
+		}
+		// Preserve raw data from other integrations
+		if existingDevice.RawData != nil {
+			for k, v := range existingDevice.RawData {
+				// Don't overwrite new values
+				if _, exists := device.RawData[k]; !exists {
+					device.RawData[k] = v
+				}
 			}
 		}
 		log.Printf("[MQTT-CONSUMER] After preservation: alias=%q, zone=%s", device.Alias, device.ZoneID)
@@ -264,21 +341,6 @@ func (c *Consumer) handleDiscovery(integration, deviceID string, payload []byte)
 
 	if device.Name == "" {
 		device.Name = msg.DeviceID
-	}
-
-	// Update metadata from discovery message (overwrite with new values if present)
-	if msg.Manufacturer != "" {
-		device.Metadata["manufacturer"] = msg.Manufacturer
-	}
-	if msg.Model != "" {
-		device.Metadata["model"] = msg.Model
-	}
-	if msg.HwID != "" {
-		device.Metadata["hw_id"] = msg.HwID
-	}
-	if len(msg.Capabilities) > 0 {
-		capsJSON, _ := json.Marshal(msg.Capabilities)
-		device.Metadata["capabilities"] = string(capsJSON)
 	}
 
 	// Upsert to database
@@ -336,12 +398,14 @@ func (c *Consumer) handleMetadata(deviceID string, payload []byte) {
 	if msg.Enabled != nil {
 		device.Enabled = *msg.Enabled
 	}
+
+	// Store any metadata in RawData for backward compatibility with MQTT messages
 	if msg.Metadata != nil {
-		if device.Metadata == nil {
-			device.Metadata = make(map[string]string)
+		if device.RawData == nil {
+			device.RawData = make(map[string]interface{})
 		}
 		for k, v := range msg.Metadata {
-			device.Metadata[k] = v
+			device.RawData[k] = v
 		}
 	}
 
@@ -365,16 +429,60 @@ func (c *Consumer) handleState(deviceID string, payload []byte) {
 
 	// Update device last seen
 	device, err := c.deviceRepo.Get(c.ctx, deviceID)
+	if err != nil {
+		log.Printf("[MQTT-CONSUMER] Failed to get device %s for state update: %v", deviceID, err)
+		return
+	}
+	if device == nil {
+		log.Printf("[MQTT-CONSUMER] Device %s not found for state update", deviceID)
+		return
+	}
 	if err == nil && device != nil {
 		device.LastSeen = time.Now()
 		device.UpdatedAt = time.Now()
 
-		// Store state values in metadata
-		if device.Metadata == nil {
-			device.Metadata = make(map[string]string)
+		// Store state values in RawData
+		if device.RawData == nil {
+			device.RawData = make(map[string]interface{})
 		}
 		for k, v := range msg.Values {
-			device.Metadata[fmt.Sprintf("state_%s", k)] = fmt.Sprintf("%v", v)
+			device.RawData[fmt.Sprintf("state_%s", k)] = v
+		}
+
+		// Update unified Controls based on state changes
+		for k, v := range msg.Values {
+			normalizedKey := strings.ToLower(k)
+			log.Printf("[MQTT-CONSUMER] Processing state key for %s: %s (normalized: %s) = %v (type: %T)", deviceID, k, normalizedKey, v, v)
+
+			// Switch control updates (binary switch)
+			if normalizedKey == "switch_state" || normalizedKey == "currentvalue" || normalizedKey == "targetvalue" {
+				if boolVal, ok := v.(bool); ok {
+					if device.Controls == nil {
+						device.Controls = &model.DeviceControls{}
+					}
+					if device.Controls.Switch == nil {
+						device.Controls.Switch = &model.SwitchControl{Settable: true}
+					}
+					device.Controls.Switch.Value = boolVal
+					log.Printf("[MQTT-CONSUMER] ✓ Updated switch control for %s: %v", deviceID, boolVal)
+				} else {
+					log.Printf("[MQTT-CONSUMER] ✗ Could not convert %s value %v to bool (type: %T)", k, v, v)
+				}
+			}
+
+			// Level control updates (dimmer/multilevel switch)
+			if normalizedKey == "level" {
+				if floatVal, ok := v.(float64); ok {
+					if device.Controls == nil {
+						device.Controls = &model.DeviceControls{}
+					}
+					if device.Controls.Level == nil {
+						device.Controls.Level = &model.LevelControl{Settable: true, Min: 0, Max: 100}
+					}
+					device.Controls.Level.Value = int(floatVal)
+					log.Printf("[MQTT-CONSUMER] Updated level control for %s: %d", deviceID, int(floatVal))
+				}
+			}
 		}
 
 		c.deviceRepo.Upsert(c.ctx, device)
@@ -383,12 +491,26 @@ func (c *Consumer) handleState(deviceID string, payload []byte) {
 	// Publish device events for each value
 	for key, value := range msg.Values {
 		valueType := "string"
-		switch value.(type) {
-		case float64, float32:
+		var floatValue float64
+		switch v := value.(type) {
+		case float64:
 			valueType = "float"
-		case int, int32, int64:
+			floatValue = v
+		case float32:
 			valueType = "float"
-			value = float64(value.(int))
+			floatValue = float64(v)
+		case int:
+			valueType = "float"
+			floatValue = float64(v)
+			value = floatValue
+		case int32:
+			valueType = "float"
+			floatValue = float64(v)
+			value = floatValue
+		case int64:
+			valueType = "float"
+			floatValue = float64(v)
+			value = floatValue
 		case bool:
 			valueType = "bool"
 		}
@@ -405,6 +527,17 @@ func (c *Consumer) handleState(deviceID string, payload []byte) {
 			},
 		}
 		c.eventBus.Publish(event)
+
+		// Persist temperature and humidity readings to database for thermal analysis
+		if valueType == "float" {
+			normalizedKey := strings.ToLower(key)
+			// Store temperature_f directly (integrations should send standardized Fahrenheit)
+			if strings.Contains(normalizedKey, "temperature") {
+				c.persistSensorReading(deviceID, "temperature", floatValue)
+			} else if strings.Contains(normalizedKey, "humidity") {
+				c.persistSensorReading(deviceID, "humidity", floatValue)
+			}
+		}
 
 		// Forward to HSIL for continuous ML learning
 		location := "unknown"
@@ -436,13 +569,13 @@ func (c *Consumer) handleAttribute(deviceID, attrName string, payload []byte) {
 
 	log.Printf("[MQTT-CONSUMER] Attribute update: %s/%s = %v", deviceID, attrName, msg.Value)
 
-	// Update device metadata
+	// Update device raw data
 	device, err := c.deviceRepo.Get(c.ctx, deviceID)
 	if err == nil && device != nil {
-		if device.Metadata == nil {
-			device.Metadata = make(map[string]string)
+		if device.RawData == nil {
+			device.RawData = make(map[string]interface{})
 		}
-		device.Metadata[fmt.Sprintf("attr_%s", attrName)] = fmt.Sprintf("%v", msg.Value)
+		device.RawData[fmt.Sprintf("attr_%s", attrName)] = msg.Value
 		device.LastSeen = time.Now()
 		device.UpdatedAt = time.Now()
 		c.deviceRepo.Upsert(c.ctx, device)
@@ -450,9 +583,14 @@ func (c *Consumer) handleAttribute(deviceID, attrName string, payload []byte) {
 
 	// Publish event
 	valueType := "string"
-	switch msg.Value.(type) {
-	case float64, float32:
+	var floatValue float64
+	switch v := msg.Value.(type) {
+	case float64:
 		valueType = "float"
+		floatValue = v
+	case float32:
+		valueType = "float"
+		floatValue = float64(v)
 	case bool:
 		valueType = "bool"
 	}
@@ -471,6 +609,17 @@ func (c *Consumer) handleAttribute(deviceID, attrName string, payload []byte) {
 	}
 	c.eventBus.Publish(event)
 
+	// Persist temperature and humidity readings to database for thermal analysis
+	if valueType == "float" {
+		normalizedAttr := strings.ToLower(attrName)
+		if strings.Contains(normalizedAttr, "temperature") || normalizedAttr == "air temperature" {
+			// Store raw sensor value - conversion to user preference happens at query time
+			c.persistSensorReading(deviceID, "temperature", floatValue)
+		} else if strings.Contains(normalizedAttr, "humidity") {
+			c.persistSensorReading(deviceID, "humidity", floatValue)
+		}
+	}
+
 	// Forward to HSIL for continuous ML learning
 	location := "unknown"
 	deviceType := "sensor"
@@ -486,6 +635,51 @@ func (c *Consumer) handleAttribute(deviceID, attrName string, payload []byte) {
 }
 
 // handleRemoved processes device removal messages
+// handleEntityMessage processes entity update and result messages
+func (c *Consumer) handleEntityMessage(msgType string, deviceID string, payload []byte) {
+	var msg map[string]interface{}
+	if err := json.Unmarshal(payload, &msg); err != nil {
+		log.Printf("[MQTT-CONSUMER] Failed to parse entity message: %v", err)
+		return
+	}
+
+	entityID, _ := msg["entity_id"].(string)
+	value := msg["value"]
+	timestamp, _ := msg["ts"].(string)
+
+	log.Printf("[MQTT-CONSUMER] Entity %s: deviceID=%s entityID=%s value=%v", msgType, deviceID, entityID, value)
+
+	// Create event for SSE
+	event := model.DeviceEvent{
+		DeviceID:  deviceID,
+		SensorID:  entityID,
+		Timestamp: time.Now(),
+		ValueType: msgType, // "updated" or "result"
+		Value:     value,
+		Metadata: map[string]string{
+			"entity_id": entityID,
+			"timestamp": timestamp,
+		},
+	}
+
+	// Add success/error info for result messages
+	if msgType == "result" {
+		if success, ok := msg["success"].(bool); ok {
+			if success {
+				event.Metadata["status"] = "success"
+			} else {
+				event.Metadata["status"] = "failed"
+			}
+		}
+		if errorMsg, ok := msg["error"].(string); ok {
+			event.Metadata["error"] = errorMsg
+		}
+	}
+
+	// Publish to SSE event bus
+	c.eventBus.Publish(event)
+}
+
 func (c *Consumer) handleRemoved(deviceID string, payload []byte) {
 	var msg RemovedMessage
 	if err := json.Unmarshal(payload, &msg); err != nil {
@@ -507,10 +701,10 @@ func (c *Consumer) handleRemoved(deviceID string, payload []byte) {
 
 	device.Enabled = false
 	device.UpdatedAt = time.Now()
-	if device.Metadata == nil {
-		device.Metadata = make(map[string]string)
+	if device.RawData == nil {
+		device.RawData = make(map[string]interface{})
 	}
-	device.Metadata["removal_reason"] = msg.Reason
+	device.RawData["removal_reason"] = msg.Reason
 
 	if err := c.deviceRepo.Upsert(c.ctx, device); err != nil {
 		log.Printf("[MQTT-CONSUMER] Failed to mark device as removed: %v", err)
@@ -542,6 +736,18 @@ func (c *Consumer) handleIncidentMessage(parts []string, payload []byte) {
 
 	// Get device info for zone/asset context
 	device, _ := c.deviceRepo.Get(c.ctx, msg.DeviceID)
+
+	// Skip battery incidents for AC-powered devices with backup batteries
+	if msg.IncidentType == "battery" && device != nil && device.Entities != nil {
+		for _, entity := range device.Entities {
+			if entity.Name == "backup" {
+				if backup, ok := entity.Value.(bool); ok && backup {
+					log.Printf("[MQTT-CONSUMER] Skipping battery incident for %s - device uses backup battery (AC-powered)", msg.DeviceID)
+					return
+				}
+			}
+		}
+	}
 
 	incident := &model.Incident{
 		ID:          msg.IncidentID,
@@ -601,4 +807,82 @@ func inferDeviceType(capabilities []string) string {
 		}
 	}
 	return "sensor"
+}
+
+// fetchWeatherPeriodically fetches outdoor temperature every 5 minutes
+func (c *Consumer) fetchWeatherPeriodically() {
+	ticker := time.NewTicker(5 * time.Minute)
+	defer ticker.Stop()
+
+	// Fetch immediately on startup
+	c.updateWeatherCache()
+
+	for {
+		select {
+		case <-c.ctx.Done():
+			return
+		case <-ticker.C:
+			c.updateWeatherCache()
+		}
+	}
+}
+
+// updateWeatherCache fetches current weather from AI sidecar
+func (c *Consumer) updateWeatherCache() {
+	aiURL := os.Getenv("AI_SERVICE_URL")
+	if aiURL == "" {
+		aiURL = "http://ai-sidecar:8001"
+	}
+
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Get(aiURL + "/weather")
+	if err != nil {
+		log.Printf("[MQTT-CONSUMER] Failed to fetch weather: %v", err)
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return
+	}
+
+	var weather struct {
+		Temperature float64 `json:"temperature"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&weather); err != nil {
+		return
+	}
+
+	c.weatherCacheMu.Lock()
+	c.weatherCache.Temperature = weather.Temperature
+	c.weatherCache.UpdatedAt = time.Now()
+	c.weatherCacheMu.Unlock()
+}
+
+// getOutdoorTemp returns the cached outdoor temperature
+func (c *Consumer) getOutdoorTemp() *float64 {
+	c.weatherCacheMu.RLock()
+	defer c.weatherCacheMu.RUnlock()
+
+	// Return nil if cache is stale (> 15 minutes old)
+	if time.Since(c.weatherCache.UpdatedAt) > 15*time.Minute {
+		return nil
+	}
+
+	temp := c.weatherCache.Temperature
+	return &temp
+}
+
+// persistSensorReading stores temperature/humidity readings in the database
+func (c *Consumer) persistSensorReading(deviceID, readingType string, value float64) {
+	if c.readingRepo == nil {
+		return
+	}
+
+	outdoorTemp := c.getOutdoorTemp()
+
+	if err := c.readingRepo.Insert(c.ctx, deviceID, readingType, value, outdoorTemp); err != nil {
+		log.Printf("[MQTT-CONSUMER] Failed to persist sensor reading for %s/%s: %v", deviceID, readingType, err)
+	}
 }

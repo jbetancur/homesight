@@ -20,12 +20,13 @@ type HomeProfile struct {
 	Insulation     string `json:"insulation,omitempty"`      // poor, average, good, excellent
 
 	// HVAC Systems
-	HVACType        string `json:"hvac_type,omitempty"` // central, mini-split, radiant, heat-pump, geothermal
-	HVACAge         int    `json:"hvac_age,omitempty"`  // years
-	HasAC           bool   `json:"has_ac,omitempty"`
-	ACType          string `json:"ac_type,omitempty"`         // central, window, mini-split
-	HeatingType     string `json:"heating_type,omitempty"`    // gas, electric, oil, heat-pump, wood
-	ThermostatType  string `json:"thermostat_type,omitempty"` // manual, programmable, smart
+	HVACType           string `json:"hvac_type,omitempty"`            // central, mini-split, radiant, heat-pump, geothermal
+	HVACAge            int    `json:"hvac_age,omitempty"`             // years
+	HasAC              bool   `json:"has_ac,omitempty"`
+	ACType             string `json:"ac_type,omitempty"`              // central, window, mini-split
+	HeatingType        string `json:"heating_type,omitempty"`         // gas, electric, oil, heat-pump, wood, propane
+	HeatingSystemType  string `json:"heating_system_type,omitempty"`  // forced-air, steam, hot-water, radiant-floor, baseboard, heat-pump
+	ThermostatType     string `json:"thermostat_type,omitempty"`      // manual, programmable, smart
 	HasHumidifier   bool   `json:"has_humidifier,omitempty"`
 	HasDehumidifier bool   `json:"has_dehumidifier,omitempty"`
 	HasAirPurifier  bool   `json:"has_air_purifier,omitempty"`

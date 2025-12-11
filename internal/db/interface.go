@@ -102,6 +102,13 @@ type KnowledgeBase struct {
 	UpdatedAt    time.Time
 }
 
+// SensorReadingRepository manages time-series sensor readings
+type SensorReadingRepository interface {
+	Insert(ctx context.Context, deviceID, readingType string, value float64, outdoorTemp *float64) error
+	Query(ctx context.Context, deviceID, readingType string, since time.Time, limit int) ([]SensorReading, error)
+	CleanupOld(ctx context.Context, olderThan time.Duration) (int64, error)
+}
+
 // KnowledgeBaseRepository manages knowledge base persistence
 type KnowledgeBaseRepository interface {
 	GetByDevice(ctx context.Context, deviceID string) (*KnowledgeBase, error)

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log"
 	"strings"
 	"time"
 
@@ -83,11 +84,18 @@ func (s *SQLiteDB) initSchema() error {
 			alias TEXT,
 			type TEXT,
 			integration TEXT,
+			manufacturer TEXT,
+			model TEXT,
 			zone_id TEXT,
 			asset_id TEXT,
 			enabled BOOLEAN DEFAULT 1,
 			last_seen DATETIME,
-			metadata TEXT,
+			readings TEXT,
+			controls TEXT,
+			battery TEXT,
+			connectivity TEXT,
+			entities TEXT,
+			raw_data TEXT,
 			docs_ingested BOOLEAN DEFAULT 0,
 			docs_ingested_at DATETIME,
 			docs_status TEXT DEFAULT 'pending',
@@ -165,6 +173,19 @@ func (s *SQLiteDB) initSchema() error {
 			FOREIGN KEY (device_id) REFERENCES devices(id)
 		);
 
+		CREATE TABLE IF NOT EXISTS sensor_readings (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			device_id TEXT NOT NULL,
+			reading_type TEXT NOT NULL,
+			value REAL NOT NULL,
+			unit TEXT DEFAULT 'celsius',
+			outdoor_temp REAL,
+			timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+			FOREIGN KEY (device_id) REFERENCES devices(id)
+		);
+		CREATE INDEX IF NOT EXISTS idx_readings_device_time ON sensor_readings(device_id, timestamp DESC);
+		CREATE INDEX IF NOT EXISTS idx_readings_type_time ON sensor_readings(reading_type, timestamp DESC);
+
 		CREATE TABLE IF NOT EXISTS home_profiles (
 			id TEXT PRIMARY KEY,
 			home_id TEXT NOT NULL UNIQUE,
@@ -182,6 +203,7 @@ func (s *SQLiteDB) initSchema() error {
 			has_ac BOOLEAN,
 			ac_type TEXT,
 			heating_type TEXT,
+			heating_system_type TEXT,
 			thermostat_type TEXT,
 			has_humidifier BOOLEAN,
 			has_dehumidifier BOOLEAN,
@@ -266,6 +288,52 @@ func (s *SQLiteDB) runMigrations() error {
 		// Ignore error if column already exists
 	}
 
+	// Migration: Add heating_system_type column to home_profiles if it doesn't exist
+	_, err = s.db.Exec(`ALTER TABLE home_profiles ADD COLUMN heating_system_type TEXT`)
+	if err != nil {
+		// Ignore error if column already exists
+	}
+
+	// Migration: Add hidden column to zones if it doesn't exist
+	_, err = s.db.Exec(`ALTER TABLE zones ADD COLUMN hidden BOOLEAN DEFAULT 0`)
+	if err != nil {
+		// Ignore error if column already exists
+	}
+
+	// Migration: Add unified device contract columns
+	_, err = s.db.Exec(`ALTER TABLE devices ADD COLUMN manufacturer TEXT`)
+	if err != nil {
+		// Ignore error if column already exists
+	}
+	_, err = s.db.Exec(`ALTER TABLE devices ADD COLUMN model TEXT`)
+	if err != nil {
+		// Ignore error if column already exists
+	}
+	_, err = s.db.Exec(`ALTER TABLE devices ADD COLUMN readings TEXT`)
+	if err != nil {
+		// Ignore error if column already exists
+	}
+	_, err = s.db.Exec(`ALTER TABLE devices ADD COLUMN controls TEXT`)
+	if err != nil {
+		// Ignore error if column already exists
+	}
+	_, err = s.db.Exec(`ALTER TABLE devices ADD COLUMN battery TEXT`)
+	if err != nil {
+		// Ignore error if column already exists
+	}
+	_, err = s.db.Exec(`ALTER TABLE devices ADD COLUMN connectivity TEXT`)
+	if err != nil {
+		// Ignore error if column already exists
+	}
+	_, err = s.db.Exec(`ALTER TABLE devices ADD COLUMN entities TEXT`)
+	if err != nil {
+		// Ignore error if column already exists
+	}
+	_, err = s.db.Exec(`ALTER TABLE devices ADD COLUMN raw_data TEXT`)
+	if err != nil {
+		// Ignore error if column already exists
+	}
+
 	return nil
 }
 
@@ -286,15 +354,19 @@ func NewDeviceRepo(db *SQLiteDB) *DeviceRepo {
 
 func (r *DeviceRepo) Get(ctx context.Context, id string) (*model.Device, error) {
 	var d model.Device
-	var metadataJSON sql.NullString
+	var readingsJSON, controlsJSON, batteryJSON, connectivityJSON, entitiesJSON, rawDataJSON sql.NullString
 	var lastSeen sql.NullTime
 	var docsIngestedAt sql.NullTime
-	var alias sql.NullString
+	var alias, manufacturer, modelStr sql.NullString
 
 	err := r.db.QueryRowContext(ctx,
-		`SELECT id, name, alias, type, integration, zone_id, asset_id, enabled, last_seen, metadata, docs_ingested, docs_ingested_at, docs_status, created_at, updated_at
+		`SELECT id, name, alias, type, integration, manufacturer, model, zone_id, asset_id, enabled, last_seen,
+		        readings, controls, battery, connectivity, entities, raw_data,
+		        docs_ingested, docs_ingested_at, docs_status, created_at, updated_at
 		 FROM devices WHERE id = ?`, id).Scan(
-		&d.ID, &d.Name, &alias, &d.Type, &d.Integration, &d.ZoneID, &d.AssetID, &d.Enabled, &lastSeen, &metadataJSON, &d.DocsIngested, &docsIngestedAt, &d.DocsStatus, &d.CreatedAt, &d.UpdatedAt)
+		&d.ID, &d.Name, &alias, &d.Type, &d.Integration, &manufacturer, &modelStr, &d.ZoneID, &d.AssetID, &d.Enabled, &lastSeen,
+		&readingsJSON, &controlsJSON, &batteryJSON, &connectivityJSON, &entitiesJSON, &rawDataJSON,
+		&d.DocsIngested, &docsIngestedAt, &d.DocsStatus, &d.CreatedAt, &d.UpdatedAt)
 
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -309,11 +381,38 @@ func (r *DeviceRepo) Get(ctx context.Context, id string) (*model.Device, error) 
 	if docsIngestedAt.Valid {
 		d.DocsIngestedAt = &docsIngestedAt.Time
 	}
-	if metadataJSON.Valid {
-		json.Unmarshal([]byte(metadataJSON.String), &d.Metadata)
-	}
 	if alias.Valid {
 		d.Alias = alias.String
+	}
+	if manufacturer.Valid {
+		d.Manufacturer = manufacturer.String
+	}
+	if modelStr.Valid {
+		d.Model = modelStr.String
+	}
+	if readingsJSON.Valid && readingsJSON.String != "" {
+		json.Unmarshal([]byte(readingsJSON.String), &d.Readings)
+	}
+	if controlsJSON.Valid && controlsJSON.String != "" {
+		json.Unmarshal([]byte(controlsJSON.String), &d.Controls)
+	}
+	if batteryJSON.Valid && batteryJSON.String != "" {
+		json.Unmarshal([]byte(batteryJSON.String), &d.Battery)
+	}
+	if connectivityJSON.Valid && connectivityJSON.String != "" {
+		json.Unmarshal([]byte(connectivityJSON.String), &d.Connectivity)
+	}
+	if entitiesJSON.Valid && entitiesJSON.String != "" {
+		if err := json.Unmarshal([]byte(entitiesJSON.String), &d.Entities); err != nil {
+			log.Printf("[DB-Get] Failed to unmarshal entities for device %s: %v (JSON length: %d)", d.ID, err, len(entitiesJSON.String))
+		} else {
+			log.Printf("[DB-Get] Successfully unmarshaled %d entities for device %s", len(d.Entities), d.ID)
+		}
+	} else {
+		log.Printf("[DB-Get] No entities JSON for device %s (valid=%v, len=%d)", d.ID, entitiesJSON.Valid, len(entitiesJSON.String))
+	}
+	if rawDataJSON.Valid && rawDataJSON.String != "" {
+		json.Unmarshal([]byte(rawDataJSON.String), &d.RawData)
 	}
 
 	return &d, nil
@@ -321,7 +420,9 @@ func (r *DeviceRepo) Get(ctx context.Context, id string) (*model.Device, error) 
 
 func (r *DeviceRepo) List(ctx context.Context) ([]model.Device, error) {
 	rows, err := r.db.QueryContext(ctx,
-		`SELECT id, name, alias, type, integration, zone_id, asset_id, enabled, last_seen, metadata, docs_ingested, docs_ingested_at, docs_status, created_at, updated_at
+		`SELECT id, name, alias, type, integration, manufacturer, model, zone_id, asset_id, enabled, last_seen,
+		        readings, controls, battery, connectivity, entities, raw_data,
+		        docs_ingested, docs_ingested_at, docs_status, created_at, updated_at
 		 FROM devices ORDER BY COALESCE(alias, name)`)
 	if err != nil {
 		return nil, err
@@ -331,12 +432,14 @@ func (r *DeviceRepo) List(ctx context.Context) ([]model.Device, error) {
 	devices := make([]model.Device, 0)
 	for rows.Next() {
 		var d model.Device
-		var metadataJSON sql.NullString
+		var readingsJSON, controlsJSON, batteryJSON, connectivityJSON, entitiesJSON, rawDataJSON sql.NullString
 		var lastSeen sql.NullTime
 		var docsIngestedAt sql.NullTime
-		var alias sql.NullString
+		var alias, manufacturer, modelStr sql.NullString
 
-		if err := rows.Scan(&d.ID, &d.Name, &alias, &d.Type, &d.Integration, &d.ZoneID, &d.AssetID, &d.Enabled, &lastSeen, &metadataJSON, &d.DocsIngested, &docsIngestedAt, &d.DocsStatus, &d.CreatedAt, &d.UpdatedAt); err != nil {
+		if err := rows.Scan(&d.ID, &d.Name, &alias, &d.Type, &d.Integration, &manufacturer, &modelStr, &d.ZoneID, &d.AssetID, &d.Enabled, &lastSeen,
+			&readingsJSON, &controlsJSON, &batteryJSON, &connectivityJSON, &entitiesJSON, &rawDataJSON,
+			&d.DocsIngested, &docsIngestedAt, &d.DocsStatus, &d.CreatedAt, &d.UpdatedAt); err != nil {
 			return nil, err
 		}
 
@@ -346,11 +449,34 @@ func (r *DeviceRepo) List(ctx context.Context) ([]model.Device, error) {
 		if docsIngestedAt.Valid {
 			d.DocsIngestedAt = &docsIngestedAt.Time
 		}
-		if metadataJSON.Valid {
-			json.Unmarshal([]byte(metadataJSON.String), &d.Metadata)
-		}
 		if alias.Valid {
 			d.Alias = alias.String
+		}
+		if manufacturer.Valid {
+			d.Manufacturer = manufacturer.String
+		}
+		if modelStr.Valid {
+			d.Model = modelStr.String
+		}
+		if readingsJSON.Valid && readingsJSON.String != "" {
+			json.Unmarshal([]byte(readingsJSON.String), &d.Readings)
+		}
+		if controlsJSON.Valid && controlsJSON.String != "" {
+			json.Unmarshal([]byte(controlsJSON.String), &d.Controls)
+		}
+		if batteryJSON.Valid && batteryJSON.String != "" {
+			json.Unmarshal([]byte(batteryJSON.String), &d.Battery)
+		}
+		if connectivityJSON.Valid && connectivityJSON.String != "" {
+			json.Unmarshal([]byte(connectivityJSON.String), &d.Connectivity)
+		}
+		if entitiesJSON.Valid && entitiesJSON.String != "" {
+			if err := json.Unmarshal([]byte(entitiesJSON.String), &d.Entities); err != nil {
+				log.Printf("[DB-List] Failed to unmarshal entities for device %s: %v", d.ID, err)
+			}
+		}
+		if rawDataJSON.Valid && rawDataJSON.String != "" {
+			json.Unmarshal([]byte(rawDataJSON.String), &d.RawData)
 		}
 
 		devices = append(devices, d)
@@ -360,7 +486,12 @@ func (r *DeviceRepo) List(ctx context.Context) ([]model.Device, error) {
 }
 
 func (r *DeviceRepo) Upsert(ctx context.Context, device *model.Device) error {
-	metadataJSON, _ := json.Marshal(device.Metadata)
+	readingsJSON, _ := json.Marshal(device.Readings)
+	controlsJSON, _ := json.Marshal(device.Controls)
+	batteryJSON, _ := json.Marshal(device.Battery)
+	connectivityJSON, _ := json.Marshal(device.Connectivity)
+	entitiesJSON, _ := json.Marshal(device.Entities)
+	rawDataJSON, _ := json.Marshal(device.RawData)
 	device.UpdatedAt = time.Now()
 
 	// Use nullAlias to properly handle empty strings as NULL
@@ -372,16 +503,25 @@ func (r *DeviceRepo) Upsert(ctx context.Context, device *model.Device) error {
 	// Use INSERT ... ON CONFLICT to preserve user-assigned fields (alias, zone_id)
 	// when device discovery re-upserts existing devices
 	_, err := r.db.ExecContext(ctx,
-		`INSERT INTO devices (id, name, alias, type, integration, zone_id, asset_id, enabled, last_seen, metadata, docs_ingested, docs_ingested_at, docs_status, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`INSERT INTO devices (id, name, alias, type, integration, manufacturer, model, zone_id, asset_id, enabled, last_seen,
+		                      readings, controls, battery, connectivity, entities, raw_data,
+		                      docs_ingested, docs_ingested_at, docs_status, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(id) DO UPDATE SET
 		   name = excluded.name,
 		   type = excluded.type,
 		   integration = excluded.integration,
+		   manufacturer = excluded.manufacturer,
+		   model = excluded.model,
 		   asset_id = excluded.asset_id,
 		   enabled = excluded.enabled,
 		   last_seen = excluded.last_seen,
-		   metadata = excluded.metadata,
+		   readings = excluded.readings,
+		   controls = excluded.controls,
+		   battery = excluded.battery,
+		   connectivity = excluded.connectivity,
+		   entities = excluded.entities,
+		   raw_data = excluded.raw_data,
 		   docs_ingested = excluded.docs_ingested,
 		   docs_ingested_at = excluded.docs_ingested_at,
 		   docs_status = excluded.docs_status,
@@ -389,8 +529,9 @@ func (r *DeviceRepo) Upsert(ctx context.Context, device *model.Device) error {
 		   -- Preserve user-assigned fields: only update if incoming value is non-empty
 		   alias = COALESCE(NULLIF(excluded.alias, ''), devices.alias),
 		   zone_id = COALESCE(NULLIF(excluded.zone_id, ''), devices.zone_id)`,
-		device.ID, device.Name, nullAlias, device.Type, device.Integration, device.ZoneID, device.AssetID, device.Enabled,
-		device.LastSeen, string(metadataJSON), device.DocsIngested, device.DocsIngestedAt, device.DocsStatus, device.CreatedAt, device.UpdatedAt)
+		device.ID, device.Name, nullAlias, device.Type, device.Integration, device.Manufacturer, device.Model, device.ZoneID, device.AssetID, device.Enabled,
+		device.LastSeen, string(readingsJSON), string(controlsJSON), string(batteryJSON), string(connectivityJSON), string(entitiesJSON), string(rawDataJSON),
+		device.DocsIngested, device.DocsIngestedAt, device.DocsStatus, device.CreatedAt, device.UpdatedAt)
 	return err
 }
 
@@ -744,7 +885,7 @@ func (r *HomeProfileRepo) Get(ctx context.Context, homeID string) (*model.HomePr
 	row := r.db.QueryRowContext(ctx,
 		`SELECT id, home_id, year_built, square_feet, stories, foundation_type, roof_type, roof_age,
 				siding_type, window_type, insulation, hvac_type, hvac_age, has_ac, ac_type, heating_type,
-				thermostat_type, has_humidifier, has_dehumidifier, has_air_purifier,
+				heating_system_type, thermostat_type, has_humidifier, has_dehumidifier, has_air_purifier,
 				water_heater_type, water_heater_age, water_heater_fuel,
 				has_well_water, has_sewer_system, has_septic_system, has_sump_pump,
 				electrical_panel, has_generator_backup, has_solar_panels, has_battery_backup,
@@ -755,7 +896,7 @@ func (r *HomeProfileRepo) Get(ctx context.Context, homeID string) (*model.HomePr
 	var p model.HomeProfile
 	err := row.Scan(&p.ID, &p.HomeID, &p.YearBuilt, &p.SquareFeet, &p.Stories,
 		&p.FoundationType, &p.RoofType, &p.RoofAge, &p.SidingType, &p.WindowType, &p.Insulation,
-		&p.HVACType, &p.HVACAge, &p.HasAC, &p.ACType, &p.HeatingType, &p.ThermostatType,
+		&p.HVACType, &p.HVACAge, &p.HasAC, &p.ACType, &p.HeatingType, &p.HeatingSystemType, &p.ThermostatType,
 		&p.HasHumidifier, &p.HasDehumidifier, &p.HasAirPurifier,
 		&p.WaterHeaterType, &p.WaterHeaterAge, &p.WaterHeaterFuel,
 		&p.HasWellWater, &p.HasSewerSystem, &p.HasSepticSystem, &p.HasSumpPump,
@@ -774,19 +915,19 @@ func (r *HomeProfileRepo) Get(ctx context.Context, homeID string) (*model.HomePr
 
 func (r *HomeProfileRepo) Upsert(ctx context.Context, profile *model.HomeProfile) error {
 	_, err := r.db.ExecContext(ctx,
-		`INSERT OR REPLACE INTO home_profiles 
+		`INSERT OR REPLACE INTO home_profiles
 		 (id, home_id, year_built, square_feet, stories, foundation_type, roof_type, roof_age,
 		  siding_type, window_type, insulation, hvac_type, hvac_age, has_ac, ac_type, heating_type,
-		  thermostat_type, has_humidifier, has_dehumidifier, has_air_purifier,
+		  heating_system_type, thermostat_type, has_humidifier, has_dehumidifier, has_air_purifier,
 		  water_heater_type, water_heater_age, water_heater_fuel,
 		  has_well_water, has_sewer_system, has_septic_system, has_sump_pump,
 		  electrical_panel, has_generator_backup, has_solar_panels, has_battery_backup,
 		  has_security_system, has_fire_alarms, has_co_alarms, has_sprinklers,
 		  created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		profile.ID, profile.HomeID, profile.YearBuilt, profile.SquareFeet, profile.Stories,
 		profile.FoundationType, profile.RoofType, profile.RoofAge, profile.SidingType, profile.WindowType, profile.Insulation,
-		profile.HVACType, profile.HVACAge, profile.HasAC, profile.ACType, profile.HeatingType, profile.ThermostatType,
+		profile.HVACType, profile.HVACAge, profile.HasAC, profile.ACType, profile.HeatingType, profile.HeatingSystemType, profile.ThermostatType,
 		profile.HasHumidifier, profile.HasDehumidifier, profile.HasAirPurifier,
 		profile.WaterHeaterType, profile.WaterHeaterAge, profile.WaterHeaterFuel,
 		profile.HasWellWater, profile.HasSewerSystem, profile.HasSepticSystem, profile.HasSumpPump,
@@ -948,4 +1089,69 @@ func (r *ZoneAttributeValueRepo) Set(ctx context.Context, zoneID, attributeID, v
 func (r *ZoneAttributeValueRepo) Delete(ctx context.Context, zoneID, attributeID string) error {
 	_, err := r.db.ExecContext(ctx, `DELETE FROM zone_attribute_values WHERE zone_id = ? AND attribute_id = ?`, zoneID, attributeID)
 	return err
+}
+
+// SensorReadingRepo handles sensor time-series readings
+type SensorReadingRepo struct {
+	db *sql.DB
+}
+
+// SensorReading represents a time-series sensor reading
+type SensorReading struct {
+	ID          int64
+	DeviceID    string
+	ReadingType string
+	Value       float64
+	Unit        string // "celsius" or "fahrenheit"
+	OutdoorTemp *float64
+	Timestamp   time.Time
+}
+
+func NewSensorReadingRepo(db *SQLiteDB) *SensorReadingRepo {
+	return &SensorReadingRepo{db: db.db}
+}
+
+// Insert adds a new sensor reading with unit (defaults to celsius for ZWave sensors)
+func (r *SensorReadingRepo) Insert(ctx context.Context, deviceID, readingType string, value float64, outdoorTemp *float64) error {
+	_, err := r.db.ExecContext(ctx,
+		`INSERT INTO sensor_readings (device_id, reading_type, value, unit, outdoor_temp, timestamp)
+		 VALUES (?, ?, ?, 'celsius', ?, CURRENT_TIMESTAMP)`,
+		deviceID, readingType, value, outdoorTemp)
+	return err
+}
+
+// Query retrieves readings for a device within a time window
+func (r *SensorReadingRepo) Query(ctx context.Context, deviceID, readingType string, since time.Time, limit int) ([]SensorReading, error) {
+	rows, err := r.db.QueryContext(ctx,
+		`SELECT id, device_id, reading_type, value, unit, outdoor_temp, timestamp
+		 FROM sensor_readings
+		 WHERE device_id = ? AND reading_type = ? AND timestamp >= ?
+		 ORDER BY timestamp DESC
+		 LIMIT ?`,
+		deviceID, readingType, since, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var readings []SensorReading
+	for rows.Next() {
+		var r SensorReading
+		if err := rows.Scan(&r.ID, &r.DeviceID, &r.ReadingType, &r.Value, &r.Unit, &r.OutdoorTemp, &r.Timestamp); err != nil {
+			return nil, err
+		}
+		readings = append(readings, r)
+	}
+	return readings, nil
+}
+
+// CleanupOld removes readings older than the specified duration
+func (r *SensorReadingRepo) CleanupOld(ctx context.Context, olderThan time.Duration) (int64, error) {
+	cutoff := time.Now().Add(-olderThan)
+	result, err := r.db.ExecContext(ctx,
+		`DELETE FROM sensor_readings WHERE timestamp < ?`, cutoff)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
 }

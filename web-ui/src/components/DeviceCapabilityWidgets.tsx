@@ -3,7 +3,7 @@ import { useState } from 'react';
 import { Card, Group, Stack, Text, Switch, Slider, Badge, Button, Paper } from '@mantine/core';
 import {
   Power, Sun, Droplets, Thermometer, DoorClosed, Lock, Unlock, Battery,
-  Signal, Activity, Zap, Gauge
+  Signal, Activity, Zap, Gauge, AlertTriangle, CheckCircle
 } from 'lucide-react';
 import { API_BASE_WITH_PATHS } from '../apiConfig';
 
@@ -39,7 +39,9 @@ async function sendDeviceCommand(deviceId: string, command: string, args: any = 
 
 // OnOff Widget
 export function OnOffWidget({ deviceId, state, onCommand }: WidgetProps) {
-  const [isOn, setIsOn] = useState(state?.on || false);
+  // Check multiple sources for the switch state
+  const initialState = state?.on || state?.currentValue || state?.targetValue || false;
+  const [isOn, setIsOn] = useState(initialState);
   const [loading, setLoading] = useState(false);
 
   const handleToggle = async (value: boolean) => {
@@ -130,10 +132,8 @@ export function BrightnessWidget({ deviceId, state, onCommand }: WidgetProps) {
 }
 
 // Temperature Widget (Read-only)
-export function TemperatureWidget({ state, metadata }: WidgetProps) {
-  const temp = state?.temperature_c || state?.temperature || 0;
-  const tempF = (temp * 9/5) + 32;
-  const unit = metadata?.unit || 'C';
+export function TemperatureWidget({ state }: WidgetProps) {
+  const tempF = state?.temperature_f || 0;
 
   return (
     <Card withBorder p="md">
@@ -143,11 +143,11 @@ export function TemperatureWidget({ state, metadata }: WidgetProps) {
           <div>
             <Text fw={600}>Temperature</Text>
             <Text size="xs" c="dimmed">
-              {temp.toFixed(1)}°{unit} ({tempF.toFixed(1)}°F)
+              {tempF.toFixed(1)}°F
             </Text>
           </div>
         </Group>
-        <Text size="xl" fw={700}>{temp.toFixed(1)}°</Text>
+        <Text size="xl" fw={700}>{tempF.toFixed(1)}°F</Text>
       </Group>
     </Card>
   );
@@ -368,6 +368,66 @@ export function EnergyWidget({ state }: WidgetProps) {
   );
 }
 
+// Valve Status Widget (Read-only - shows jammed/operational status)
+export function ValveStatusWidget({ state }: WidgetProps) {
+  // Z-Wave Notification CC 113 for Water Valve
+  // water=7 typically means "Valve operation jammed"
+  // water=0 means no alarm/operational
+  const valveStatus = state?.water || 0;
+  const isJammed = valveStatus === 7;
+  const alarmLevel = state?.alarmLevel || 0;
+
+  const getStatusInfo = () => {
+    if (isJammed) {
+      return {
+        label: 'Jammed',
+        message: 'Valve operation jammed - check for obstruction',
+        color: 'red',
+        icon: <AlertTriangle size={24} color="#fa5252" />
+      };
+    }
+    return {
+      label: 'Operational',
+      message: 'Valve operating normally',
+      color: 'green',
+      icon: <CheckCircle size={24} color="#40c057" />
+    };
+  };
+
+  const status = getStatusInfo();
+
+  return (
+    <Card withBorder p="md" bg={isJammed ? 'red.0' : undefined}>
+      <Stack gap="sm">
+        <Group justify="space-between">
+          <Group gap="sm">
+            {status.icon}
+            <div>
+              <Text fw={600}>Valve Status</Text>
+              <Text size="xs" c="dimmed">{status.message}</Text>
+            </div>
+          </Group>
+          <Badge color={status.color} size="lg">
+            {status.label}
+          </Badge>
+        </Group>
+        {isJammed && (
+          <Paper p="xs" withBorder bg="red.1">
+            <Text size="xs" c="red.9" fw={600}>
+              ⚠️ Action Required: Check valve for physical obstruction or manual override
+            </Text>
+          </Paper>
+        )}
+        {alarmLevel > 0 && (
+          <Text size="xs" c="dimmed">
+            Alarm Level: {alarmLevel}
+          </Text>
+        )}
+      </Stack>
+    </Card>
+  );
+}
+
 // Generic Sensor Widget (Read-only for unknown capabilities)
 export function GenericSensorWidget({ capability, state }: WidgetProps) {
   const value = state?.[capability] || state?.value || '-';
@@ -418,6 +478,9 @@ export function CapabilityWidget(props: WidgetProps) {
     case 'energy':
     case 'power':
       return <EnergyWidget {...props} />;
+    case 'valve_status':
+    case 'valve':
+      return <ValveStatusWidget {...props} />;
     default:
       return <GenericSensorWidget {...props} />;
   }

@@ -116,6 +116,18 @@ func (p *Publisher) PublishState(integration, deviceID string, values map[string
 	return nil
 }
 
+// Publish publishes raw bytes to a topic
+func (p *Publisher) Publish(topic string, payload []byte) error {
+	log.Printf("[MQTT-PUBLISHER] Publishing to %s", topic)
+
+	token := p.client.Publish(topic, 0, false, payload)
+	if token.Wait() && token.Error() != nil {
+		return fmt.Errorf("failed to publish: %w", token.Error())
+	}
+
+	return nil
+}
+
 // Close shuts down the publisher
 func (p *Publisher) Close() error {
 	p.client.Disconnect(250)

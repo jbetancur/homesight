@@ -373,6 +373,7 @@ HSIL architecture is built on researched patterns:
 
 - **LLM Tool Use**: Schick et al. (2024), "[Toolformer: Language Models Can Teach Themselves to Use Tools](https://arxiv.org/abs/2302.04761)", arXiv:2302.04761
 - **Online Machine Learning**: Montiel et al. (2021), "[River: machine learning for streaming data in Python](https://jmlr.org/papers/v22/20-1380.html)", JMLR 22(110):1−8
+- ["According to . . . ": Prompting Language Mode](https://arxiv.org/html/2305.13252)
 
 ## RAG (Retrieval-Augmented Generation)
 

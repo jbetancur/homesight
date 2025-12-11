@@ -1336,6 +1336,28 @@ async def hsil_get_device_health():
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get("/hsil/climate-insights")
+async def hsil_get_climate_insights():
+    """
+    Get AI-powered climate insights based on ML learnings, weather, and home state.
+
+    Returns:
+    - LLM-generated insights using ML data
+    - Weather correlation insights
+    - Comfort recommendations based on learned preferences
+    - Equipment health status
+    """
+    if not hsil_service:
+        raise HTTPException(status_code=503, detail="HSIL not initialized")
+
+    try:
+        insights = await hsil_service.get_climate_insights()
+        return insights
+    except Exception as e:
+        logger.error(f"HSIL climate insights error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 if __name__ == "__main__":
     uvicorn.run(
         "main:app",

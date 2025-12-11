@@ -6,16 +6,27 @@ import { API_BASE } from '../apiConfig';
 
 interface ModelMaturity {
   status: string;
-  confidence: number;
   update_count: number;
   clusters_detected?: number;
+  // Real performance metrics
+  mae?: number;
+  rmse?: number;
+  accuracy_pct?: number;
 }
 
 interface LearningVelocity {
   total_updates: number;
-  estimated_hours_active: number;
+  actual_hours_active: number;
   updates_per_hour: number;
   data_quality_score: number;
+  first_event_time?: string;
+  last_event_time?: string;
+}
+
+interface DriftDetection {
+  drift_detected: boolean;
+  severity: number;
+  error_window_size: number;
 }
 
 interface DeviceHealth {
@@ -45,6 +56,9 @@ interface RiverML {
   };
   learning_velocity?: LearningVelocity;
   device_health?: DeviceHealth[];
+  drift_detection?: {
+    comfort_model: DriftDetection;
+  };
 }
 
 interface FeedbackLearning {
@@ -73,6 +87,9 @@ interface ModelStats {
   };
   learning_velocity?: LearningVelocity;
   device_health?: DeviceHealth[];
+  drift_detection?: {
+    comfort_model: DriftDetection;
+  };
 }
 
 interface ModelInfo {
@@ -172,14 +189,23 @@ export default function LearningProgressChart() {
   // Extract stats from river_ml nested object or use direct properties
   const mlStats = stats.river_ml || stats;
 
+  // Use REAL accuracy instead of fake confidence
+  const comfortAccuracy = mlStats?.model_maturity?.comfort?.accuracy_pct;
+  const comfortMAE = mlStats?.model_maturity?.comfort?.mae;
+
   const models: ModelInfo[] = [
     {
       name: 'Comfort Model',
       icon: TrendingUp,
       color: 'blue',
       updates: mlStats?.comfort_model_updates || 0,
-      confidence: calculateConfidence(mlStats?.comfort_model_updates || 0),
-      description: 'Learns preferred temperature & humidity',
+      // Use real accuracy if available, otherwise fall back to update-based progress
+      confidence: comfortAccuracy !== null && comfortAccuracy !== undefined
+        ? comfortAccuracy
+        : calculateConfidence(mlStats?.comfort_model_updates || 0),
+      description: comfortMAE
+        ? `Prediction error: ±${comfortMAE.toFixed(1)}°F`
+        : 'Learns preferred temperature & humidity',
     },
     {
       name: 'Routine Model',
@@ -187,7 +213,7 @@ export default function LearningProgressChart() {
       color: 'grape',
       updates: mlStats?.routine_model_updates || 0,
       confidence: calculateConfidence(mlStats?.routine_model_updates || 0),
-      description: 'Identifies daily patterns & habits',
+      description: `${mlStats?.model_maturity?.routine?.clusters_detected || 0} patterns detected`,
     },
     {
       name: 'Anomaly Detection',
@@ -207,7 +233,10 @@ export default function LearningProgressChart() {
     },
   ];
 
-  const overallConfidence = calculateConfidence(mlStats?.total_model_updates || 0, 5000);
+  // Use comfort accuracy for overall if available, otherwise use update-based
+  const overallConfidence = comfortAccuracy !== null && comfortAccuracy !== undefined
+    ? comfortAccuracy
+    : calculateConfidence(mlStats?.total_model_updates || 0, 5000);
 
   return (
     <Stack gap="lg">
@@ -374,19 +403,28 @@ export default function LearningProgressChart() {
                 <Box>
                   <Group justify="space-between" mb={4}>
                     <Text size="xs" c="dimmed">Comfort Model</Text>
-                    <Badge
-                      size="sm"
-                      color={
-                        mlStats.model_maturity.comfort.status === 'mature' ? 'green' :
-                        mlStats.model_maturity.comfort.status === 'developing' ? 'yellow' :
-                        'gray'
-                      }
-                    >
-                      {mlStats.model_maturity.comfort.status}
-                    </Badge>
+                    <Group gap={4}>
+                      <Badge
+                        size="sm"
+                        color={
+                          mlStats.model_maturity.comfort.status === 'mature' ? 'green' :
+                          mlStats.model_maturity.comfort.status === 'developing' ? 'yellow' :
+                          'gray'
+                        }
+                      >
+                        {mlStats.model_maturity.comfort.status}
+                      </Badge>
+                      {mlStats.model_maturity.comfort.accuracy_pct !== null &&
+                       mlStats.model_maturity.comfort.accuracy_pct !== undefined && (
+                        <Badge size="sm" color="blue">
+                          {mlStats.model_maturity.comfort.accuracy_pct.toFixed(0)}% accurate
+                        </Badge>
+                      )}
+                    </Group>
                   </Group>
                   <Progress
-                    value={mlStats.model_maturity.comfort.confidence * 100}
+                    value={mlStats.model_maturity.comfort.accuracy_pct ??
+                           (mlStats.model_maturity.comfort.update_count / 1000 * 100)}
                     size="sm"
                     color={
                       mlStats.model_maturity.comfort.status === 'mature' ? 'green' :
@@ -394,6 +432,13 @@ export default function LearningProgressChart() {
                       'gray'
                     }
                   />
+                  {mlStats.model_maturity.comfort.mae !== null &&
+                   mlStats.model_maturity.comfort.mae !== undefined && (
+                    <Text size="xs" c="dimmed" mt={4}>
+                      Error: ±{mlStats.model_maturity.comfort.mae.toFixed(1)}°F MAE,
+                      {mlStats.model_maturity.comfort.rmse?.toFixed(1)}°F RMSE
+                    </Text>
+                  )}
                 </Box>
 
                 <Box>
@@ -415,7 +460,7 @@ export default function LearningProgressChart() {
                     </Badge>
                   </Group>
                   <Progress
-                    value={mlStats.model_maturity.routine.confidence * 100}
+                    value={(mlStats.model_maturity.routine.update_count / 1000 * 100)}
                     size="sm"
                     color={
                       mlStats.model_maturity.routine.status === 'mature' ? 'green' :
@@ -440,7 +485,7 @@ export default function LearningProgressChart() {
                     </Badge>
                   </Group>
                   <Progress
-                    value={mlStats.model_maturity.occupancy.confidence * 100}
+                    value={(mlStats.model_maturity.occupancy.update_count / 1000 * 100)}
                     size="sm"
                     color={
                       mlStats.model_maturity.occupancy.status === 'mature' ? 'green' :
@@ -468,13 +513,13 @@ export default function LearningProgressChart() {
                 <Group justify="space-between">
                   <Text size="xs" c="dimmed">Updates/Hour</Text>
                   <Text size="sm" fw={600}>
-                    {mlStats.learning_velocity.updates_per_hour.toFixed(1)}
+                    {(mlStats.learning_velocity.updates_per_hour ?? 0).toFixed(1)}
                   </Text>
                 </Group>
                 <Group justify="space-between">
                   <Text size="xs" c="dimmed">Hours Active</Text>
                   <Text size="sm" fw={600}>
-                    {mlStats.learning_velocity.estimated_hours_active.toFixed(1)}h
+                    {(mlStats.learning_velocity.actual_hours_active ?? 0).toFixed(1)}h
                   </Text>
                 </Group>
                 <Box>
@@ -546,6 +591,30 @@ export default function LearningProgressChart() {
         </Paper>
       )}
 
+      {/* Model Drift Alert */}
+      {mlStats?.drift_detection?.comfort_model?.drift_detected && (
+        <Paper p="md" withBorder style={{ borderLeft: '4px solid var(--mantine-color-red-6)', backgroundColor: 'rgba(255, 107, 107, 0.1)' }}>
+          <Group gap="xs" mb="sm">
+            <ThemeIcon size="sm" variant="light" color="red">
+              <AlertTriangle size={14} />
+            </ThemeIcon>
+            <Text size="sm" fw={600} c="red">
+              Model Drift Detected
+            </Text>
+          </Group>
+          <Stack gap="xs">
+            <Text size="sm">
+              The Comfort Model's prediction accuracy has degraded recently (severity: {(mlStats.drift_detection.comfort_model.severity * 100).toFixed(0)}%).
+              This may indicate changing patterns in your home or sensor calibration issues.
+            </Text>
+            <Text size="xs" c="dimmed">
+              Recent prediction errors are {((mlStats.drift_detection.comfort_model.severity + 1) * 100).toFixed(0)}% higher than baseline.
+              The model will continue learning to adapt to new patterns.
+            </Text>
+          </Stack>
+        </Paper>
+      )}
+
       {/* Learning Insights */}
       <Paper p="md" withBorder style={{ borderLeft: '4px solid var(--mantine-color-indigo-6)' }}>
         <Group gap="xs" mb="sm">
@@ -557,24 +626,25 @@ export default function LearningProgressChart() {
           </Text>
         </Group>
         <Stack gap="xs">
-          {overallConfidence < 25 && (
+          {comfortAccuracy !== null && comfortAccuracy !== undefined ? (
+            <Text size="sm" c="dimmed">
+              📊 Comfort Model: {comfortAccuracy.toFixed(0)}% accurate (±{comfortMAE?.toFixed(1)}°F average error)
+            </Text>
+          ) : overallConfidence < 25 ? (
             <Text size="sm" c="dimmed">
               🌱 Early learning phase - AI is gathering baseline data from your home
             </Text>
-          )}
-          {overallConfidence >= 25 && overallConfidence < 50 && (
+          ) : overallConfidence >= 25 && overallConfidence < 50 ? (
             <Text size="sm" c="dimmed">
               📊 Pattern recognition phase - AI is identifying routines and preferences
             </Text>
-          )}
-          {overallConfidence >= 50 && overallConfidence < 75 && (
+          ) : overallConfidence >= 50 && overallConfidence < 75 ? (
             <Text size="sm" c="dimmed">
               🎯 Optimization phase - AI is refining predictions and improving accuracy
             </Text>
-          )}
-          {overallConfidence >= 75 && (
+          ) : (
             <Text size="sm" c="dimmed">
-              ✨ Mature learning - AI has strong confidence in predictions and routines
+              ✨ Mature learning - AI has validated prediction accuracy
             </Text>
           )}
 
@@ -590,9 +660,12 @@ export default function LearningProgressChart() {
             </Text>
           )}
 
-          <Text size="sm" c="dimmed">
-            💡 More data = better predictions. Keep your system running to improve AI accuracy.
-          </Text>
+          {mlStats?.learning_velocity?.first_event_time && (
+            <Text size="xs" c="dimmed">
+              System active for {(mlStats.learning_velocity.actual_hours_active ?? 0).toFixed(1)} hours
+              ({(mlStats.learning_velocity.updates_per_hour ?? 0).toFixed(0)} updates/hour)
+            </Text>
+          )}
         </Stack>
       </Paper>
 

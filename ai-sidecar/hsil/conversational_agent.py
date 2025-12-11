@@ -202,6 +202,7 @@ IMPORTANT: Do NOT just repeat the JSON data! Instead:
 2. Present the information in natural, conversational language
 3. Focus on what's relevant to the user's question
 4. Be concise and friendly
+5. CRITICAL: Be mathematically accurate - check all numerical comparisons (e.g., 70°F is WARMER than 30°F)
 
 Now provide your response to the user in plain English:"""
                 })
@@ -229,6 +230,10 @@ Now provide your response to the user in plain English:"""
             arguments = tool_call.get("arguments", {})
 
             result = await self.tools.execute_tool(tool_name, arguments)
+            
+            # Log the raw result for debugging
+            logger.info(f"🔧 Tool {tool_name} returned: {result}")
+            
             results.append({
                 "tool": tool_name,
                 "arguments": arguments,
@@ -240,17 +245,21 @@ Now provide your response to the user in plain English:"""
     def _format_tool_results_for_synthesis(self, tool_results: List[Dict[str, Any]]) -> str:
         """Format tool results in a more readable way for LLM synthesis"""
         formatted = []
-        
+
         for result in tool_results:
             tool_name = result.get("tool", "unknown")
-            
+
+            # Extract the actual result data (unwrap from {"success": ..., "result": {...}})
+            result_data = result.get("result", {})
+
             # Create a readable summary instead of raw JSON
-            if "error" in result:
-                formatted.append(f"❌ {tool_name}: Error - {result['error']}")
+            if "error" in result or not result.get("success", True):
+                error_msg = result.get("error", "Unknown error")
+                formatted.append(f"❌ {tool_name}: Error - {error_msg}")
             else:
                 # Extract key information based on tool type
                 if tool_name == "get_recent_incidents":
-                    incidents = result.get("incidents", [])
+                    incidents = result_data.get("incidents", [])
                     if incidents:
                         formatted.append(f"📋 Found {len(incidents)} recent incident(s):")
                         for inc in incidents[:5]:  # Limit to 5 most recent
@@ -261,9 +270,9 @@ Now provide your response to the user in plain English:"""
                             formatted.append(f"  • {title} in {zone} - {status} ({time})")
                     else:
                         formatted.append("✅ No recent incidents found")
-                
+
                 elif tool_name == "list_zones":
-                    zones = result.get("zones", [])
+                    zones = result_data.get("zones", [])
                     if zones:
                         formatted.append(f"🏠 Found {len(zones)} zone(s):")
                         for zone in zones:
@@ -275,23 +284,27 @@ Now provide your response to the user in plain English:"""
                                 formatted.append(f"    Attributes: {', '.join([f'{k}={v}' for k, v in attrs.items() if v])}")
                     else:
                         formatted.append("No zones found")
-                
+
                 elif tool_name == "list_devices":
-                    devices = result.get("devices", [])
+                    devices = result_data.get("devices", [])
                     if devices:
                         formatted.append(f"🔌 Found {len(devices)} device(s):")
                         for dev in devices[:10]:  # Limit to 10
                             name = dev.get("name", "")
                             zone = dev.get("zone", "")
                             dev_type = dev.get("type", "")
-                            formatted.append(f"  • {name} ({dev_type}) in {zone}")
+                            capabilities = dev.get("capabilities", [])
+
+                            # Show capabilities to help LLM understand protection provided
+                            cap_desc = f" - Capabilities: {', '.join(capabilities)}" if capabilities else ""
+                            formatted.append(f"  • {name} ({dev_type}) in {zone}{cap_desc}")
                     else:
                         formatted.append("No devices found")
-                
+
                 elif tool_name == "get_device_status":
-                    dev_name = result.get("device_name", "Device")
-                    battery = result.get("battery_level")
-                    state = result.get("state", {})
+                    dev_name = result_data.get("device_name", "Device")
+                    battery = result_data.get("battery_level")
+                    state = result_data.get("state", {})
                     formatted.append(f"📊 {dev_name} status:")
                     if battery is not None:
                         formatted.append(f"  • Battery: {battery}%")
@@ -301,39 +314,39 @@ Now provide your response to the user in plain English:"""
                 
                 elif tool_name == "get_device_incidents":
                     # Check for false positive pattern analysis
-                    pattern = result.get("pattern_analysis", "")
-                    likely_false_positive = result.get("likely_false_positive", False)
-                    incidents = result.get("incidents", [])
-                    
+                    pattern = result_data.get("pattern_analysis", "")
+                    likely_false_positive = result_data.get("likely_false_positive", False)
+                    incidents = result_data.get("incidents", [])
+
                     if likely_false_positive:
                         formatted.append(f"⚠️ WARNING: Sensor may be malfunctioning (false positives detected)")
-                    
-                    formatted.append(f"📋 Found {len(incidents)} incident(s) for device {result.get('device_id', 'unknown')}")
-                    
+
+                    formatted.append(f"📋 Found {len(incidents)} incident(s) for device {result_data.get('device_id', 'unknown')}")
+
                     if pattern:
                         formatted.append(f"  {pattern}")
-                    
+
                     # Show first few incidents
                     for inc in incidents[:5]:
                         status = inc.get("status", "unknown")
                         title = inc.get("title", "")
                         time = inc.get("time_ago", "")
                         formatted.append(f"  • {title} - {status} ({time})")
-                
+
                 elif tool_name == "check_erratic_behavior":
-                    is_erratic = result.get("is_erratic", False)
+                    is_erratic = result_data.get("is_erratic", False)
                     if is_erratic:
                         formatted.append(f"⚠️ Erratic behavior detected!")
-                        formatted.append(f"  Score: {result.get('erratic_score', 0):.2f}")
+                        formatted.append(f"  Score: {result_data.get('erratic_score', 0):.2f}")
                     else:
                         formatted.append(f"✅ No current erratic behavior detected")
                         formatted.append(f"  Note: Check incident history for past rapid-fire events")
-                
+
                 else:
                     # For other tools, just show a summary
                     formatted.append(f"✅ {tool_name} completed")
-                    # Include first few keys of result
-                    keys = [k for k in result.keys() if k not in ["tool", "arguments"]]
+                    # Include first few keys of result_data
+                    keys = [k for k in result_data.keys() if k not in ["tool", "arguments", "success"]]
                     if keys:
                         formatted.append(f"  Data: {', '.join(keys[:5])}")
         
@@ -438,27 +451,25 @@ Now provide your response to the user in plain English:"""
         except Exception as e:
             logger.warning(f"⚠️  Home profile fetch failed: {e}")
         
-        # 1. Device Ontology - what sensors exist and where
-        if self.ontology._loaded:
-            from dataclasses import asdict
-            
-            # Serialize all devices and enrich with current readings from home_state
+        # 1. Devices - fetch directly from API (not from home_state which uses different structure)
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                devices_resp = await client.get(f"{self.backend_url}/api/devices")
+                if devices_resp.status_code == 200:
+                    devices_data = devices_resp.json()
+                    devices_list = devices_data.get("devices", []) if isinstance(devices_data, dict) else devices_data
+                    context["devices"] = devices_list
+
+                    # Debug: Log devices with temperature data
+                    temp_devices = [d for d in devices_list if d.get("readings") and d["readings"].get("temperature_f")]
+                    if temp_devices:
+                        logger.info(f"🌡️  Devices with temperature in context: {len(temp_devices)}")
+                        for td in temp_devices:
+                            temp = td["readings"].get("temperature_f")
+                            logger.info(f"   - {td.get('name')} ({td.get('id')}): {temp}°F, zone={td.get('zone_id')}")
+        except Exception as e:
+            logger.error(f"Failed to fetch devices from API: {e}")
             context["devices"] = []
-            for device in self.ontology.devices.values():
-                device_dict = asdict(device)
-                
-                # Enrich with current readings if available in home_state
-                if home_state and "devices" in home_state:
-                    for state_dev in home_state["devices"]:
-                        # Match by device_id from ontology
-                        if state_dev.get("id") == device_dict.get("device_id"):
-                            # Add current readings to device context
-                            device_dict["current_value"] = state_dev.get("value")
-                            device_dict["current_state"] = state_dev.get("state")
-                            device_dict["readings"] = state_dev.get("readings", {})
-                            break
-                
-                context["devices"].append(device_dict)
             
             # Zones with dynamic attributes - ALWAYS fetch fresh from API to get newly created zones
             context["zones"] = []
@@ -470,27 +481,55 @@ Now provide your response to the user in plain English:"""
                         zones_data = zones_resp.json()
                         for zone_data in zones_data:
                             zone_id = zone_data.get("id", "")
+
+                            # Fetch zone attributes from dedicated endpoint
+                            attrs_dict = {}
+                            try:
+                                attrs_url = f"{self.backend_url}/api/zones/{zone_id}/attributes"
+                                attrs_resp = await client.get(attrs_url, timeout=2.0)
+
+                                if attrs_resp.status_code == 200:
+                                    attrs_data = attrs_resp.json()
+                                    # Convert list of attribute objects to dict
+                                    attrs_dict = {
+                                        attr.get("name"): attr.get("value")
+                                        for attr in attrs_data
+                                        if attr.get("value") is not None
+                                    }
+                                    logger.debug(f"Zone {zone_id} attributes: {attrs_dict}")
+                            except Exception as e:
+                                logger.warning(f"Failed to fetch attributes for zone {zone_id}: {e}")
+
                             zone_context = {
                                 "id": zone_id,
                                 "name": zone_data.get("name", zone_id),
                                 "type": zone_data.get("type", ""),
-                                "attributes": zone_data.get("attributes", {}),
+                                "attributes": attrs_dict,
                             }
 
                             # Add device list for this zone from ontology cache
                             zone_devices = self.ontology.devices_by_zone.get(zone_id, [])
-                            zone_context["device_list"] = [d.name for d in zone_devices]
+                            zone_context["device_list"] = [d.display_name for d in zone_devices]
                             zone_context["devices"] = len(zone_devices)
 
                             context["zones"].append(zone_context)
-                            logger.debug(f"Zone {zone_id} - {zone_data.get('name')} loaded with {len(zone_devices)} devices")
+                            logger.debug(f"Zone {zone_id} - {zone_data.get('name')} loaded with {len(zone_devices)} devices and {len(attrs_dict)} attributes")
+
+                            # Debug: Check if this zone has temp sensors
+                            temp_sensors = [d for d in zone_devices if d.get_temperature() is not None]
+                            if temp_sensors:
+                                logger.info(f"🌡️  Zone '{zone_data.get('name')}' has {len(temp_sensors)} temperature sensor(s)")
                 except Exception as e:
                     logger.warning(f"Failed to fetch zones from API: {e}, falling back to cached ontology")
                     # Fallback to cached ontology
+                    from dataclasses import asdict
                     for zone_id, zone in self.ontology.zones.items():
                         zone_context = asdict(zone)
                         zone_devices = self.ontology.devices_by_zone.get(zone_id, [])
-                        zone_context["device_list"] = [d.name for d in zone_devices]
+                        zone_context["device_list"] = [d.display_name for d in zone_devices]
+                        # Convert ZoneAttributes dataclass to dict
+                        if "attributes" in zone_context and hasattr(zone_context["attributes"], "_data"):
+                            zone_context["attributes"] = zone_context["attributes"]._data
                         context["zones"].append(zone_context)
         
         # 2. Home Health - current status
@@ -626,12 +665,75 @@ Now provide your response to the user in plain English:"""
             "- Instead of 'baseline metrics', say 'normal patterns' or 'typical behavior'",
             "- Be proactive: if you see issues or patterns, mention them even if not directly asked",
             "",
+            "## Mathematical Comparison Examples",
+            "Learn from these examples of CORRECT vs WRONG temperature comparisons:",
+            "",
+            "Example 1:",
+            "  Data: Indoor basement = 70°F, Outdoor = 30.4°F",
+            "  WRONG: 'The basement is slightly cooler than outside'",
+            "  CORRECT: 'The basement (70°F) is much warmer than outside (30.4°F)'",
+            "  Reasoning: 70 > 30.4, so indoor is warmer. 40°F difference is significant.",
+            "",
+            "Example 2:",
+            "  Data: Indoor = 65°F, Outdoor = 85°F",
+            "  CORRECT: 'It's noticeably cooler inside (65°F) than the outdoor temperature (85°F)'",
+            "  Reasoning: 65 < 85, so indoor is cooler. 20°F difference is notable.",
+            "",
+            "Example 3:",
+            "  Data: Indoor = 72°F, Outdoor = 70°F",
+            "  CORRECT: 'The indoor temperature (72°F) is slightly warmer than outside (70°F)'",
+            "  Reasoning: 72 > 70, so indoor is warmer. 2°F difference is slight.",
+            "",
+            "When making numerical comparisons:",
+            "1. Calculate the actual difference",
+            "2. Determine which is larger/smaller",
+            "3. Choose appropriate magnitude words: 'slightly' (<5 units), 'noticeably' (5-20), 'much' (>20)",
+            "4. State both values explicitly for verification",
+            "",
             "## Your Role",
             "You have access to tools to check device history, detect unusual patterns, and answer questions.",
             "Use tools intelligently to gather data, then explain findings in simple terms.",
-            "IMPORTANT: When users ask for documentation, manuals, or how-to info - you MUST use the get_device_documentation tool. Do NOT make up documentation!",
             "",
-            "## Core Context",
+            "## CRITICAL: When to Use Tools vs Current Data",
+            "",
+            "**DO NOT CALL TOOLS FOR CURRENT SENSOR DATA - THE DATA IS ALREADY BELOW**",
+            "",
+            "When user asks 'what is the temperature/humidity in X':",
+            "1. Look at the Devices section below",
+            "2. Find the device in zone X",
+            "3. Read the 'Current:' values DIRECTLY from the device line",
+            "4. Answer IMMEDIATELY - DO NOT call get_device_status or get_sensor_readings",
+            "",
+            "Example:",
+            "User: 'what's the temp in the study'",
+            "Device list shows: '- zwave-35: ZSE44 (sensor) in study - Current: 64.7°F, 36% humidity'",
+            "Answer: 'The temperature in the study is currently 64.7°F with 36% humidity'",
+            "DO NOT call any tools!",
+            "",
+            "Only use tools for:",
+            "- HISTORICAL data/trends → get_sensor_readings",
+            "- Learned preferences → get_comfort_preferences",
+            "- Device control → set_device_value",
+            "- Documentation → get_device_documentation",
+            "",
+            "## Handling Ambiguous Queries",
+            "When users ask about 'protection', 'safety', or 'security', consider MULTIPLE dimensions:",
+            "1. **Security Protection**: Motion sensors, door/window sensors, cameras, alarms",
+            "2. **Water Protection**: Leak detectors, water shutoff valves, sump pumps, humidity sensors",
+            "3. **Environmental Protection**: Smoke detectors, CO detectors, temperature sensors",
+            "4. **Structural Protection**: Foundation monitors, moisture sensors",
+            "",
+            "If a query is ambiguous:",
+            "- Use the list_devices tool to get devices in the specific zone",
+            "- Check devices across ALL relevant protection types",
+            "- Present findings for each dimension",
+            "- Identify gaps in coverage",
+            "",
+            "Example: 'Is my basement protected?'",
+            "  1. Call list_devices(zone='basement') to see what's there",
+            "  2. Check: security sensors, leak detectors, water valves, humidity, smoke/CO",
+            "  3. Report: what's present (with capabilities), what's missing",
+            "  ❌ Don't assume they only mean security",
         ])
 
         # Device list with IDs for tool calls
@@ -639,31 +741,52 @@ Now provide your response to the user in plain English:"""
             parts.append(f"### Devices ({len(context['devices'])} sensors)")
             parts.append("Device ID mapping (use these IDs when calling tools):")
             for dev in context.get("devices", []):
-                dev_id = dev.get("device_id", "")
+                dev_id = dev.get("id", dev.get("device_id", ""))  # Check 'id' first, then 'device_id'
                 dev_name = dev.get("name", dev_id)
                 dev_type = dev.get("type", "sensor")
                 zone = dev.get("zone_id", "")
                 
                 # Build device line with basic info
                 device_line = f"  - {dev_id}: {dev_name} ({dev_type}) in {zone}"
-                
+
                 # Add current readings if available
                 readings = dev.get("readings", {})
                 if readings:
                     reading_parts = []
-                    # Show key readings in a compact format
-                    if "temperature" in readings:
-                        reading_parts.append(f"{readings['temperature']}°F")
-                    if "humidity" in readings:
-                        reading_parts.append(f"{readings['humidity']}% humidity")
+
+                    # Temperature
+                    temp = readings.get("temperature_f") or readings.get("temperature")
+                    if temp is not None:
+                        reading_parts.append(f"{temp}°F")
+
+                    # Humidity
+                    humidity = readings.get("humidity")
+                    if humidity is not None:
+                        reading_parts.append(f"{humidity}% humidity")
+
+                    # Water/leak sensors
                     if "water" in readings or "Water Alarm" in readings:
                         water_val = readings.get("water", readings.get("Water Alarm", 0))
                         reading_parts.append("LEAK DETECTED" if water_val else "dry")
-                    
+
                     if reading_parts:
                         device_line += f" - Current: {', '.join(reading_parts)}"
-                
+
+                # Add controllable entity information
+                entities = dev.get("entities", [])
+                if entities:
+                    settable = [e for e in entities if e.get("settable", False)]
+                    if settable:
+                        entity_names = [e.get("id", "unknown") for e in settable[:3]]  # Show first 3
+                        device_line += f" [CONTROLLABLE: {', '.join(entity_names)}]"
+
                 parts.append(device_line)
+
+            # Debug: Log a sample of device lines for the study zone
+            study_devices = [p for p in parts if "study" in p.lower()]
+            if study_devices:
+                logger.info(f"📋 Study zone device in prompt: {study_devices[0]}")
+
             parts.append("")
         
         # Zones with attributes
@@ -680,8 +803,11 @@ Now provide your response to the user in plain English:"""
                 
                 zone_desc = f"  - {zone_name} (ID: {zone_id}): {zone.get('type', '')} zone"
                 device_count = zone.get("devices")
-                if device_count and isinstance(device_count, int):
-                    zone_desc += f" with {device_count} device(s)"
+                if device_count is not None:
+                    if isinstance(device_count, int):
+                        zone_desc += f" with {device_count} device(s)"
+                    elif isinstance(device_count, list):
+                        zone_desc += f" with {len(device_count)} device(s)"
                 parts.append(zone_desc)
                 
                 # Add dynamic zone attributes if available - BE EXPLICIT
@@ -811,21 +937,58 @@ DO NOT say you're "going to check" - JUST CHECK by calling the tool!
         """
         Call LLM with tool/function calling support.
 
-        For models that support function calling, they can request tool invocations.
-        For models that don't, we provide tool schemas in the system prompt.
+        Cloud mode (OpenAI): Uses native function calling via tools parameter
+        Local mode: Provides tool schemas in prompt, expects JSON responses
         """
-        # Add tool awareness to system prompt
-        if tool_schemas:
-            tool_desc = self._format_tools_for_prompt(tool_schemas)
-            messages[0]["content"] += f"\n\n{tool_desc}"
 
-        resp_text, _ = await self.llm.chat_async(
-            messages=messages,
-            temperature=self.chat_temperature,
-            max_tokens=self.chat_max_tokens
-        )
+        # Detect if we're using cloud mode (OpenAI with native function calling)
+        is_cloud_mode = self.llm.chat_mode == 'cloud' and self.llm.openai_client is not None
 
-        return resp_text
+        if is_cloud_mode:
+            # Cloud mode: OpenAI native function calling
+            logger.info(f"☁️  Cloud mode: Passing {len(tool_schemas)} tool schemas to OpenAI")
+            logger.debug(f"Tool names: {[t.get('function', {}).get('name') for t in tool_schemas]}")
+
+            resp_text, tool_calls_from_llm = await self.llm.chat_async(
+                messages=messages,
+                tools=tool_schemas,  # OpenAI will handle these natively
+                temperature=self.chat_temperature,
+                max_tokens=self.chat_max_tokens
+            )
+
+            logger.info(f"OpenAI returned tool_calls: {tool_calls_from_llm is not None and len(tool_calls_from_llm) > 0 if tool_calls_from_llm else False}")
+
+            # Bridge OpenAI's native tool calls to our extraction logic
+            if tool_calls_from_llm:
+                import json
+                tool_json_blocks = []
+                for tc in tool_calls_from_llm:
+                    tool_json = {
+                        "tool": tc.get("name"),
+                        "args": tc.get("arguments", {})
+                    }
+                    tool_json_blocks.append(f"```json\n{json.dumps(tool_json)}\n```")
+
+                # Prepend tool calls so _extract_tool_calls can parse them
+                resp_text = "\n".join(tool_json_blocks) + "\n\n" + (resp_text or "")
+
+            return resp_text
+
+        else:
+            # Local mode: Add tool schemas to system prompt
+            # Local models must output JSON manually
+            if tool_schemas:
+                tool_desc = self._format_tools_for_prompt(tool_schemas)
+                messages[0]["content"] += f"\n\n{tool_desc}"
+
+            resp_text, _ = await self.llm.chat_async(
+                messages=messages,
+                tools=None,  # Local models don't support native function calling
+                temperature=self.chat_temperature,
+                max_tokens=self.chat_max_tokens
+            )
+
+            return resp_text
 
     async def _call_llm_simple(self, messages: List[Dict[str, str]]) -> str:
         """Simple LLM call without tools"""

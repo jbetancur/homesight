@@ -33,7 +33,10 @@ func NewMQTTBridge(wsURL string, mqttBrokerURL string) *MQTTBridge {
 		SetClientID("homesight-zwave-bridge").
 		SetAutoReconnect(true).
 		SetConnectRetry(true).
-		SetConnectRetryInterval(5 * time.Second)
+		SetConnectRetryInterval(2 * time.Second).
+		SetCleanSession(true).
+		SetKeepAlive(10 * time.Second).
+		SetPingTimeout(5 * time.Second)
 
 	mqttClient := mqtt.NewClient(opts)
 
@@ -53,20 +56,17 @@ func (b *MQTTBridge) Start() error {
 	log.Println("[ZWAVE-BRIDGE] Connecting to MQTT broker...")
 	token := b.mqttClient.Connect()
 
-	// Wait with timeout to avoid blocking indefinitely
+	// Wait for connection with timeout
 	if !token.WaitTimeout(5 * time.Second) {
 		log.Println("[ZWAVE-BRIDGE] Warning: MQTT broker connection timeout - will retry in background")
 	} else if token.Error() != nil {
 		log.Printf("[ZWAVE-BRIDGE] Warning: Failed to connect to MQTT broker: %v - will retry in background", token.Error())
 	} else {
 		log.Println("[ZWAVE-BRIDGE] Connected to MQTT broker")
-
-		// Subscribe to command topics
-		token = b.mqttClient.Subscribe("homesight/cmd/zwave-+", 0, b.handleCommand)
-		if token.WaitTimeout(5 * time.Second) && token.Error() == nil {
-			log.Println("[ZWAVE-BRIDGE] Subscribed to command topics")
-		}
 	}
+
+	// Subscribe to command topics asynchronously with retries
+	go b.subscribeToCommands()
 
 	// Set up Z-Wave event handlers
 	b.setupEventHandlers()
@@ -88,6 +88,47 @@ func (b *MQTTBridge) Start() error {
 
 	log.Println("[ZWAVE-BRIDGE] Z-Wave MQTT bridge started")
 	return nil
+}
+
+// subscribeToCommands subscribes to command topics with retries
+func (b *MQTTBridge) subscribeToCommands() {
+	// Wait longer initially to give MQTT time to stabilize
+	time.Sleep(2 * time.Second)
+
+	maxRetries := 20
+	retryDelay := 1 * time.Second
+
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		// Check if client is connected before attempting subscribe
+		if !b.mqttClient.IsConnected() {
+			log.Printf("[ZWAVE-BRIDGE] MQTT not connected (attempt %d/%d), waiting...", attempt+1, maxRetries)
+			time.Sleep(retryDelay)
+			continue
+		}
+
+		log.Printf("[ZWAVE-BRIDGE] Attempting to subscribe to command topics (attempt %d/%d)...", attempt+1, maxRetries)
+
+		// Subscribe to legacy command topic
+		token := b.mqttClient.Subscribe("homesight/cmd/+", 1, b.handleCommand)
+		if !token.Wait() || token.Error() != nil {
+			log.Printf("[ZWAVE-BRIDGE] Subscribe attempt %d failed for homesight/cmd/+: %v", attempt+1, token.Error())
+			time.Sleep(retryDelay)
+			continue
+		}
+
+		// Subscribe to entity set topic
+		token = b.mqttClient.Subscribe("homesight/entity/set/+", 1, b.handleEntitySet)
+		if !token.Wait() || token.Error() != nil {
+			log.Printf("[ZWAVE-BRIDGE] Subscribe attempt %d failed for homesight/entity/set/+: %v", attempt+1, token.Error())
+			time.Sleep(retryDelay)
+			continue
+		}
+
+		log.Println("[ZWAVE-BRIDGE] ✓ Successfully subscribed to command topics!")
+		return
+	}
+
+	log.Println("[ZWAVE-BRIDGE] ⚠️ Failed to subscribe to command topics after all retries - commands will not work!")
 }
 
 // Stop shuts down the bridge
@@ -217,34 +258,101 @@ func (b *MQTTBridge) handleNodeRemoved(event Event) {
 
 // handleValueUpdated processes value update events
 func (b *MQTTBridge) handleValueUpdated(event Event) {
+	// Extract nodeId from event.Data (top level)
+	nodeIDFloat, ok := event.Data["nodeId"].(float64)
+	if !ok {
+		return
+	}
+	nodeID := int(nodeIDFloat)
+
+	// Extract args from event.Data
 	args, ok := event.Data["args"].(map[string]interface{})
 	if !ok {
 		return
 	}
 
-	nodeIDFloat, _ := args["nodeId"].(float64)
-	nodeID := int(nodeIDFloat)
-
 	commandClass, _ := args["commandClass"].(float64)
 	property, _ := args["property"].(string)
 	newValue := args["newValue"]
 
-	log.Printf("[ZWAVE-BRIDGE] Value updated: node=%d cc=%d property=%s value=%v", nodeID, int(commandClass), property, newValue)
+	// Extract unit metadata if available from Z-Wave JS
+	// The metadata contains the unit string (e.g., "°F", "°C", "%")
+	var unit string
+	if metadata, ok := args["metadata"].(map[string]interface{}); ok {
+		if unitStr, ok := metadata["unit"].(string); ok {
+			unit = unitStr
+		}
+	}
+
+	log.Printf("[ZWAVE-BRIDGE] Value updated: node=%d cc=%d property=%s value=%v unit=%s", nodeID, int(commandClass), property, newValue, unit)
+
+	// Standardize temperature values to Fahrenheit
+	if property == "Air temperature" {
+		if numVal, ok := newValue.(float64); ok {
+			// If no unit provided, assume Celsius if value is in typical room temp range (10-40)
+			// Otherwise assume Fahrenheit
+			shouldConvert := false
+			if unit == "°C" || unit == "C" {
+				shouldConvert = true
+			} else if unit == "" && numVal >= 10 && numVal <= 40 {
+				// No unit metadata - assume Celsius for typical indoor temps (50-104°F = 10-40°C)
+				shouldConvert = true
+				log.Printf("[ZWAVE-BRIDGE] No unit metadata for temperature %.1f, assuming Celsius", numVal)
+			}
+
+			if shouldConvert {
+				// Convert Celsius to Fahrenheit: F = C * 9/5 + 32
+				newValue = numVal*9.0/5.0 + 32.0
+				unit = "°F"
+				log.Printf("[ZWAVE-BRIDGE] Converted temperature: %.1f°C -> %.1f°F", numVal, newValue.(float64))
+			}
+		}
+	}
 
 	// Publish state update
 	topic := fmt.Sprintf("homesight/zwave/%d/state", nodeID)
 
-	// Map property to friendly name
-	propertyKey := normalizePropertyName(property, int(commandClass))
+	// Get normalized property name
+	propertyNormalized := normalizePropertyName(property, int(commandClass))
+
+	// For temperature readings that we converted, ONLY store the normalized version
+	// This avoids duplicate "Air temperature" + "temperature_f" fields
+	values := map[string]interface{}{}
+	if property == "Air temperature" {
+		// Only store normalized version (temperature_f) - skip original
+		values[propertyNormalized] = newValue
+	} else {
+		// For other properties, store both original and normalized (if different)
+		values[property] = newValue
+		if propertyNormalized != property && propertyNormalized != strings.ToLower(strings.ReplaceAll(property, " ", "_")) {
+			values[propertyNormalized] = newValue
+		}
+	}
+
+	// Store unit metadata if available from Z-Wave JS
+	// For temperature, only store with normalized property name
+	if unit != "" {
+		if property == "Air temperature" {
+			// Only store unit for normalized property (temperature_f_unit)
+			values[propertyNormalized+"_unit"] = unit
+		} else {
+			// For other properties, store with both original and normalized names
+			values[property+"_unit"] = unit
+			if propertyNormalized != property {
+				values[propertyNormalized+"_unit"] = unit
+			}
+		}
+	}
 
 	state := map[string]interface{}{
-		"ts": time.Now().Format(time.RFC3339),
-		"values": map[string]interface{}{
-			propertyKey: newValue,
-		},
+		"ts":     time.Now().Format(time.RFC3339),
+		"values": values,
 	}
 
 	b.publishJSON(topic, state, false)
+
+	// Publish entity update event
+	b.publishEntityUpdate(nodeID, int(commandClass), property, newValue, unit)
 
 	// Check if this should trigger an incident
 	b.checkIncidentConditions(nodeID, int(commandClass), property, newValue, args)
@@ -328,27 +436,35 @@ func (b *MQTTBridge) handleNotification(event Event) {
 	b.publishJSON(topic, incident, false)
 }
 
-// publishDiscovery publishes a device discovery message
+// publishDiscovery publishes a device discovery message with full mapped device data
 func (b *MQTTBridge) publishDiscovery(node *ZWaveNode, homeID uint32) {
-	deviceID := fmt.Sprintf("zwave-%d", node.NodeID)
 	topic := fmt.Sprintf("homesight/zwave/%d/discovery", node.NodeID)
 
-	capabilities := inferCapabilities(node)
+	// Use mapper to get full device with controls, readings, etc.
+	device := MapNodeToDevice(node, homeID)
 
+	// Convert to discovery format (maintain compatibility with MQTT consumer)
 	discovery := map[string]interface{}{
-		"device_id":    deviceID,
-		"integration":  "zwave",
-		"name":         node.DeviceConfig.Label,
-		"manufacturer": node.DeviceConfig.Manufacturer,
-		"model":        node.DeviceConfig.Description,
+		"device_id":    device.ID,
+		"integration":  device.Integration,
+		"name":         device.Name,
+		"manufacturer": device.Manufacturer,
+		"model":        device.Model,
 		"hw_id":        fmt.Sprintf("%d", node.NodeID),
-		"capabilities": capabilities,
+		"capabilities": inferCapabilities(node),
+		// Include unified contract fields
+		"readings":     device.Readings,
+		"controls":     device.Controls,
+		"battery":      device.Battery,
+		"connectivity": device.Connectivity,
+		// Include entity-based model
+		"entities": device.Entities,
 	}
 
 	b.publishJSON(topic, discovery, true) // retained
 }
 
-// handleCommand processes MQTT command messages
+// handleCommand processes MQTT command messages (legacy)
 func (b *MQTTBridge) handleCommand(client mqtt.Client, msg mqtt.Message) {
 	topic := msg.Topic()
 	payload := msg.Payload()
@@ -384,6 +500,88 @@ func (b *MQTTBridge) handleCommand(client mqtt.Client, msg mqtt.Message) {
 	b.executeCommand(nodeID, command, args)
 }
 
+// handleEntitySet processes entity set commands via MQTT
+func (b *MQTTBridge) handleEntitySet(client mqtt.Client, msg mqtt.Message) {
+	topic := msg.Topic()
+	payload := msg.Payload()
+
+	// Extract device ID from topic: homesight/entity/set/zwave-<nodeId>
+	parts := strings.Split(topic, "/")
+	if len(parts) != 4 {
+		log.Printf("[ZWAVE-BRIDGE] Invalid entity set topic: %s", topic)
+		return
+	}
+
+	deviceID := parts[3]
+	if !strings.HasPrefix(deviceID, "zwave-") {
+		return
+	}
+
+	nodeIDStr := strings.TrimPrefix(deviceID, "zwave-")
+	var nodeID int
+	fmt.Sscanf(nodeIDStr, "%d", &nodeID)
+
+	// Parse entity set message
+	var req struct {
+		EntityID string      `json:"entity_id"`
+		Value    interface{} `json:"value"`
+	}
+	if err := json.Unmarshal(payload, &req); err != nil {
+		log.Printf("[ZWAVE-BRIDGE] Failed to parse entity set message: %v", err)
+		return
+	}
+
+	log.Printf("[ZWAVE-BRIDGE] Entity set received: node=%d entity=%s value=%v", nodeID, req.EntityID, req.Value)
+
+	// Extract metadata from entity ID
+	// Formats:
+	//   - zwave-42-cc37-targetValue (no propertyKey)
+	//   - zwave-43-cc112-40-255 (with propertyKey)
+	entityParts := strings.Split(req.EntityID, "-")
+	if len(entityParts) < 3 {
+		log.Printf("[ZWAVE-BRIDGE] Invalid entity ID format: %s", req.EntityID)
+		return
+	}
+
+	// Extract command class from ccXX part
+	ccPart := entityParts[2]
+	if !strings.HasPrefix(ccPart, "cc") {
+		log.Printf("[ZWAVE-BRIDGE] Invalid entity ID (missing cc prefix): %s", req.EntityID)
+		return
+	}
+
+	var commandClass int
+	fmt.Sscanf(ccPart, "cc%d", &commandClass)
+
+	// Extract property and propertyKey
+	// For numeric properties with propertyKey: entityParts[3]=property, entityParts[4]=propertyKey
+	// For string properties: entityParts[3:] = property parts
+	var property string
+	var propertyKey interface{} = nil
+
+	if len(entityParts) >= 5 {
+		// Check if last part is a numeric propertyKey
+		lastPart := entityParts[len(entityParts)-1]
+		var pkNum int
+		if n, err := fmt.Sscanf(lastPart, "%d", &pkNum); err == nil && n == 1 {
+			// Last part is numeric - treat as propertyKey
+			propertyKey = pkNum
+			property = strings.Join(entityParts[3:len(entityParts)-1], "-")
+		} else {
+			// Last part is not numeric - include in property
+			property = strings.Join(entityParts[3:], "-")
+		}
+	} else {
+		property = strings.Join(entityParts[3:], "-")
+	}
+
+	log.Printf("[ZWAVE-BRIDGE] Setting Z-Wave value: node=%d cc=%d property=%s propertyKey=%v value=%v",
+		nodeID, commandClass, property, propertyKey, req.Value)
+
+	// Call Z-Wave JS to set the value
+	b.setValueByEntity(nodeID, commandClass, property, propertyKey, req.Value)
+}
+
 // executeCommand executes a Z-Wave command
 func (b *MQTTBridge) executeCommand(nodeID int, command string, args map[string]interface{}) {
 	switch command {
@@ -412,16 +610,109 @@ func (b *MQTTBridge) executeCommand(nodeID int, command string, args map[string]
 
 // setValue sets a Z-Wave value
 func (b *MQTTBridge) setValue(nodeID int, commandClass int, property string, value interface{}) {
+	// Z-Wave JS Server expects valueId as a nested object
 	_, err := b.client.Call("node.set_value", map[string]interface{}{
-		"nodeId":       nodeID,
-		"commandClass": commandClass,
-		"property":     property,
-		"value":        value,
+		"nodeId": nodeID,
+		"valueId": map[string]interface{}{
+			"commandClass": commandClass,
+			"property":     property,
+		},
+		"value": value,
 	})
 
 	if err != nil {
 		log.Printf("[ZWAVE-BRIDGE] Failed to set value: %v", err)
+	} else {
+		log.Printf("[ZWAVE-BRIDGE] Successfully set value: node=%d cc=%d property=%s value=%v", nodeID, commandClass, property, value)
 	}
+}
+
+// setValueByEntity sets a Z-Wave value from entity metadata
+func (b *MQTTBridge) setValueByEntity(nodeID int, commandClass int, property string, propertyKey interface{}, value interface{}) {
+	// For Configuration command class (112), property must be a number
+	var propertyValue interface{} = property
+	if commandClass == CC_CONFIGURATION {
+		var propNum int
+		fmt.Sscanf(property, "%d", &propNum)
+		propertyValue = propNum
+	}
+
+	// Build valueId object
+	valueId := map[string]interface{}{
+		"commandClass": commandClass,
+		"property":     propertyValue,
+	}
+
+	// Add propertyKey if provided
+	if propertyKey != nil {
+		valueId["propertyKey"] = propertyKey
+	}
+
+	// Z-Wave JS Server expects valueId as a nested object
+	result, err := b.client.Call("node.set_value", map[string]interface{}{
+		"nodeId":  nodeID,
+		"valueId": valueId,
+		"value":   value,
+	})
+
+	// Check if command succeeded
+	if err != nil {
+		log.Printf("[ZWAVE-BRIDGE] ❌ Failed to set entity value: %v", err)
+		b.publishEntityUpdateResult(nodeID, commandClass, property, propertyKey, value, false, err.Error())
+	} else if resultMap, ok := result.(map[string]interface{}); ok {
+		if successVal, ok := resultMap["success"].(bool); ok && successVal {
+			log.Printf("[ZWAVE-BRIDGE] ✓ Successfully set entity: node=%d cc=%d property=%s propertyKey=%v value=%v", nodeID, commandClass, property, propertyKey, value)
+			b.publishEntityUpdateResult(nodeID, commandClass, property, propertyKey, value, true, "")
+		} else {
+			log.Printf("[ZWAVE-BRIDGE] ❌ Z-Wave rejected entity set: node=%d cc=%d property=%s propertyKey=%v value=%v", nodeID, commandClass, property, propertyKey, value)
+			b.publishEntityUpdateResult(nodeID, commandClass, property, propertyKey, value, false, "Z-Wave JS rejected command")
+		}
+	} else {
+		log.Printf("[ZWAVE-BRIDGE] ✓ Successfully queued entity set: node=%d cc=%d property=%s propertyKey=%v value=%v", nodeID, commandClass, property, propertyKey, value)
+		b.publishEntityUpdateResult(nodeID, commandClass, property, propertyKey, value, true, "")
+	}
+}
+
+// publishEntityUpdateResult publishes the result of an entity set operation
+func (b *MQTTBridge) publishEntityUpdateResult(nodeID int, commandClass int, property string, propertyKey interface{}, value interface{}, success bool, errorMsg string) {
+	deviceID := fmt.Sprintf("zwave-%d", nodeID)
+	entityID := fmt.Sprintf("%s-cc%d-%s", deviceID, commandClass, property)
+	if propertyKey != nil {
+		entityID = fmt.Sprintf("%s-%v", entityID, propertyKey)
+	}
+
+	topic := fmt.Sprintf("homesight/entity/result/%s", deviceID)
+	payload := map[string]interface{}{
+		"entity_id": entityID,
+		"value":     value,
+		"success":   success,
+		"ts":        time.Now().Format(time.RFC3339),
+	}
+
+	if !success {
+		payload["error"] = errorMsg
+	}
+
+	b.publishJSON(topic, payload, false)
+}
+
+// publishEntityUpdate publishes an entity value update event
+func (b *MQTTBridge) publishEntityUpdate(nodeID int, commandClass int, property string, value interface{}, unit string) {
+	deviceID := fmt.Sprintf("zwave-%d", nodeID)
+	entityID := fmt.Sprintf("%s-cc%d-%s", deviceID, commandClass, property)
+
+	topic := fmt.Sprintf("homesight/entity/updated/%s", deviceID)
+	payload := map[string]interface{}{
+		"entity_id": entityID,
+		"value":     value,
+		"ts":        time.Now().Format(time.RFC3339),
+	}
+
+	if unit != "" {
+		payload["unit"] = unit
+	}
+
+	b.publishJSON(topic, payload, false)
 }
 
 // checkIncidentConditions checks if a value update should trigger an incident
@@ -483,7 +774,7 @@ func normalizePropertyName(property string, commandClass int) string {
 	case "level":
 		return "battery_pct"
 	case "Air temperature":
-		return "temperature_c"
+		return "temperature_f"
 	case "Humidity":
 		return "humidity_pct"
 	default:

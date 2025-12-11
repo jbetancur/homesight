@@ -31,21 +31,41 @@ type DeviceCommand struct {
 
 // Device represents a physical or logical device
 type Device struct {
-	ID             string            `json:"id"`
-	Name           string            `json:"name"`            // Original device name from integration
-	Alias          string            `json:"alias,omitempty"` // User-defined friendly name
-	Type           string            `json:"type"`
-	Integration    string            `json:"integration"`
-	ZoneID         string            `json:"zone_id"`
-	AssetID        string            `json:"asset_id"`
-	Enabled        bool              `json:"enabled"`
-	LastSeen       time.Time         `json:"last_seen"`
-	Metadata       map[string]string `json:"metadata"`
-	DocsIngested   bool              `json:"docs_ingested"`    // Whether documentation has been processed
-	DocsIngestedAt *time.Time        `json:"docs_ingested_at"` // When documentation was last processed
-	DocsStatus     string            `json:"docs_status"`      // pending/success/partial/error
-	CreatedAt      time.Time         `json:"created_at"`
-	UpdatedAt      time.Time         `json:"updated_at"`
+	// Core Identity
+	ID           string `json:"id"`
+	Name         string `json:"name"`            // Original device name from integration
+	Alias        string `json:"alias,omitempty"` // User-defined friendly name
+	Type         string `json:"type"`
+	Integration  string `json:"integration"`
+	Manufacturer string `json:"manufacturer,omitempty"`
+	Model        string `json:"model,omitempty"`
+
+	// Placement
+	ZoneID  string `json:"zone_id"`
+	AssetID string `json:"asset_id"`
+
+	// Status
+	Enabled  bool      `json:"enabled"`
+	LastSeen time.Time `json:"last_seen"`
+
+	// Unified Data Contract
+	Readings     *DeviceReadings     `json:"readings,omitempty"`     // Sensor values
+	Controls     *DeviceControls     `json:"controls,omitempty"`     // Control capabilities
+	Battery      *DeviceBattery      `json:"battery,omitempty"`      // Battery info
+	Connectivity *DeviceConnectivity `json:"connectivity,omitempty"` // Connection status
+	Entities     []DeviceEntity      `json:"entities,omitempty"`     // Entities (Z-Wave, etc.)
+
+	// Raw Integration Data (preserved for debugging and advanced use)
+	RawData map[string]interface{} `json:"raw_data,omitempty"`
+
+	// Documentation
+	DocsIngested   bool       `json:"docs_ingested"`    // Whether documentation has been processed
+	DocsIngestedAt *time.Time `json:"docs_ingested_at"` // When documentation was last processed
+	DocsStatus     string     `json:"docs_status"`      // pending/success/partial/error
+
+	// Timestamps
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
 // DisplayName returns the alias if set, otherwise the original name
@@ -54,6 +74,139 @@ func (d *Device) DisplayName() string {
 		return d.Alias
 	}
 	return d.Name
+}
+
+// DeviceReadings contains normalized sensor values
+type DeviceReadings struct {
+	// Temperature (always in °F for consistency)
+	TemperatureF *float64 `json:"temperature_f,omitempty"`
+
+	// Humidity (0-100%)
+	Humidity *float64 `json:"humidity,omitempty"`
+
+	// Binary sensors (true = detected/triggered)
+	Water   *bool `json:"water,omitempty"`   // Water leak
+	Motion  *bool `json:"motion,omitempty"`  // Motion detected
+	Contact *bool `json:"contact,omitempty"` // Door/window open
+	Tamper  *bool `json:"tamper,omitempty"`  // Tamper detected
+	Smoke   *bool `json:"smoke,omitempty"`   // Smoke detected
+	CO      *bool `json:"co,omitempty"`      // Carbon monoxide detected
+
+	// Power/Energy
+	PowerW    *float64 `json:"power_w,omitempty"`    // Current power (watts)
+	EnergyKWh *float64 `json:"energy_kwh,omitempty"` // Total energy (kilowatt-hours)
+	VoltageV  *float64 `json:"voltage_v,omitempty"`  // Voltage
+	CurrentA  *float64 `json:"current_a,omitempty"`  // Current (amps)
+
+	// Light level
+	Illuminance *float64 `json:"illuminance,omitempty"` // Lux
+
+	// Air quality
+	CO2  *float64 `json:"co2,omitempty"`  // CO2 (ppm)
+	VOC  *float64 `json:"voc,omitempty"`  // VOC (ppb)
+	PM25 *float64 `json:"pm25,omitempty"` // PM2.5 (µg/m³)
+
+	// Other
+	Pressure *float64 `json:"pressure,omitempty"` // Atmospheric pressure (hPa)
+	UVIndex  *float64 `json:"uv_index,omitempty"` // UV index
+}
+
+// DeviceControls contains available control capabilities and current state
+type DeviceControls struct {
+	// Binary switch (on/off)
+	Switch *SwitchControl `json:"switch,omitempty"`
+
+	// Multilevel (dimmer, blinds, etc.)
+	Level *LevelControl `json:"level,omitempty"`
+
+	// Color control (RGB lights)
+	Color *ColorControl `json:"color,omitempty"`
+
+	// Thermostat
+	Thermostat *ThermostatControl `json:"thermostat,omitempty"`
+
+	// Lock
+	Lock *LockControl `json:"lock,omitempty"`
+}
+
+// SwitchControl represents a binary switch
+type SwitchControl struct {
+	Value    bool `json:"value"`    // Current state
+	Settable bool `json:"settable"` // Can be controlled
+}
+
+// LevelControl represents a multilevel control (dimmer, blinds, etc.)
+type LevelControl struct {
+	Value    int  `json:"value"` // 0-100
+	Settable bool `json:"settable"`
+	Min      int  `json:"min"`
+	Max      int  `json:"max"`
+}
+
+// ColorControl represents RGB color control
+type ColorControl struct {
+	R        int  `json:"r"` // 0-255
+	G        int  `json:"g"` // 0-255
+	B        int  `json:"b"` // 0-255
+	Settable bool `json:"settable"`
+}
+
+// ThermostatControl represents thermostat control
+type ThermostatControl struct {
+	Mode           string   `json:"mode"`                    // "heat", "cool", "auto", "off"
+	SetpointHeat   *float64 `json:"setpoint_heat,omitempty"` // Target temp (heat)
+	SetpointCool   *float64 `json:"setpoint_cool,omitempty"` // Target temp (cool)
+	Settable       bool     `json:"settable"`
+	AvailableModes []string `json:"available_modes,omitempty"`
+}
+
+// LockControl represents lock control
+type LockControl struct {
+	Locked   bool `json:"locked"`
+	Settable bool `json:"settable"`
+}
+
+// DeviceBattery contains battery information
+type DeviceBattery struct {
+	Level      int  `json:"level"`       // 0-100 percentage
+	IsLow      bool `json:"is_low"`      // True if < 20%
+	IsCharging bool `json:"is_charging"` // True if charging
+}
+
+// DeviceConnectivity contains connection information
+type DeviceConnectivity struct {
+	Online         bool      `json:"online"`
+	SignalStrength *int      `json:"signal_strength,omitempty"` // RSSI or percentage
+	LastSeen       time.Time `json:"last_seen"`
+	FirmwareVer    string    `json:"firmware_version,omitempty"`
+}
+
+// EntityType represents the type of entity
+type EntityType string
+
+const (
+	EntityTypeSensor       EntityType = "sensor"
+	EntityTypeBinarySensor EntityType = "binary_sensor"
+	EntityTypeSwitch       EntityType = "switch"
+	EntityTypeNumber       EntityType = "number"
+	EntityTypeAlarm        EntityType = "alarm"
+	EntityTypeDiagnostic   EntityType = "diagnostic"
+	EntityTypeConfig       EntityType = "config"
+)
+
+// DeviceEntity represents a controllable entity (Z-Wave, etc.)
+type DeviceEntity struct {
+	ID         string                 `json:"id"`
+	DeviceID   string                 `json:"device_id,omitempty"`
+	Name       string                 `json:"name,omitempty"`
+	Type       string                 `json:"type,omitempty"`
+	EntityType EntityType             `json:"entity_type,omitempty"`
+	Category   string                 `json:"category,omitempty"`
+	Value      interface{}            `json:"value,omitempty"`
+	Unit       string                 `json:"unit,omitempty"`
+	Settable   bool                   `json:"settable"`
+	Metadata   map[string]interface{} `json:"metadata,omitempty"`
+	UpdatedAt  time.Time              `json:"updated_at,omitempty"`
 }
 
 // Sensor represents a sensor within a device
@@ -80,46 +233,16 @@ type Home struct {
 
 // Zone represents a logical area within a home
 type Zone struct {
-	ID         string            `json:"id"`
-	HomeID     string            `json:"home_id"`
-	Name       string            `json:"name"`
-	Type       string            `json:"type"`       // "basement", "bathroom", "kitchen", etc.
-	ParentID   string            `json:"parent_id"`  // for nested zones
-	Attributes *ZoneAttributes   `json:"attributes"` // Rich attributes for HIL reasoning
-	Metadata   map[string]string `json:"metadata"`
-	CreatedAt  time.Time         `json:"created_at"`
-	UpdatedAt  time.Time         `json:"updated_at"`
-}
-
-// ZoneAttributes contains rich metadata for HIL reasoning
-type ZoneAttributes struct {
-	// Physical characteristics
-	FloorType    string `json:"floor_type,omitempty"` // hardwood, tile, carpet, concrete, laminate
-	SquareFeet   int    `json:"square_feet,omitempty"`
-	HasWindows   bool   `json:"has_windows,omitempty"`
-	HasFireplace bool   `json:"has_fireplace,omitempty"`
-
-	// HVAC/Climate
-	HasHVACReturn  bool `json:"has_hvac_return,omitempty"` // Main return location
-	HasHVACVent    bool `json:"has_hvac_vent,omitempty"`
-	HasRadiantHeat bool `json:"has_radiant_heat,omitempty"`
-	HasCeilingFan  bool `json:"has_ceiling_fan,omitempty"`
-
-	// Water/Plumbing
-	HasPlumbing    bool `json:"has_plumbing,omitempty"` // Sinks, toilets, etc.
-	HasWaterHeater bool `json:"has_water_heater,omitempty"`
-	HasWasher      bool `json:"has_washer,omitempty"`
-	HasSumpPump    bool `json:"has_sump_pump,omitempty"`
-
-	// Risk factors & Occupancy
-	HasValuables    bool `json:"has_valuables,omitempty"` // Office with electronics, etc.
-	HasPets         bool `json:"has_pets,omitempty"`
-	HasInfant       bool `json:"has_infant,omitempty"`
-	HasElderly      bool `json:"has_elderly,omitempty"`
-	IsOccupiedDaily bool `json:"is_occupied_daily,omitempty"` // Regularly occupied vs storage
-
-	// Custom tags for flexibility
-	Tags []string `json:"tags,omitempty"` // ["workshop", "server-room", "wine-cellar"]
+	ID         string                 `json:"id"`
+	HomeID     string                 `json:"home_id"`
+	Name       string                 `json:"name"`
+	Type       string                 `json:"type"`       // "basement", "bathroom", "kitchen", etc.
+	ParentID   string                 `json:"parent_id"`  // for nested zones
+	Attributes map[string]interface{} `json:"attributes"` // Dynamic attributes from attribute definitions
+	Hidden     bool                   `json:"hidden"`     // Whether zone is hidden from UI
+	Metadata   map[string]string      `json:"metadata"`
+	CreatedAt  time.Time              `json:"created_at"`
+	UpdatedAt  time.Time              `json:"updated_at"`
 }
 
 // Asset represents a physical asset that may have sensors

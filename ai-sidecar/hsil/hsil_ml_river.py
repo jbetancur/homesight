@@ -21,7 +21,7 @@ from typing import Optional, Dict, Any, Tuple
 from datetime import datetime
 from collections import defaultdict
 
-from river import linear_model, anomaly, cluster, stats, optim
+from river import linear_model, anomaly, cluster, stats, optim, metrics
 
 from .types import EventContext, BehaviorPrediction, BehaviorPredictionType
 from .weather_service import EnvironmentalContext
@@ -121,6 +121,26 @@ class HSILRiverLearningEngine:
         # Model metadata
         self.model_update_counts = defaultdict(int)
 
+        # Performance tracking
+        self.comfort_mae = metrics.MAE()
+        self.comfort_rmse = metrics.RMSE()
+        self.occupancy_accuracy = metrics.Accuracy()
+        self.occupancy_precision = metrics.Precision()
+        self.occupancy_recall = metrics.Recall()
+
+        # Drift detection - track rolling window of errors
+        self.comfort_error_window = []  # Last 100 errors
+        self.occupancy_error_window = []  # Last 100 errors
+        self.max_error_window = 100
+
+        # Runtime tracking
+        self.first_event_time: Optional[datetime] = None
+        self.last_event_time: Optional[datetime] = None
+
+        # Validation split (80/20)
+        self.validation_counter = 0
+        self.validation_frequency = 5  # Every 5th event goes to validation
+
     def _init_db(self):
         """Initialize database for model persistence"""
         conn = sqlite3.connect(self.db_path)
@@ -156,6 +176,27 @@ class HSILRiverLearningEngine:
                 stat_key TEXT PRIMARY KEY,
                 stat_value REAL,
                 last_updated TIMESTAMP NOT NULL
+            )
+        """)
+
+        # Model performance metrics table
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS model_performance (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                model_name TEXT NOT NULL,
+                metric_name TEXT NOT NULL,
+                metric_value REAL NOT NULL,
+                window_size INTEGER,
+                timestamp TIMESTAMP NOT NULL
+            )
+        """)
+
+        # Runtime metadata table
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS runtime_metadata (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL,
+                updated_at TIMESTAMP NOT NULL
             )
         """)
 
@@ -199,6 +240,9 @@ class HSILRiverLearningEngine:
         conn.close()
         logger.info(f"Loaded {len(self.model_update_counts)} persisted models")
 
+        # Load runtime metadata
+        self._load_runtime_metadata()
+
     def _save_model(self, model_name: str, model_obj: Any):
         """Persist a model to database"""
         try:
@@ -222,6 +266,63 @@ class HSILRiverLearningEngine:
 
         except Exception as e:
             logger.error(f"Error saving model {model_name}: {e}")
+
+    def _load_runtime_metadata(self):
+        """Load runtime metadata from database"""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+
+            cursor.execute("SELECT key, value FROM runtime_metadata WHERE key IN ('first_event_time', 'last_event_time')")
+            for key, value in cursor.fetchall():
+                if key == "first_event_time" and value:
+                    self.first_event_time = datetime.fromisoformat(value)
+                elif key == "last_event_time" and value:
+                    self.last_event_time = datetime.fromisoformat(value)
+
+            conn.close()
+            logger.debug(f"Loaded runtime metadata: first={self.first_event_time}, last={self.last_event_time}")
+        except Exception as e:
+            logger.error(f"Error loading runtime metadata: {e}")
+
+    def _save_runtime_metadata(self):
+        """Persist runtime metadata to database"""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+
+            if self.first_event_time:
+                cursor.execute("""
+                    INSERT OR REPLACE INTO runtime_metadata (key, value, updated_at)
+                    VALUES (?, ?, ?)
+                """, ("first_event_time", self.first_event_time.isoformat(), datetime.now().isoformat()))
+
+            if self.last_event_time:
+                cursor.execute("""
+                    INSERT OR REPLACE INTO runtime_metadata (key, value, updated_at)
+                    VALUES (?, ?, ?)
+                """, ("last_event_time", self.last_event_time.isoformat(), datetime.now().isoformat()))
+
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            logger.error(f"Error saving runtime metadata: {e}")
+
+    def _record_performance_metric(self, model_name: str, metric_name: str, metric_value: float, window_size: Optional[int] = None):
+        """Record a performance metric to the database for historical tracking"""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+
+            cursor.execute("""
+                INSERT INTO model_performance (model_name, metric_name, metric_value, window_size, timestamp)
+                VALUES (?, ?, ?, ?, ?)
+            """, (model_name, metric_name, metric_value, window_size, datetime.now().isoformat()))
+
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            logger.error(f"Error recording performance metric: {e}")
 
     def set_weather_context(self, env: EnvironmentalContext):
         """Cache environmental context for predictions"""
@@ -418,6 +519,12 @@ class HSILRiverLearningEngine:
             context: EventContext from sensor event
             env: Optional environmental context from weather service
         """
+        # Track runtime
+        if self.first_event_time is None:
+            self.first_event_time = context.timestamp
+            logger.info(f"First event received at {self.first_event_time}")
+        self.last_event_time = context.timestamp
+
         # Cache weather context for this learning cycle
         if env:
             self._env_context = env
@@ -426,6 +533,10 @@ class HSILRiverLearningEngine:
             env = self._env_context
             if not env:
                 logger.debug("No weather context available - using defaults")
+
+        # Determine if this event is for validation (every 5th event)
+        self.validation_counter += 1
+        is_validation = (self.validation_counter % self.validation_frequency) == 0
 
         # Update baseline model
         if isinstance(context.event_value, (int, float)):
@@ -448,11 +559,12 @@ class HSILRiverLearningEngine:
 
         # Update comfort model (for temp/humidity events)
         if context.event_type in ["temperature", "temp", "humidity"]:
-            await self._update_comfort_model(context, env)
+            await self._update_comfort_model(context, env, is_validation)
 
-        # Persist models periodically (every 50 updates)
+        # Persist models and metadata periodically (every 50 updates)
         if sum(self.model_update_counts.values()) % 50 == 0:
             await self._persist_all_models()
+            self._save_runtime_metadata()
 
     async def _update_baseline(self, device_id: str, metric: str, value: float):
         """Update running baseline statistics"""
@@ -646,9 +758,9 @@ class HSILRiverLearningEngine:
         if self.model_update_counts[model_name] % 100 == 0:
             self._save_model(model_name, self.routine_model)
 
-    async def _update_comfort_model(self, context: EventContext, env: Optional[EnvironmentalContext]):
+    async def _update_comfort_model(self, context: EventContext, env: Optional[EnvironmentalContext], is_validation: bool = False):
         """
-        Update comfort model.
+        Update comfort model with validation split.
 
         For now, we use a simple target: assume current conditions are acceptable.
         In production, this would be refined with user feedback.
@@ -662,15 +774,40 @@ class HSILRiverLearningEngine:
         else:
             target = 50.0  # humidity default
 
-        # Learn
-        self.comfort_model.learn_one(features, target)
+        if is_validation:
+            # Validation: predict first, then measure error (don't train)
+            try:
+                prediction = self.comfort_model.predict_one(features)
+                error = abs(prediction - target)
 
-        # Persist periodically
-        model_name = "comfort_model"
-        self.model_update_counts[model_name] += 1
+                # Update performance metrics
+                self.comfort_mae.update(target, prediction)
+                self.comfort_rmse.update(target, prediction)
 
-        if self.model_update_counts[model_name] % 100 == 0:
-            self._save_model(model_name, self.comfort_model)
+                # Track rolling window for drift detection
+                self.comfort_error_window.append(error)
+                if len(self.comfort_error_window) > self.max_error_window:
+                    self.comfort_error_window.pop(0)
+
+                logger.debug(f"Validation: predicted={prediction:.1f}, actual={target:.1f}, error={error:.1f}")
+            except Exception as e:
+                logger.debug(f"Comfort model not ready for prediction: {e}")
+        else:
+            # Training: learn from this example
+            self.comfort_model.learn_one(features, target)
+
+            # Persist periodically
+            model_name = "comfort_model"
+            self.model_update_counts[model_name] += 1
+
+            if self.model_update_counts[model_name] % 100 == 0:
+                self._save_model(model_name, self.comfort_model)
+
+                # Record performance metrics to DB
+                if self.comfort_mae.get() is not None:
+                    self._record_performance_metric("comfort_model", "mae", self.comfort_mae.get())
+                if self.comfort_rmse.get() is not None:
+                    self._record_performance_metric("comfort_model", "rmse", self.comfort_rmse.get())
 
     async def _persist_all_models(self):
         """Persist all models to database"""
@@ -862,7 +999,7 @@ class HSILRiverLearningEngine:
     # ==================== STATISTICS ====================
 
     async def get_stats(self) -> Dict[str, Any]:
-        """Get comprehensive ML engine statistics with model health and performance metrics"""
+        """Get comprehensive ML engine statistics with REAL model performance metrics"""
         # Get erratic devices
         erratic_devices = await self.get_all_erratic_devices()
 
@@ -871,15 +1008,22 @@ class HSILRiverLearningEngine:
         routine_updates = self.model_update_counts.get("routine_model", 0)
         occupancy_updates = self.model_update_counts.get("occupancy_model", 0)
 
-        # Model maturity thresholds: immature (<100), developing (100-500), mature (>500)
+        # Model maturity based on update counts
         comfort_maturity = "mature" if comfort_updates > 500 else "developing" if comfort_updates > 100 else "immature"
         routine_maturity = "mature" if routine_updates > 500 else "developing" if routine_updates > 100 else "immature"
         occupancy_maturity = "mature" if occupancy_updates > 500 else "developing" if occupancy_updates > 100 else "immature"
 
-        # Calculate model confidence scores (0-1 based on update counts)
-        comfort_confidence = min(0.95, comfort_updates / 1000.0)
-        routine_confidence = min(0.95, routine_updates / 1000.0)
-        occupancy_confidence = min(0.95, occupancy_updates / 1000.0)
+        # REAL performance metrics (not fake confidence)
+        comfort_mae_value = self.comfort_mae.get() if self.comfort_mae.get() is not None else None
+        comfort_rmse_value = self.comfort_rmse.get() if self.comfort_rmse.get() is not None else None
+
+        # Calculate actual accuracy from MAE (lower error = higher accuracy)
+        # Accuracy as percentage: 100% - (MAE / reasonable_range * 100)
+        # For temperature, reasonable range ~30°F
+        if comfort_mae_value is not None and comfort_mae_value > 0:
+            comfort_accuracy = max(0, min(100, 100 - (comfort_mae_value / 30.0 * 100)))
+        else:
+            comfort_accuracy = None
 
         # Routine clustering stats (if KMeans model has centers)
         try:
@@ -923,14 +1067,17 @@ class HSILRiverLearningEngine:
                 "last_event_time": device_stats.get("last_event_time"),
             })
 
-        # Calculate learning velocity
+        # Calculate REAL runtime (not fake!)
         total_updates = sum(self.model_update_counts.values())
 
-        # Estimate model age (time since first learning started)
-        # For now, use a heuristic based on update counts
-        # In production, you'd track actual timestamps
-        estimated_hours_active = max(1, total_updates / 100)  # Assume ~100 updates per hour
-        updates_per_hour = total_updates / estimated_hours_active
+        if self.first_event_time and self.last_event_time:
+            runtime_seconds = (self.last_event_time - self.first_event_time).total_seconds()
+            actual_hours_active = runtime_seconds / 3600.0
+            updates_per_hour = total_updates / max(1, actual_hours_active)
+        else:
+            # Fallback if no events yet
+            actual_hours_active = 0.0
+            updates_per_hour = 0.0
 
         # Data quality score: based on variety of devices and update distribution
         # Count all devices being tracked across all model types (baseline, anomaly, frequency)
@@ -939,8 +1086,27 @@ class HSILRiverLearningEngine:
         all_tracked_devices.update(self.anomaly_models.keys())
         all_tracked_devices.update(self.frequency_models.keys())
         num_devices = len(all_tracked_devices)
-        
+
         data_quality = min(1.0, num_devices / 10.0) * 0.5 + min(1.0, total_updates / 1000.0) * 0.5
+
+        # Drift detection - calculate recent error vs baseline
+        comfort_drift_detected = False
+        comfort_drift_severity = 0.0
+        if len(self.comfort_error_window) >= 20:
+            # Compare recent errors (last 20) vs baseline (first 50% of window)
+            window_size = len(self.comfort_error_window)
+            baseline_errors = self.comfort_error_window[:window_size // 2]
+            recent_errors = self.comfort_error_window[-20:]
+
+            baseline_mean = sum(baseline_errors) / len(baseline_errors)
+            recent_mean = sum(recent_errors) / len(recent_errors)
+
+            # Drift if recent errors are >50% higher than baseline
+            if baseline_mean > 0:
+                drift_ratio = recent_mean / baseline_mean
+                if drift_ratio > 1.5:
+                    comfort_drift_detected = True
+                    comfort_drift_severity = min(1.0, (drift_ratio - 1.0) / 2.0)  # Normalize to 0-1
 
         return {
             # Basic stats (backward compatible)
@@ -959,28 +1125,40 @@ class HSILRiverLearningEngine:
             "model_maturity": {
                 "comfort": {
                     "status": comfort_maturity,
-                    "confidence": round(comfort_confidence, 3),
-                    "update_count": comfort_updates
+                    "update_count": comfort_updates,
+                    # REAL performance metrics
+                    "mae": round(comfort_mae_value, 2) if comfort_mae_value is not None else None,
+                    "rmse": round(comfort_rmse_value, 2) if comfort_rmse_value is not None else None,
+                    "accuracy_pct": round(comfort_accuracy, 1) if comfort_accuracy is not None else None,
                 },
                 "routine": {
                     "status": routine_maturity,
-                    "confidence": round(routine_confidence, 3),
                     "update_count": routine_updates,
-                    "clusters_detected": routine_clusters
+                    "clusters_detected": routine_clusters,
                 },
                 "occupancy": {
                     "status": occupancy_maturity,
-                    "confidence": round(occupancy_confidence, 3),
-                    "update_count": occupancy_updates
+                    "update_count": occupancy_updates,
                 }
             },
 
-            # Learning velocity metrics
+            # Learning velocity metrics (REAL runtime)
             "learning_velocity": {
                 "total_updates": total_updates,
-                "estimated_hours_active": round(estimated_hours_active, 1),
+                "actual_hours_active": round(actual_hours_active, 2),
                 "updates_per_hour": round(updates_per_hour, 1),
-                "data_quality_score": round(data_quality, 3)
+                "data_quality_score": round(data_quality, 3),
+                "first_event_time": self.first_event_time.isoformat() if self.first_event_time else None,
+                "last_event_time": self.last_event_time.isoformat() if self.last_event_time else None,
+            },
+
+            # Model drift detection
+            "drift_detection": {
+                "comfort_model": {
+                    "drift_detected": comfort_drift_detected,
+                    "severity": round(comfort_drift_severity, 3) if comfort_drift_detected else 0.0,
+                    "error_window_size": len(self.comfort_error_window),
+                }
             },
 
             # Per-device health metrics

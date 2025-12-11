@@ -33,6 +33,40 @@ type ZoneSchema struct {
 
 // handleGetZoneSchema returns the zone attributes schema for UI rendering
 func (s *Server) handleGetZoneSchema(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+
+	// Fetch zone-scoped attribute definitions from database
+	attrDefs, err := s.attributeDefinitionRepo.List(ctx, model.ScopeZone)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Convert to UI schema format
+	attributes := make([]ZoneAttributeField, 0, len(attrDefs))
+	for _, def := range attrDefs {
+		field := ZoneAttributeField{
+			Name:        def.Name,
+			Label:       def.Label,
+			Type:        string(def.Type),
+			Category:    def.Category,
+			Description: def.Description,
+		}
+
+		// Convert options
+		if len(def.Options) > 0 {
+			field.Options = make([]ZoneAttributeOption, len(def.Options))
+			for i, opt := range def.Options {
+				field.Options[i] = ZoneAttributeOption{
+					Value: opt,
+					Label: opt,
+				}
+			}
+		}
+
+		attributes = append(attributes, field)
+	}
+
 	schema := ZoneSchema{
 		ZoneTypes: []ZoneAttributeOption{
 			{Value: "basement", Label: "Basement"},
@@ -50,137 +84,7 @@ func (s *Server) handleGetZoneSchema(w http.ResponseWriter, r *http.Request) {
 			{Value: "utility", Label: "Utility Room"},
 			{Value: "other", Label: "Other"},
 		},
-		Attributes: []ZoneAttributeField{
-			// Basic Properties
-			{
-				Name:     "floor_type",
-				Label:    "Floor Type",
-				Type:     "select",
-				Category: "basic",
-				Options: []ZoneAttributeOption{
-					{Value: "hardwood", Label: "Hardwood"},
-					{Value: "carpet", Label: "Carpet"},
-					{Value: "tile", Label: "Tile"},
-					{Value: "vinyl", Label: "Vinyl"},
-					{Value: "laminate", Label: "Laminate"},
-					{Value: "concrete", Label: "Concrete"},
-					{Value: "marble", Label: "Marble"},
-					{Value: "stone", Label: "Stone"},
-				},
-			},
-			{
-				Name:        "square_feet",
-				Label:       "Square Feet",
-				Type:        "number",
-				Category:    "basic",
-				Description: "Room size in square feet",
-			},
-			{
-				Name:     "has_windows",
-				Label:    "Has Windows",
-				Type:     "boolean",
-				Category: "basic",
-			},
-			{
-				Name:     "has_fireplace",
-				Label:    "Has Fireplace",
-				Type:     "boolean",
-				Category: "basic",
-			},
-			// HVAC & Climate
-			{
-				Name:        "has_hvac_return",
-				Label:       "Has HVAC Return",
-				Type:        "boolean",
-				Category:    "hvac",
-				Description: "Main HVAC return vent location",
-			},
-			{
-				Name:     "has_hvac_vent",
-				Label:    "Has HVAC Vent",
-				Type:     "boolean",
-				Category: "hvac",
-			},
-			{
-				Name:     "has_radiant_heat",
-				Label:    "Has Radiant Heat",
-				Type:     "boolean",
-				Category: "hvac",
-			},
-			{
-				Name:     "has_ceiling_fan",
-				Label:    "Has Ceiling Fan",
-				Type:     "boolean",
-				Category: "hvac",
-			},
-			// Plumbing & Water
-			{
-				Name:        "has_plumbing",
-				Label:       "Has Plumbing",
-				Type:        "boolean",
-				Category:    "plumbing",
-				Description: "Sinks, toilets, or other plumbing fixtures",
-			},
-			{
-				Name:     "has_water_heater",
-				Label:    "Has Water Heater",
-				Type:     "boolean",
-				Category: "plumbing",
-			},
-			{
-				Name:     "has_washer",
-				Label:    "Has Washer/Dryer",
-				Type:     "boolean",
-				Category: "plumbing",
-			},
-			{
-				Name:     "has_sump_pump",
-				Label:    "Has Sump Pump",
-				Type:     "boolean",
-				Category: "plumbing",
-			},
-			// Safety & Occupancy
-			{
-				Name:        "has_valuables",
-				Label:       "Contains Valuables",
-				Type:        "boolean",
-				Category:    "safety",
-				Description: "Electronics, jewelry, or other valuable items",
-			},
-			{
-				Name:     "has_pets",
-				Label:    "Has Pets",
-				Type:     "boolean",
-				Category: "safety",
-			},
-			{
-				Name:     "has_infant",
-				Label:    "Has Infant/Child",
-				Type:     "boolean",
-				Category: "safety",
-			},
-			{
-				Name:     "has_elderly",
-				Label:    "Has Elderly",
-				Type:     "boolean",
-				Category: "safety",
-			},
-			{
-				Name:        "is_occupied_daily",
-				Label:       "Occupied Daily",
-				Type:        "boolean",
-				Category:    "safety",
-				Description: "Regularly occupied vs storage/utility",
-			},
-			// Custom tags
-			{
-				Name:        "tags",
-				Label:       "Custom Tags",
-				Type:        "tags",
-				Category:    "custom",
-				Description: "Add custom tags for flexibility",
-			},
-		},
+		Attributes: attributes,
 	}
 
 	w.Header().Set("Content-Type", "application/json")
