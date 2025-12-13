@@ -16,13 +16,18 @@ No API key required! Just needs a User-Agent header.
 
 import logging
 import os
+import json
 import math
 from typing import Optional, Dict, Any, List
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 import httpx
 from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
+
+# Shared cache for multi-worker coordination
+WEATHER_CACHE_FILE = Path("/tmp/homesight_cache/weather.json")
 
 
 class WeatherData(BaseModel):
@@ -177,11 +182,19 @@ class WeatherService:
         Returns:
             EnvironmentalContext or None if fetch fails
         """
-        # Check cache
+        # Check shared file cache first (works across all workers)
+        if not force_refresh:
+            cached_context = self._read_weather_cache()
+            if cached_context:
+                logger.debug("Using cached weather from shared file")
+                self._cache = cached_context  # Update in-memory cache too
+                return cached_context
+
+        # Check in-memory cache as fallback
         if not force_refresh and self._cache:
             age = datetime.now() - self._cache.cached_at
             if age < self._cache_duration:
-                logger.debug(f"Using cached environmental data (age: {age.seconds}s)")
+                logger.debug(f"Using in-memory cached environmental data (age: {age.seconds}s)")
                 return self._cache
 
         try:
@@ -215,8 +228,9 @@ class WeatherService:
                     cached_at=datetime.now()
                 )
 
-                # Cache it
+                # Cache it (both in-memory and shared file)
                 self._cache = context
+                self._write_weather_cache(context)
                 logger.info(f"Refreshed weather data for {self.location_name}: {weather_data.temperature:.1f}°F, {weather_data.description}")
 
                 return context
@@ -639,3 +653,36 @@ class WeatherService:
                 lines.append(f"  • {time_str}: {fc.temperature:.0f}°F, {fc.condition}")
 
         return "\n".join(lines)
+
+    def _read_weather_cache(self) -> Optional[EnvironmentalContext]:
+        """Read weather from shared cache file"""
+        try:
+            if not WEATHER_CACHE_FILE.exists():
+                return None
+
+            with open(WEATHER_CACHE_FILE, 'r') as f:
+                cache_data = json.load(f)
+                cached_at = datetime.fromisoformat(cache_data.get('cached_at'))
+                age = datetime.now() - cached_at
+
+                # Cache valid for 15 minutes
+                if age < self._cache_duration:
+                    # Reconstruct EnvironmentalContext from JSON
+                    return EnvironmentalContext(**cache_data['data'])
+                return None
+        except Exception as e:
+            logger.warning(f"Failed to read weather cache: {e}")
+            return None
+
+    def _write_weather_cache(self, context: EnvironmentalContext):
+        """Write weather to shared cache file"""
+        try:
+            WEATHER_CACHE_FILE.parent.mkdir(exist_ok=True)
+            cache_data = {
+                'data': context.model_dump(mode='json'),
+                'cached_at': context.cached_at.isoformat()
+            }
+            with open(WEATHER_CACHE_FILE, 'w') as f:
+                json.dump(cache_data, f)
+        except Exception as e:
+            logger.error(f"Failed to write weather cache: {e}")

@@ -500,10 +500,10 @@ func (s *Server) updateIncidentAnalysis(w http.ResponseWriter, r *http.Request) 
 
 // enrichDeviceWithState enriches a device with current sensor values and incident state
 func (s *Server) enrichDeviceWithState(ctx context.Context, device model.Device) map[string]interface{} {
-	// Compute display name (alias if set, otherwise original name)
+	// Compute display name (display name if set, otherwise original name)
 	displayName := device.Name
-	if device.DisplayName() != "" {
-		displayName = device.DisplayName()
+	if device.GetDisplayName() != "" {
+		displayName = device.GetDisplayName()
 	}
 
 	// Start with all original device fields

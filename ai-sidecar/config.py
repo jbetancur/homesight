@@ -39,6 +39,7 @@ class LLMConfig(BaseModel):
     chat_max_user_message_chars: int = Field(default=2000, description="Max chars for user message")
     chat_max_memory_turns: int = Field(default=20, description="Max conversation turns to store per session")
     chat_context_turns: int = Field(default=10, description="Conversation turns to include in LLM context")
+    chat_max_prompt_chars: int = Field(default=55000, description="Max total prompt chars before truncation")
 
     # Inference concurrency settings (for background operations)
     inference: InferenceConfig = Field(default_factory=InferenceConfig)
@@ -220,6 +221,8 @@ class Config(BaseModel):
                 llm_config_data['chat_max_memory_turns'] = local_section['max_memory_turns']
             if 'context_turns' in local_section:
                 llm_config_data['chat_context_turns'] = local_section['context_turns']
+            if 'max_prompt_chars' in local_section:
+                llm_config_data['chat_max_prompt_chars'] = local_section['max_prompt_chars']
 
             # OpenAI settings
             openai_section = llm_section.get('openai', {})

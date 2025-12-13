@@ -32,8 +32,7 @@ class Device:
     battery_low: Optional[bool] = None
     readings: Optional[Dict[str, Any]] = None  # Current sensor readings at root level
 
-    @property
-    def display_name(self) -> str:
+    def get_display_name(self) -> str:
         """Returns display_name if set, otherwise the original name"""
         return self.display_name if self.display_name else self.name
 
@@ -392,7 +391,7 @@ class DeviceOntology:
                 capabilities = device.metadata.get("capabilities", "").split(",")
                 if "switch" in capabilities:
                     # Check if device name/type suggests valve
-                    name_lower = (device.name + " " + (device.alias or "")).lower()
+                    name_lower = (device.name + " " + (device.display_name or "")).lower()
                     if "valve" in name_lower or device.type == "water_valve":
                         if device not in valves:
                             valves.append(device)

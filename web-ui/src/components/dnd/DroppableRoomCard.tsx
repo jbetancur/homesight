@@ -2,6 +2,7 @@ import { useDroppable } from '@dnd-kit/core';
 import { Card, Text, Badge, Group, Stack, ActionIcon } from '@mantine/core';
 import { Settings } from 'lucide-react';
 import { DraggableSensor } from './DraggableSensor';
+import { RoomStats, calculateRoomTemperature, getTemperatureHeatmapColor } from '../shared';
 import type { Device, Room } from './types';
 
 interface DroppableRoomCardProps {
@@ -10,6 +11,7 @@ interface DroppableRoomCardProps {
   onDeviceClick: (device: Device) => void;
   onSettingsClick: (room: Room) => void;
   isRecentlyUpdated: (lastUpdated: string | undefined) => boolean;
+  heatmapMode?: boolean;
 }
 
 export function DroppableRoomCard({
@@ -18,6 +20,7 @@ export function DroppableRoomCard({
   onDeviceClick,
   onSettingsClick,
   isRecentlyUpdated,
+  heatmapMode = false,
 }: DroppableRoomCardProps) {
   const { isOver, setNodeRef } = useDroppable({
     id: room.id,
@@ -27,10 +30,19 @@ export function DroppableRoomCard({
   const hasCritical = room.devices.some((d) => d.state === 'critical' || d.active);
   const hasWarning = room.devices.some((d) => d.state === 'warning');
 
+  // Heatmap coloring
+  const roomTemp = calculateRoomTemperature(room.devices);
+  const heatmapColor = getTemperatureHeatmapColor(roomTemp);
+
   const dropTargetStyle = editMode && isOver ? {
     backgroundColor: 'var(--mantine-color-blue-0)',
     borderColor: 'var(--mantine-color-blue-5)',
     boxShadow: '0 0 20px rgba(34, 139, 230, 0.3)',
+  } : {};
+
+  const heatmapStyle = heatmapMode ? {
+    backgroundColor: heatmapColor.background,
+    borderColor: heatmapColor.border,
   } : {};
 
   return (
@@ -46,16 +58,27 @@ export function DroppableRoomCard({
           ? 'var(--mantine-color-red-6)'
           : hasWarning
             ? 'var(--mantine-color-yellow-6)'
-            : undefined,
-        borderWidth: hasCritical || (editMode && isOver) ? '2px' : '1px',
+            : heatmapMode
+              ? heatmapColor.border
+              : undefined,
+        borderWidth: hasCritical || (editMode && isOver) || heatmapMode ? '2px' : '1px',
         transition: 'all 0.3s ease-in-out',
         ...dropTargetStyle,
+        ...heatmapStyle,
       }}
     >
       <Card.Section withBorder inheritPadding py="xs">
-        <Group justify="space-between">
-          <Text fw={600}>{room.name}</Text>
+        <Group justify="space-between" align="flex-start">
+          <div>
+            <Text fw={600}>{room.name}</Text>
+            {room.devices.length > 0 && <RoomStats devices={room.devices} compact />}
+          </div>
           <Group gap="xs">
+            {heatmapMode && roomTemp && (
+              <Badge size="sm" variant="light" color="gray">
+                {heatmapColor.label}
+              </Badge>
+            )}
             <Badge
               size="sm"
               variant="light"

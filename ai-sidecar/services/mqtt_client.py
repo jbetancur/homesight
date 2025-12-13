@@ -70,7 +70,10 @@ class HomeSightMQTTClient:
         # Use port from URL if present, otherwise use provided port
         self.broker_port = url_port
 
-        self.client = mqtt.Client(client_id=client_id)
+        # Make client_id unique per worker by appending PID (prevents conflicts with multiple Gunicorn workers)
+        import os
+        unique_client_id = f"{client_id}-{os.getpid()}"
+        self.client = mqtt.Client(client_id=unique_client_id)
 
         if username and password:
             self.client.username_pw_set(username, password)

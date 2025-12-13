@@ -113,24 +113,26 @@ ai:
     # 3B: Fast, smaller, lower quality
     # 8B: Slower, larger, much better quality (recommended for privacy-first chat)
     local:
-      model_path: /home/homesight/models/qwen2.5-7b-instruct.gguf # "/home/homesight/models/llama-3.1-8b-instruct.gguf"
+      model_path: /home/homesight/models/qwen2.5-7b-instruct.gguf #llama-3.1-8b-instruct.gguf # qwen2.5-14b-instruct.gguf, qwen2.5-7b-instruct.gguf, llama-3.2-3b-instruct.gguf
       # Pre-download model with: scripts/download-model.sh
 
       # Runtime settings
       # n_ctx options:
-      # 4096 (current): ~2-3K words of context, lower memory, faster
-      # 8192: ~6K words, moderate memory increase
+      # 4096: ~2-3K words of context, lower memory, faster
+      # 8192: ~6K words, moderate memory increase (RECOMMENDED for tool calling)
       # 16384: ~12K words, noticeable memory increase
       # 32768+: Very long context but requires significant GPU/RAM
-      n_ctx: 16384          # Context window size
-      n_threads: 8         # CPU threads (auto-detect based on CPU cores)
-      n_gpu_layers: -1      # 0 = CPU only, 35+ = full GPU (if CUDA available)
+      n_ctx: 16384          # Context window size (increased for tool schemas + conversation history)
+      n_threads: 4         # CPU threads (reduced to avoid contention with Gunicorn)
+      n_gpu_layers: -1      # -1 = all layers on GPU (Vulkan acceleration)
+      n_batch: 512          # Batch size for prompt processing (higher = better GPU utilization)
       
       # Chat inference settings
       temperature: 0.1      # Sampling temperature (0.0-1.0, lower = less hallucination)
-      max_tokens: 800       # Max tokens per chat response
-      max_system_prompt_chars: 10000   # Max chars for system prompt (truncated if exceeded)
-      max_user_message_chars: 2000    # Max chars for user message
+      max_tokens: 400         # Max tokens per chat response
+      max_system_prompt_chars: 20000  # Max chars for system prompt (conservative for stability)
+      max_user_message_chars: 4000     # Max chars for user message
+      max_prompt_chars: 24000 # Max total prompt chars (~6K tokens, leaves 10K buffer for n_ctx=16K)
       max_memory_turns: 20            # Max conversation turns to store per session
       context_turns: 10               # Conversation turns to include in LLM context
 

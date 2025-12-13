@@ -11,7 +11,12 @@ import {
   GripVertical,
   Activity,
   Radio,
+  TrendingUp,
+  TrendingDown,
 } from 'lucide-react';
+import { useState, useEffect } from 'react';
+import { TimeAgo, Sparkline } from '../shared';
+import { API_BASE_WITH_PATHS as API_BASE } from '../../apiConfig';
 import type { Device, DeviceReadings } from './types';
 
 interface DraggableSensorProps {
@@ -27,7 +32,7 @@ function getDeviceIcon(device: Device) {
   const metadata = device.metadata || {};
   const model = (metadata.model || '').toLowerCase();
   const name = (device.name || '').toLowerCase();
-  const alias = (device.alias || '').toLowerCase();
+  const displayName = (device.display_name || '').toLowerCase();
 
   // Check for water/leak sensors
   if (
@@ -36,8 +41,8 @@ function getDeviceIcon(device: Device) {
     model.includes('water') ||
     model.includes('leak') ||
     name.includes('leak') ||
-    alias.includes('leak') ||
-    alias.includes('water')
+    displayName.includes('leak') ||
+    displayName.includes('water')
   ) {
     return { icon: Droplet, color: 'blue' };
   }
@@ -112,17 +117,99 @@ function getDisplayReadings(readings: DeviceReadings | undefined): Array<{ label
 }
 
 
+interface ReadingTrend {
+  current: number;
+  previous?: number;
+  delta?: number;
+  direction?: 'up' | 'down' | 'stable';
+}
+
 export function DraggableSensor({
   device,
   editMode,
   onClick,
   isRecentlyUpdated = false,
 }: DraggableSensorProps) {
+  const [sparklineData, setSparklineData] = useState<number[]>([]);
+  const [tempTrend, setTempTrend] = useState<ReadingTrend | null>(null);
+  const [humidityTrend, setHumidityTrend] = useState<ReadingTrend | null>(null);
+
   const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({
     id: device.id,
     data: { device },
     disabled: !editMode,
   });
+
+  // Fetch sparkline data and calculate trends for temperature sensors
+  useEffect(() => {
+    const temp = device.readings?.temperature_f;
+    const humidity = device.readings?.humidity;
+
+    if ((!temp || temp === 0) && (!humidity || humidity === 0)) return;
+
+    const fetchHistory = async () => {
+      try {
+        // Fetch recent readings for trend calculation (24 hours for sparse sensor data)
+        const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+
+        // Fetch temperature trend
+        if (temp && temp > 0) {
+          const tempResponse = await fetch(
+            `${API_BASE}/sensors/${device.id}/readings?type=temperature&since=${since}&limit=20`
+          );
+          if (tempResponse.ok) {
+            const readings = await tempResponse.json();
+            if (Array.isArray(readings) && readings.length > 0) {
+              const temps = readings.map((r: { value: number }) => r.value).filter((v: number) => v > 0);
+              setSparklineData(temps);
+
+              // Calculate trend from last two readings
+              if (temps.length >= 2) {
+                const current = temps[temps.length - 1];
+                const previous = temps[temps.length - 2];
+                const delta = current - previous;
+                setTempTrend({
+                  current,
+                  previous,
+                  delta,
+                  direction: Math.abs(delta) < 0.1 ? 'stable' : delta > 0 ? 'up' : 'down',
+                });
+              }
+            }
+          }
+        }
+
+        // Fetch humidity trend
+        if (humidity && humidity > 0) {
+          const humidityResponse = await fetch(
+            `${API_BASE}/sensors/${device.id}/readings?type=humidity&since=${since}&limit=20`
+          );
+          if (humidityResponse.ok) {
+            const readings = await humidityResponse.json();
+            if (Array.isArray(readings) && readings.length > 0) {
+              const humidities = readings.map((r: { value: number }) => r.value).filter((v: number) => v > 0);
+
+              if (humidities.length >= 2) {
+                const current = humidities[humidities.length - 1];
+                const previous = humidities[humidities.length - 2];
+                const delta = current - previous;
+                setHumidityTrend({
+                  current,
+                  previous,
+                  delta,
+                  direction: Math.abs(delta) < 1 ? 'stable' : delta > 0 ? 'up' : 'down',
+                });
+              }
+            }
+          }
+        }
+      } catch (error) {
+        console.error('Failed to fetch trend data:', error);
+      }
+    };
+
+    fetchHistory();
+  }, [device.id, device.readings?.temperature_f, device.readings?.humidity]);
 
   const style = {
     transform: CSS.Translate.toString(transform),
@@ -186,13 +273,9 @@ export function DraggableSensor({
             </ThemeIcon>
             <div>
               <Text size="sm" fw={500}>
-                {device.alias || device.name}
+                {device.display_name || device.name}
               </Text>
-              {device.metadata?.node_id && (
-                <Text size="xs" c="dimmed">
-                  Node {device.metadata.node_id}
-                </Text>
-              )}
+              <TimeAgo timestamp={device.last_updated} />
             </div>
           </Group>
           <Group gap="xs">
@@ -234,24 +317,50 @@ export function DraggableSensor({
           </Group>
         </Group>
 
-        {/* Readings row */}
+        {/* Readings row with trends and sparkline */}
         {displayReadings.length > 0 && (
-          <Group gap="xs" ml={editMode ? 28 : 22}>
+          <Group gap="xs" ml={editMode ? 28 : 22} align="center" wrap="nowrap">
             {displayReadings.map((reading) => {
               const ReadingIcon = reading.icon;
               const isAlert = reading.value === 'LEAK!';
+              const isTemp = reading.label === 'Temp';
+              const isHumidity = reading.label === 'Humidity';
+
+              // Get trend info
+              const trend = isTemp ? tempTrend : isHumidity ? humidityTrend : null;
+              const showTrend = trend && trend.direction !== 'stable' && trend.delta !== undefined;
+
               return (
-                <Badge
-                  key={reading.label}
-                  size="sm"
-                  variant="light"
-                  color={isAlert ? 'red' : 'gray'}
-                  leftSection={<ReadingIcon size={10} />}
-                >
-                  {reading.value}
-                </Badge>
+                <Group key={reading.label} gap={4}>
+                  <Badge
+                    size="sm"
+                    variant="light"
+                    color={isAlert ? 'red' : 'gray'}
+                    leftSection={<ReadingIcon size={10} />}
+                  >
+                    {reading.value}
+                  </Badge>
+                  {showTrend && trend.delta !== undefined && (
+                    <Group gap={2}>
+                      {trend.direction === 'up' ? (
+                        <TrendingUp size={10} color="var(--mantine-color-red-6)" />
+                      ) : (
+                        <TrendingDown size={10} color="var(--mantine-color-blue-6)" />
+                      )}
+                      <Text size="xs" c={trend.direction === 'up' ? 'red' : 'blue'}>
+                        {isTemp
+                          ? `${Math.abs(trend.delta).toFixed(1)}°`
+                          : `${Math.abs(trend.delta).toFixed(0)}%`
+                        }
+                      </Text>
+                    </Group>
+                  )}
+                </Group>
               );
             })}
+            {sparklineData.length > 2 && (
+              <Sparkline data={sparklineData} width={50} height={16} />
+            )}
           </Group>
         )}
       </Stack>

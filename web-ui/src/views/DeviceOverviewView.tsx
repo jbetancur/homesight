@@ -1,7 +1,7 @@
 import { useEffect, useState, useCallback, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import {
-  Stack, Title, Text, Card, Group, Badge, Loader, Button, Table, Paper, Tabs,
+  Stack, Title, Text, Card, Group, Badge, Loader, Button, Paper, Tabs,
   Grid, ActionIcon, Tooltip, Progress, Modal, TextInput
 } from '@mantine/core';
 import {
@@ -14,6 +14,7 @@ import { useEventSubscription } from '../useEventSubscription';
 import { API_BASE_WITH_PATHS } from '../apiConfig';
 import { CapabilityWidget } from '../components/DeviceCapabilityWidgets';
 import { EntityGrid } from '../components/EntityGrid';
+import { SensorTimeSeriesChart } from '../components/SensorTimeSeriesChart';
 
 const API_BASE = API_BASE_WITH_PATHS;
 
@@ -75,7 +76,6 @@ interface DeviceEntity {
 interface Device {
   id: string;
   name: string;
-  alias?: string;
   display_name?: string;
   type: string;
   integration: string;
@@ -398,7 +398,7 @@ export function DeviceOverviewView() {
   };
 
   const openAliasModal = () => {
-    setEditingAlias(device?.alias || '');
+    setEditingAlias(device?.display_name || '');
     setAliasModalOpen(true);
   };
 
@@ -410,7 +410,7 @@ export function DeviceOverviewView() {
       const response = await fetch(`${API_BASE}/devices/${deviceId}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ alias: editingAlias.trim() }),
+        body: JSON.stringify({ display_name: editingAlias.trim() }),
       });
       
       if (response.ok) {
@@ -419,17 +419,17 @@ export function DeviceOverviewView() {
         deviceRef.current = updatedDevice;
         setAliasModalOpen(false);
       } else {
-        console.error('Failed to save alias');
+        console.error('Failed to save display name');
       }
     } catch (error) {
-      console.error('Error saving alias:', error);
+      console.error('Error saving display name:', error);
     } finally {
       setSavingAlias(false);
     }
   };
 
-  // Get the display name (alias if set, otherwise original name)
-  const displayName = device?.display_name || device?.alias || device?.name || 'Unknown Device';
+  // Get the display name (display_name if set, otherwise original name)
+  const displayName = device?.display_name || device?.name || 'Unknown Device';
 
   return (
     <Stack gap="md">
@@ -499,7 +499,7 @@ export function DeviceOverviewView() {
               <Group gap="sm">
                 <Badge variant="light" color="blue">{device.type}</Badge>
                 <Badge variant="outline">{device.integration}</Badge>
-                {device.alias && (
+                {device.display_name && (
                   <Text size="xs" c="dimmed">Original: {device.name}</Text>
                 )}
               </Group>
@@ -567,9 +567,9 @@ export function DeviceOverviewView() {
             <Text fw={600} size="lg">Current Readings</Text>
             <Grid>
               {/* Battery Status - check both unified contract and legacy field */}
-              {(device.battery || device.battery.level !== undefined) && (() => {
+              {device.battery && (() => {
                 const batteryLevel = device.battery?.level;
-                const batteryLow = device.battery?.is_low 
+                const batteryLow = device.battery?.is_low; 
 
                 if (batteryLevel === undefined) return null;
 
@@ -637,6 +637,7 @@ export function DeviceOverviewView() {
             </Tabs.Tab>
           )}
           <Tabs.Tab value="controls">Controls</Tabs.Tab>
+          <Tabs.Tab value="history">History</Tabs.Tab>
           <Tabs.Tab value="incidents">
             Incidents
             {incidents.filter(i => i.status !== 'resolved').length > 0 && (
@@ -753,6 +754,11 @@ export function DeviceOverviewView() {
               ))}
             </Grid>
           )}
+        </Tabs.Panel>
+
+        {/* History Tab - Time-series sensor data */}
+        <Tabs.Panel value="history" pt="md">
+          <SensorTimeSeriesChart deviceId={device.id} />
         </Tabs.Panel>
 
         {/* Incidents Tab */}

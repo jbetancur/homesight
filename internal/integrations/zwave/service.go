@@ -65,6 +65,9 @@ func (s *Service) Start() error {
 		return fmt.Errorf("failed to connect to Z-Wave JS: %w", err)
 	}
 
+	// Start periodic health check for battery devices
+	go s.periodicHealthCheck()
+
 	log.Println("[ZWAVE] Z-Wave integration service started")
 	return nil
 }
@@ -115,7 +118,7 @@ func (s *Service) initialSync() {
 			// Preserve user-defined settings
 			device.ZoneID = existingDevice.ZoneID
 			device.AssetID = existingDevice.AssetID
-			device.Alias = existingDevice.Alias
+			device.DisplayName = existingDevice.DisplayName
 			device.CreatedAt = existingDevice.CreatedAt
 			device.DocsIngested = existingDevice.DocsIngested
 			device.DocsIngestedAt = existingDevice.DocsIngestedAt
@@ -227,7 +230,7 @@ func (s *Service) updateDeviceStateWithUnit(nodeID int, commandClass int, proper
 								device.Battery = &model.DeviceBattery{}
 							}
 							device.Battery.Level = int(floatVal)
-							device.Battery.IsLow = floatVal < 20
+							device.Battery.IsLow = floatVal <= 20
 							log.Printf("[ZWAVE] Updated battery level for device %s: %d%%", deviceID, int(floatVal))
 						}
 					}
@@ -391,7 +394,7 @@ func (s *Service) checkIncident(nodeID int, commandClass int, property string, v
 			}
 		}
 
-		if level, ok := value.(float64); ok && level < 20 && level > 0 && !isListening {
+		if level, ok := value.(float64); ok && level <= 20 && level > 0 && !isListening {
 			s.createIncident(nodeID, "Low Battery", fmt.Sprintf("Battery level is %d%%", int(level)), model.SeverityLow, map[string]any{
 				"battery_level": level,
 			})
@@ -460,8 +463,20 @@ func (s *Service) createIncidentFromNotification(nodeID int, notifType int, noti
 		}
 
 	case NOTIFICATION_POWER:
-		title = fmt.Sprintf("Power Event: %s", eventLabel)
-		severity = model.SeverityMedium
+		switch notifEvent {
+		case 10, 11: // Replace battery soon (10), Replace battery now (11)
+			title = "Low Battery Warning"
+			severity = model.SeverityMedium
+			incidentType = "low_battery"
+		case 14: // Charge battery soon
+			title = "Low Battery Warning"
+			severity = model.SeverityLow
+			incidentType = "low_battery"
+		default:
+			title = fmt.Sprintf("Power Event: %s", eventLabel)
+			severity = model.SeverityMedium
+			incidentType = "power"
+		}
 
 	default:
 		title = fmt.Sprintf("%s: %s", label, eventLabel)
@@ -536,4 +551,93 @@ func (s *Service) resolveIncidentsOfType(deviceID string, incidentType string) {
 			}
 		}
 	}
+}
+
+// periodicHealthCheck runs a periodic check for stale battery devices
+func (s *Service) periodicHealthCheck() {
+	ticker := time.NewTicker(30 * time.Minute)
+	defer ticker.Stop()
+
+	// Run initial check after 5 minutes
+	time.Sleep(5 * time.Minute)
+	s.checkStaleDevices()
+
+	for {
+		select {
+		case <-s.ctx.Done():
+			return
+		case <-ticker.C:
+			s.checkStaleDevices()
+		}
+	}
+}
+
+// checkStaleDevices identifies battery-powered devices that haven't reported recently
+func (s *Service) checkStaleDevices() {
+	// Get all devices
+	devices, err := s.deviceRepo.List(s.ctx)
+	if err != nil {
+		log.Printf("[ZWAVE-HEALTH] Failed to list devices: %v", err)
+		return
+	}
+
+	staleCutoff := time.Now().Add(-48 * time.Hour)
+	staleCount := 0
+
+	for _, device := range devices {
+		// Only check Z-Wave devices
+		if device.Integration != "zwave" {
+			continue
+		}
+
+		// Only check battery-powered devices
+		isBatteryPowered := false
+		if device.RawData != nil {
+			if isListening, ok := device.RawData["is_listening"].(bool); ok && !isListening {
+				isBatteryPowered = true
+			}
+		}
+
+		if !isBatteryPowered {
+			continue
+		}
+
+		// Check if device is stale (no updates in 48 hours)
+		if device.LastSeen.Before(staleCutoff) && device.Enabled {
+			staleHours := int(time.Since(device.LastSeen).Hours())
+			log.Printf("[ZWAVE-HEALTH] Stale device detected: %s (last seen %d hours ago)", device.ID, staleHours)
+
+			// Create incident for stale device
+			s.createIncident(
+				extractNodeID(device.ID),
+				"Device Not Reporting",
+				fmt.Sprintf("Battery device has not reported in %d hours (possible dead battery)", staleHours),
+				model.SeverityMedium,
+				map[string]any{
+					"hours_since_last_seen": staleHours,
+					"incident_type":         "stale_device",
+				},
+			)
+
+			// Mark device as disabled to prevent repeated incidents
+			deviceCopy := device
+			deviceCopy.Enabled = false
+			if err := s.deviceRepo.Upsert(s.ctx, &deviceCopy); err != nil {
+				log.Printf("[ZWAVE-HEALTH] Failed to disable stale device %s: %v", device.ID, err)
+			}
+
+			staleCount++
+		}
+	}
+
+	if staleCount > 0 {
+		log.Printf("[ZWAVE-HEALTH] Health check complete: %d stale devices found", staleCount)
+	}
+}
+
+// extractNodeID extracts the numeric node ID from a device ID like "zwave-47"
+func extractNodeID(deviceID string) int {
+	var nodeID int
+	fmt.Sscanf(deviceID, "zwave-%d", &nodeID)
+	return nodeID
 }

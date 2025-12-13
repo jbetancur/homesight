@@ -81,7 +81,7 @@ func (s *SQLiteDB) initSchema() error {
 		CREATE TABLE IF NOT EXISTS devices (
 			id TEXT PRIMARY KEY,
 			name TEXT NOT NULL,
-			alias TEXT,
+			display_name TEXT,
 			type TEXT,
 			integration TEXT,
 			manufacturer TEXT,
@@ -282,8 +282,8 @@ func (s *SQLiteDB) runMigrations() error {
 		// SQLite doesn't have "IF NOT EXISTS" for ALTER TABLE
 	}
 
-	// Migration: Add alias column to devices if it doesn't exist
-	_, err = s.db.Exec(`ALTER TABLE devices ADD COLUMN alias TEXT`)
+	// Migration: Add display_name column to devices if it doesn't exist
+	_, err = s.db.Exec(`ALTER TABLE devices ADD COLUMN display_name TEXT`)
 	if err != nil {
 		// Ignore error if column already exists
 	}
@@ -357,14 +357,14 @@ func (r *DeviceRepo) Get(ctx context.Context, id string) (*model.Device, error) 
 	var readingsJSON, controlsJSON, batteryJSON, connectivityJSON, entitiesJSON, rawDataJSON sql.NullString
 	var lastSeen sql.NullTime
 	var docsIngestedAt sql.NullTime
-	var alias, manufacturer, modelStr sql.NullString
+	var displayName, manufacturer, modelStr sql.NullString
 
 	err := r.db.QueryRowContext(ctx,
-		`SELECT id, name, alias, type, integration, manufacturer, model, zone_id, asset_id, enabled, last_seen,
+		`SELECT id, name, display_name, type, integration, manufacturer, model, zone_id, asset_id, enabled, last_seen,
 		        readings, controls, battery, connectivity, entities, raw_data,
 		        docs_ingested, docs_ingested_at, docs_status, created_at, updated_at
 		 FROM devices WHERE id = ?`, id).Scan(
-		&d.ID, &d.Name, &alias, &d.Type, &d.Integration, &manufacturer, &modelStr, &d.ZoneID, &d.AssetID, &d.Enabled, &lastSeen,
+		&d.ID, &d.Name, &displayName, &d.Type, &d.Integration, &manufacturer, &modelStr, &d.ZoneID, &d.AssetID, &d.Enabled, &lastSeen,
 		&readingsJSON, &controlsJSON, &batteryJSON, &connectivityJSON, &entitiesJSON, &rawDataJSON,
 		&d.DocsIngested, &docsIngestedAt, &d.DocsStatus, &d.CreatedAt, &d.UpdatedAt)
 
@@ -381,8 +381,8 @@ func (r *DeviceRepo) Get(ctx context.Context, id string) (*model.Device, error) 
 	if docsIngestedAt.Valid {
 		d.DocsIngestedAt = &docsIngestedAt.Time
 	}
-	if alias.Valid {
-		d.Alias = alias.String
+	if displayName.Valid {
+		d.DisplayName = displayName.String
 	}
 	if manufacturer.Valid {
 		d.Manufacturer = manufacturer.String
@@ -420,10 +420,10 @@ func (r *DeviceRepo) Get(ctx context.Context, id string) (*model.Device, error) 
 
 func (r *DeviceRepo) List(ctx context.Context) ([]model.Device, error) {
 	rows, err := r.db.QueryContext(ctx,
-		`SELECT id, name, alias, type, integration, manufacturer, model, zone_id, asset_id, enabled, last_seen,
+		`SELECT id, name, display_name, type, integration, manufacturer, model, zone_id, asset_id, enabled, last_seen,
 		        readings, controls, battery, connectivity, entities, raw_data,
 		        docs_ingested, docs_ingested_at, docs_status, created_at, updated_at
-		 FROM devices ORDER BY COALESCE(alias, name)`)
+		 FROM devices ORDER BY COALESCE(display_name, name)`)
 	if err != nil {
 		return nil, err
 	}
@@ -435,9 +435,9 @@ func (r *DeviceRepo) List(ctx context.Context) ([]model.Device, error) {
 		var readingsJSON, controlsJSON, batteryJSON, connectivityJSON, entitiesJSON, rawDataJSON sql.NullString
 		var lastSeen sql.NullTime
 		var docsIngestedAt sql.NullTime
-		var alias, manufacturer, modelStr sql.NullString
+		var displayName, manufacturer, modelStr sql.NullString
 
-		if err := rows.Scan(&d.ID, &d.Name, &alias, &d.Type, &d.Integration, &manufacturer, &modelStr, &d.ZoneID, &d.AssetID, &d.Enabled, &lastSeen,
+		if err := rows.Scan(&d.ID, &d.Name, &displayName, &d.Type, &d.Integration, &manufacturer, &modelStr, &d.ZoneID, &d.AssetID, &d.Enabled, &lastSeen,
 			&readingsJSON, &controlsJSON, &batteryJSON, &connectivityJSON, &entitiesJSON, &rawDataJSON,
 			&d.DocsIngested, &docsIngestedAt, &d.DocsStatus, &d.CreatedAt, &d.UpdatedAt); err != nil {
 			return nil, err
@@ -449,8 +449,8 @@ func (r *DeviceRepo) List(ctx context.Context) ([]model.Device, error) {
 		if docsIngestedAt.Valid {
 			d.DocsIngestedAt = &docsIngestedAt.Time
 		}
-		if alias.Valid {
-			d.Alias = alias.String
+		if displayName.Valid {
+			d.DisplayName = displayName.String
 		}
 		if manufacturer.Valid {
 			d.Manufacturer = manufacturer.String
@@ -494,16 +494,16 @@ func (r *DeviceRepo) Upsert(ctx context.Context, device *model.Device) error {
 	rawDataJSON, _ := json.Marshal(device.RawData)
 	device.UpdatedAt = time.Now()
 
-	// Use nullAlias to properly handle empty strings as NULL
-	var nullAlias sql.NullString
-	if device.Alias != "" {
-		nullAlias = sql.NullString{String: device.Alias, Valid: true}
+	// Use nullDisplayName to properly handle empty strings as NULL
+	var nullDisplayName sql.NullString
+	if device.DisplayName != "" {
+		nullDisplayName = sql.NullString{String: device.DisplayName, Valid: true}
 	}
 
-	// Use INSERT ... ON CONFLICT to preserve user-assigned fields (alias, zone_id)
+	// Use INSERT ... ON CONFLICT to preserve user-assigned fields (display_name, zone_id)
 	// when device discovery re-upserts existing devices
 	_, err := r.db.ExecContext(ctx,
-		`INSERT INTO devices (id, name, alias, type, integration, manufacturer, model, zone_id, asset_id, enabled, last_seen,
+		`INSERT INTO devices (id, name, display_name, type, integration, manufacturer, model, zone_id, asset_id, enabled, last_seen,
 		                      readings, controls, battery, connectivity, entities, raw_data,
 		                      docs_ingested, docs_ingested_at, docs_status, created_at, updated_at)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -527,9 +527,9 @@ func (r *DeviceRepo) Upsert(ctx context.Context, device *model.Device) error {
 		   docs_status = excluded.docs_status,
 		   updated_at = excluded.updated_at,
 		   -- Preserve user-assigned fields: only update if incoming value is non-empty
-		   alias = COALESCE(NULLIF(excluded.alias, ''), devices.alias),
+		   display_name = COALESCE(NULLIF(excluded.display_name, ''), devices.display_name),
 		   zone_id = COALESCE(NULLIF(excluded.zone_id, ''), devices.zone_id)`,
-		device.ID, device.Name, nullAlias, device.Type, device.Integration, device.Manufacturer, device.Model, device.ZoneID, device.AssetID, device.Enabled,
+		device.ID, device.Name, nullDisplayName, device.Type, device.Integration, device.Manufacturer, device.Model, device.ZoneID, device.AssetID, device.Enabled,
 		device.LastSeen, string(readingsJSON), string(controlsJSON), string(batteryJSON), string(connectivityJSON), string(entitiesJSON), string(rawDataJSON),
 		device.DocsIngested, device.DocsIngestedAt, device.DocsStatus, device.CreatedAt, device.UpdatedAt)
 	return err
@@ -547,11 +547,11 @@ func (r *DeviceRepo) Update(ctx context.Context, id string, updates map[string]i
 
 	// Allowed fields that can be updated
 	allowedFields := map[string]bool{
-		"alias":   true,
-		"name":    true,
-		"type":    true,
-		"zone_id": true,
-		"enabled": true,
+		"display_name": true,
+		"name":         true,
+		"type":         true,
+		"zone_id":      true,
+		"enabled":      true,
 	}
 
 	for field, value := range updates {
@@ -559,9 +559,14 @@ func (r *DeviceRepo) Update(ctx context.Context, id string, updates map[string]i
 			continue // Skip disallowed fields
 		}
 
-		// Handle nullable string fields (alias can be set to NULL with empty string)
-		if field == "alias" {
-			if value.(string) == "" {
+		// Handle nullable string fields (display_name can be set to NULL with empty string)
+		if field == "display_name" {
+			strValue, ok := value.(string)
+			if !ok {
+				log.Printf("[DB] Warning: display_name value is not a string: %T", value)
+				continue
+			}
+			if strValue == "" {
 				setClauses = append(setClauses, field+" = NULL")
 			} else {
 				setClauses = append(setClauses, field+" = ?")
@@ -1098,13 +1103,13 @@ type SensorReadingRepo struct {
 
 // SensorReading represents a time-series sensor reading
 type SensorReading struct {
-	ID          int64
-	DeviceID    string
-	ReadingType string
-	Value       float64
-	Unit        string // "celsius" or "fahrenheit"
-	OutdoorTemp *float64
-	Timestamp   time.Time
+	ID          int64     `json:"id"`
+	DeviceID    string    `json:"device_id"`
+	ReadingType string    `json:"reading_type"`
+	Value       float64   `json:"value"`
+	Unit        string    `json:"unit"` // "celsius" or "fahrenheit"
+	OutdoorTemp *float64  `json:"outdoor_temp,omitempty"`
+	Timestamp   time.Time `json:"timestamp"`
 }
 
 func NewSensorReadingRepo(db *SQLiteDB) *SensorReadingRepo {

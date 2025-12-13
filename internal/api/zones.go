@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"time"
 
@@ -220,7 +221,7 @@ func (s *Server) handleDeleteZone(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// updateDevice updates device fields (alias, zone_id, etc.)
+// updateDevice updates device fields (display_name, zone_id, etc.)
 func (s *Server) updateDevice(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	deviceID := chi.URLParam(r, "id")
@@ -233,7 +234,11 @@ func (s *Server) updateDevice(w http.ResponseWriter, r *http.Request) {
 
 	// Verify device exists
 	device, err := s.deviceRepo.Get(ctx, deviceID)
-	if err != nil || device == nil {
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Error fetching device: %v", err), http.StatusInternalServerError)
+		return
+	}
+	if device == nil {
 		http.Error(w, "Device not found", http.StatusNotFound)
 		return
 	}

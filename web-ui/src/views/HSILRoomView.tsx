@@ -40,6 +40,7 @@ import {
   Activity,
   GripVertical,
   Check,
+  Flame,
 } from 'lucide-react';
 import {
   DroppableRoomCard,
@@ -80,11 +81,11 @@ export default function HSILRoomView() {
   const [selectedZone, setSelectedZone] = useState<string>('');
   const [editingAlias, setEditingAlias] = useState<string>('');
   const [weather, setWeather] = useState<any>(null);
-  const [heatingSystemType, setHeatingSystemType] = useState<string | undefined>(undefined);
   const [editingZone, setEditingZone] = useState<Room | null>(null);
   const [editedAttributes, setEditedAttributes] = useState<ZoneAttributes | null>(null);
   const [activeTab, setActiveTab] = useState<string>('rooms');
   const [editMode, setEditMode] = useState(false);
+  const [heatmapMode, setHeatmapMode] = useState(false);
   const [activeDevice, setActiveDevice] = useState<Device | null>(null);
 
   // DnD sensors with activation constraint to prevent accidental drags
@@ -97,40 +98,28 @@ export default function HSILRoomView() {
   );
 
   // Helper to check if device was recently updated (within last 30 seconds)
-  const isRecentlyUpdated = (lastUpdated: string | undefined) => {
+  const isRecentlyUpdated = useCallback((lastUpdated: string | undefined) => {
     if (!lastUpdated) return false;
     const updateTime = new Date(lastUpdated).getTime();
     const now = new Date().getTime();
-    const thirtySecondsAgo = now - 30000;
+    const thirtySecondsAgo = now - 30 * 1000;
     return updateTime > thirtySecondsAgo;
-  };
+  }, []);
+
 
   useEffect(() => {
     fetchRoomsAndDevices();
     fetchZoneSchema();
     fetchWeather();
-    fetchHomeProfile();
     const weatherInterval = setInterval(fetchWeather, 900000); // 15 minutes
     return () => {
       clearInterval(weatherInterval);
     };
   }, []);
 
-  const fetchHomeProfile = async () => {
-    try {
-      const res = await fetch(`${API_BASE}/api/home/profile`);
-      if (res.ok) {
-        const profile = await res.json();
-        setHeatingSystemType(profile.heating_system_type);
-      }
-    } catch (error) {
-      console.error('Failed to fetch home profile:', error);
-    }
-  };
 
-  // Real-time event handling
+  // Real-time event handling - use events instead of polling
   const handleEvent = useCallback((event: any) => {
-    // Refresh devices on incident or device state changes
     if (event.type === "incident_added" ||
         event.type === "incident_removed" ||
         event.type === "incident_updated" ||
@@ -219,7 +208,7 @@ export default function HSILRoomView() {
         roomMap.get(zoneId)!.devices.push({
           id: device.id,
           name: device.name,
-          alias: device.alias,
+          display_name: device.display_name,
           type: device.type,
           value: device.value,
           state: device.state || 'unknown',
@@ -432,8 +421,18 @@ export default function HSILRoomView() {
           </Tabs.List>
 
           <Tabs.Panel value="rooms" pt="md">
-            {/* Edit Mode Toggle */}
-            <Group justify="flex-end" mb="md">
+            {/* Edit Mode & Heatmap Toggles */}
+            <Group justify="space-between" mb="md">
+              <Tooltip label="View temperature distribution across rooms">
+                <Button
+                  variant={heatmapMode ? 'filled' : 'light'}
+                  color={heatmapMode ? 'orange' : 'gray'}
+                  leftSection={<Flame size={16} />}
+                  onClick={() => setHeatmapMode(!heatmapMode)}
+                >
+                  {heatmapMode ? 'Heatmap On' : 'Heatmap Mode'}
+                </Button>
+              </Tooltip>
               <Tooltip
                 label={editMode ? 'Exit edit mode' : 'Enter edit mode to drag sensors between rooms'}
               >
@@ -461,10 +460,11 @@ export default function HSILRoomView() {
                       <DroppableRoomCard
                         room={room}
                         editMode={editMode}
+                        heatmapMode={heatmapMode}
                         onDeviceClick={(device) => {
                           setSelectedDevice(device);
                           setSelectedZone(device.zone_id || '');
-                          setEditingAlias(device.alias || '');
+                          setEditingAlias(device.display_name || '');
                           setShowSettings(true);
                         }}
                         onSettingsClick={(room) => {
@@ -484,7 +484,7 @@ export default function HSILRoomView() {
                   onDeviceClick={(device) => {
                     setSelectedDevice(device);
                     setSelectedZone(device.zone_id || '');
-                    setEditingAlias(device.alias || '');
+                    setEditingAlias(device.display_name || '');
                     setShowSettings(true);
                   }}
                   isRecentlyUpdated={isRecentlyUpdated}
@@ -505,7 +505,7 @@ export default function HSILRoomView() {
           </Tabs.Panel>
 
           <Tabs.Panel value="correlation" pt="md">
-            <ClimateInsights rooms={rooms} weather={weather} heatingSystemType={heatingSystemType} />
+            <ClimateInsights />
           </Tabs.Panel>
 
           <Tabs.Panel value="learning" pt="md">
@@ -523,11 +523,11 @@ export default function HSILRoomView() {
           setSelectedZone('');
           setEditingAlias('');
         }}
-        title={`Configure: ${selectedDevice?.alias ? `${selectedDevice.alias} (${selectedDevice.name})` : selectedDevice?.name}`}
+        title={`Configure: ${selectedDevice?.display_name ? `${selectedDevice.display_name} (${selectedDevice.name})` : selectedDevice?.name}`}
       >
         <Stack gap="md">
           <TextInput
-            label="Device Alias"
+            label="Device Display Name"
             placeholder="Enter a friendly name (optional)"
             value={editingAlias}
             onChange={(e) => setEditingAlias(e.currentTarget.value)}
@@ -558,14 +558,14 @@ export default function HSILRoomView() {
                 
                 try {
                   // Update alias if changed
-                  if (editingAlias !== (selectedDevice.alias || '')) {
+                  if (editingAlias !== (selectedDevice.display_name || '')) {
                     const aliasResponse = await fetch(`${API_BASE}/api/devices/${selectedDevice.id}`, {
                       method: 'PATCH',
                       headers: { 'Content-Type': 'application/json' },
-                      body: JSON.stringify({ alias: editingAlias.trim() || null }),
+                      body: JSON.stringify({ display_name: editingAlias.trim() || null }),
                     });
                     if (!aliasResponse.ok) {
-                      console.error('Failed to update alias');
+                      console.error('Failed to update display name');
                     }
                   }
                   

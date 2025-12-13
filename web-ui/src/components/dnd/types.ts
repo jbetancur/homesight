@@ -70,7 +70,7 @@ export interface DeviceEntity {
 export interface Device {
   id: string;
   name: string;
-  alias?: string;
+  display_name?: string;
   type: string;
   value: number | boolean | null;
   state: 'normal' | 'warning' | 'critical' | 'unknown';

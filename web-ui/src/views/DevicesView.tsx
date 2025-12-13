@@ -254,10 +254,10 @@ export function DevicesView() {
     // Search filter - search by display_name, name, alias, type, manufacturer, model
     if (searchQuery) {
       const query = searchQuery.toLowerCase();
-      const displayName = device.display_name || device.alias || device.name;
+      const displayName = device.display_name || device.name;
       const matchesDisplayName = displayName?.toLowerCase().includes(query);
       const matchesName = device.name?.toLowerCase().includes(query);
-      const matchesAlias = device.alias?.toLowerCase().includes(query);
+      const matchesAlias = device.display_name?.toLowerCase().includes(query);
       const matchesType = device.type?.toLowerCase().includes(query);
       const matchesManufacturer = device.metadata?.manufacturer?.toLowerCase().includes(query);
       const matchesModel = device.metadata?.model?.toLowerCase().includes(query);
@@ -478,7 +478,7 @@ export function DevicesView() {
                       <Table.Td>
                         <Group gap="xs">
                           {getDeviceIcon(device.type, 16)}
-                          <Text fw={500} style={{ color: '#228be6' }}>{device.alias || device.name}</Text>
+                          <Text fw={500} style={{ color: '#228be6' }}>{device.display_name || device.name}</Text>
                         </Group>
                       </Table.Td>
                       <Table.Td>
@@ -548,7 +548,7 @@ export function DevicesView() {
                               onClick={() => setConfirmModal({
                                 open: true,
                                 deviceId: device.id,
-                                deviceName: device.display_name || device.alias || device.name
+                                deviceName: device.display_name || device.name
                               })}
                               loading={offboardingId === device.id}
                               disabled={offboardingId === device.id}
@@ -582,7 +582,7 @@ export function DevicesView() {
                       <BatteryIndicator level={device.battery?.level} metadata={device.metadata} />
                     </Group>
                     <div>
-                      <Text fw={600} lineClamp={1}>{device.display_name || device.alias || device.name}</Text>
+                      <Text fw={600} lineClamp={1}>{device.display_name || device.name}</Text>
                       <Text size="xs" c="dimmed" lineClamp={1}>{device.metadata?.manufacturer || device.type}</Text>
                     </div>
                     {/* Sensor readings */}
@@ -619,7 +619,7 @@ export function DevicesView() {
                           onClick={() => setConfirmModal({
                             open: true,
                             deviceId: device.id,
-                            deviceName: device.display_name || device.alias || device.name
+                            deviceName: device.display_name || device.name
                           })}
                           loading={offboardingId === device.id}
                           disabled={offboardingId === device.id}

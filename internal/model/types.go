@@ -33,8 +33,8 @@ type DeviceCommand struct {
 type Device struct {
 	// Core Identity
 	ID           string `json:"id"`
-	Name         string `json:"name"`            // Original device name from integration
-	Alias        string `json:"alias,omitempty"` // User-defined friendly name
+	Name         string `json:"name"`                   // Original device name from integration
+	DisplayName  string `json:"display_name,omitempty"` // User-defined friendly name
 	Type         string `json:"type"`
 	Integration  string `json:"integration"`
 	Manufacturer string `json:"manufacturer,omitempty"`
@@ -68,10 +68,10 @@ type Device struct {
 	UpdatedAt time.Time `json:"updated_at"`
 }
 
-// DisplayName returns the alias if set, otherwise the original name
-func (d *Device) DisplayName() string {
-	if d.Alias != "" {
-		return d.Alias
+// GetDisplayName returns the display name if set, otherwise the original name
+func (d *Device) GetDisplayName() string {
+	if d.DisplayName != "" {
+		return d.DisplayName
 	}
 	return d.Name
 }

@@ -11,7 +11,7 @@ interface DeviceReadings {
 interface Device {
   id: string;
   name: string;
-  alias?: string;
+  display_name?: string;
   type: string;
   value: number | boolean | null;
   state: 'normal' | 'warning' | 'critical' | 'unknown';
@@ -97,7 +97,7 @@ export default function WeatherCorrelationChart({ rooms, weather }: WeatherCorre
           insights.push({
             room: room.name,
             metric: 'Temperature',
-            deviceName: device.alias || device.name,
+            deviceName: device.display_name || device.name,
             indoorValue: indoorTemp,
             outdoorValue: weather.weather.temperature,
             delta,
@@ -140,7 +140,7 @@ export default function WeatherCorrelationChart({ rooms, weather }: WeatherCorre
           insights.push({
             room: room.name,
             metric: 'Humidity',
-            deviceName: device.alias || device.name,
+            deviceName: device.display_name || device.name,
             indoorValue: indoorHumidity,
             outdoorValue: weather.weather.humidity,
             delta,

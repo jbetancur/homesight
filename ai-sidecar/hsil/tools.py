@@ -73,7 +73,7 @@ class ToolRegistry:
             name="check_erratic_behavior",
             description="Check if a device is exhibiting erratic behavior (rapid-fire events, unusual frequency).",
             parameters=[
-                ToolParameter("device_id", "string", "The device ID to check"),
+                ToolParameter("device_id", "string", "The device ID to check", required=False),
             ],
             function=self._check_erratic_behavior
         ))
@@ -102,7 +102,7 @@ class ToolRegistry:
             name="get_comfort_preferences",
             description="Get learned comfort preferences for a location (temperature, humidity).",
             parameters=[
-                ToolParameter("location", "string", "The room/zone name"),
+                ToolParameter("location", "string", "The room/zone name", required=False),
             ],
             function=self._get_comfort_preferences
         ))
@@ -191,10 +191,10 @@ class ToolRegistry:
         # Get sensor readings (time-series data)
         self.register_tool(Tool(
             name="get_sensor_readings",
-            description="Get time-series sensor readings for temperature, humidity, etc. Use this to see historical trends or recent values over time. Returns readings with timestamps for charting and analysis.",
+            description="Get time-series sensor readings for any sensor type. Use this to see historical trends or recent values over time. Returns readings with timestamps for charting and analysis. Supports: temperature, humidity, water/leak, motion, contact, power, energy.",
             parameters=[
                 ToolParameter("device_id", "string", "The device ID (e.g., 'zwave-31')"),
-                ToolParameter("reading_type", "string", "The type of reading (e.g., 'temperature', 'humidity')", required=False),
+                ToolParameter("reading_type", "string", "The type of reading: 'temperature', 'humidity', 'water', 'motion', 'contact', 'power', 'energy' (default: 'temperature')", required=False),
                 ToolParameter("hours_back", "number", "How many hours of history to retrieve (default: 24)", required=False),
             ],
             function=self._get_sensor_readings
@@ -320,17 +320,32 @@ class ToolRegistry:
             "interpretation": self._interpret_anomaly_score(score, is_anomalous)
         }
 
-    async def _check_erratic_behavior(self, device_id: str) -> Dict[str, Any]:
-        """Check for erratic behavior"""
+    async def _check_erratic_behavior(self, device_id: Optional[str] = None) -> Dict[str, Any]:
+        """Check for erratic behavior.
+
+        If `device_id` is provided, return stats for that device.
+        If `device_id` is omitted (None), return a list/count of all erratic devices.
+        """
         if not self.learning_engine:
             return {"error": "Learning engine not available"}
 
+        # If no device_id supplied, return the global erratic devices list
+        if not device_id:
+            erratic = await self.learning_engine.get_all_erratic_devices()
+            return {
+                "count": len(erratic),
+                "devices": erratic,
+                "message": "Returned all erratic devices (no device_id supplied)"
+            }
+
+        # device_id supplied: return device-specific stats
         stats = await self.learning_engine.get_device_erratic_stats(device_id)
 
         if not stats:
             return {
                 "is_erratic": False,
-                "message": "No erratic behavior data available for this device"
+                "message": "No erratic behavior data available for this device",
+                "device_id": device_id
             }
 
         return stats
@@ -360,10 +375,19 @@ class ToolRegistry:
             "message": "Historical query not yet implemented"
         }
 
-    async def _get_comfort_preferences(self, location: str) -> Dict[str, Any]:
+    async def _get_comfort_preferences(self, location: str = None) -> Dict[str, Any]:
         """Get comfort preferences"""
         if not self.learning_engine:
             return {"error": "Learning engine not available"}
+
+        if not location:
+            # Option 1: Return a user-friendly error
+            return {"success": False, "error": "Missing required parameter: location. Please specify a room or zone name."}
+            # Option 2: Or return global/default preferences if available
+            # prefs = await self.learning_engine.get_comfort_preference(None)
+            # if not prefs:
+            #     return {"message": "No global comfort preferences learned yet."}
+            # return prefs
 
         prefs = await self.learning_engine.get_comfort_preference(location)
 
@@ -812,15 +836,22 @@ class ToolRegistry:
                         result["humidity"] = readings["humidity"]
 
                 # Extract from entities (alternative location)
+                # IMPORTANT: Only include sensor entities, not configuration parameters
                 entities = device.get("entities", [])
                 if entities:
+                    # Filter to only useful entity types (sensors, not config params)
+                    useful_types = {"sensor", "battery", "switch", "binary_sensor", "light", "climate"}
                     result["entities"] = {}
                     for entity in entities:
                         entity_id = entity.get("id", "")
                         entity_type = entity.get("type") or entity.get("entity_type", "")
                         value = entity.get("value")
 
-                        # Add to entities dict
+                        # Skip configuration parameters (cc112 = config params, cc113 = alarms, etc)
+                        if entity_type not in useful_types or "cc112-" in entity_id or "cc132-" in entity_id or "cc134-" in entity_id:
+                            continue
+
+                        # Add to entities dict (filtered)
                         result["entities"][entity_id] = {
                             "type": entity_type,
                             "value": value,

@@ -411,13 +411,33 @@ class LLMProvider:
             formatted_prompt += "<|start_header_id|>assistant<|end_header_id|>\n"
 
             # TRUNCATE PROMPT to avoid ggml crashes
-            # Keep first 16000 chars (system context + recent messages)
-            if len(formatted_prompt) > 16000:
-                logger.warning(f"Local prompt exceeded 16000 chars ({len(formatted_prompt)}), truncating to fit context.")
-                formatted_prompt = formatted_prompt[:16000]
+            # Get max_prompt_chars from config (calculated as: n_ctx - max_tokens, with buffer)
+            cfg = getattr(self, 'config', None)
+            max_prompt_chars = getattr(cfg, 'chat_max_prompt_chars', 55000) if cfg else 55000
+            if len(formatted_prompt) > max_prompt_chars:
+                # Smart truncation: keep system message + last N user/assistant turns
+                logger.warning(f"Local prompt exceeded {max_prompt_chars} chars ({len(formatted_prompt)}), truncating intelligently.")
 
-            # Estimate tokens for metrics
+                # Find system message end
+                system_end = formatted_prompt.find("<|start_header_id|>user<|end_header_id|>")
+                if system_end > 0:
+                    system_msg = formatted_prompt[:system_end]
+                    conversation = formatted_prompt[system_end:]
+
+                    # Truncate conversation to fit
+                    available = max_prompt_chars - len(system_msg)
+                    if len(conversation) > available:
+                        # Keep most recent conversation (end of string)
+                        conversation = conversation[-available:]
+
+                    formatted_prompt = system_msg + conversation
+                else:
+                    # Fallback: just truncate from start
+                    formatted_prompt = formatted_prompt[:max_prompt_chars]
+
+            # Estimate tokens for metrics and log for debugging
             input_token_count = len(formatted_prompt) // 4
+            logger.info(f"📊 Prompt: {len(formatted_prompt)} chars, ~{input_token_count} tokens (n_ctx={self.config.local_n_ctx}, max_tokens={max_tokens})")
             llm_input_tokens.labels(model=model_name, provider="local").inc(input_token_count)
 
             # Run llama-cpp safely

@@ -264,7 +264,7 @@ func (c *Consumer) handleDiscovery(integration, deviceID string, payload []byte)
 	}
 
 	if existingDevice != nil {
-		log.Printf("[MQTT-CONSUMER] Found existing device %s: alias=%q, zone=%s", msg.DeviceID, existingDevice.Alias, existingDevice.ZoneID)
+		log.Printf("[MQTT-CONSUMER] Found existing device %s: display_name=%q, zone=%s", msg.DeviceID, existingDevice.DisplayName, existingDevice.ZoneID)
 	} else {
 		log.Printf("[MQTT-CONSUMER] No existing device found for %s (creating new)", msg.DeviceID)
 	}
@@ -305,8 +305,8 @@ func (c *Consumer) handleDiscovery(integration, deviceID string, payload []byte)
 		// Preserve zone and asset assignments (user-defined)
 		device.ZoneID = existingDevice.ZoneID
 		device.AssetID = existingDevice.AssetID
-		// Preserve alias (user-defined name)
-		device.Alias = existingDevice.Alias
+		// Preserve display_name (user-defined name)
+		device.DisplayName = existingDevice.DisplayName
 		// Preserve existing created_at
 		device.CreatedAt = existingDevice.CreatedAt
 		// Preserve docs ingestion status
@@ -336,7 +336,7 @@ func (c *Consumer) handleDiscovery(integration, deviceID string, payload []byte)
 				}
 			}
 		}
-		log.Printf("[MQTT-CONSUMER] After preservation: alias=%q, zone=%s", device.Alias, device.ZoneID)
+		log.Printf("[MQTT-CONSUMER] After preservation: display_name=%q, zone=%s", device.DisplayName, device.ZoneID)
 	}
 
 	if device.Name == "" {
@@ -449,10 +449,32 @@ func (c *Consumer) handleState(deviceID string, payload []byte) {
 			device.RawData[fmt.Sprintf("state_%s", k)] = v
 		}
 
-		// Update unified Controls based on state changes
+		// Update unified Controls and Readings based on state changes
 		for k, v := range msg.Values {
 			normalizedKey := strings.ToLower(k)
 			log.Printf("[MQTT-CONSUMER] Processing state key for %s: %s (normalized: %s) = %v (type: %T)", deviceID, k, normalizedKey, v, v)
+
+			// Temperature readings
+			if normalizedKey == "temperature_f" || strings.Contains(normalizedKey, "temperature") {
+				if floatVal, ok := v.(float64); ok {
+					if device.Readings == nil {
+						device.Readings = &model.DeviceReadings{}
+					}
+					device.Readings.TemperatureF = &floatVal
+					log.Printf("[MQTT-CONSUMER] ✓ Updated temperature reading for %s: %.1f°F", deviceID, floatVal)
+				}
+			}
+
+			// Humidity readings
+			if normalizedKey == "humidity" || normalizedKey == "humidity_pct" || strings.Contains(normalizedKey, "humidity") {
+				if floatVal, ok := v.(float64); ok {
+					if device.Readings == nil {
+						device.Readings = &model.DeviceReadings{}
+					}
+					device.Readings.Humidity = &floatVal
+					log.Printf("[MQTT-CONSUMER] ✓ Updated humidity reading for %s: %.1f%%", deviceID, floatVal)
+				}
+			}
 
 			// Switch control updates (binary switch)
 			if normalizedKey == "switch_state" || normalizedKey == "currentvalue" || normalizedKey == "targetvalue" {
@@ -528,7 +550,7 @@ func (c *Consumer) handleState(deviceID string, payload []byte) {
 		}
 		c.eventBus.Publish(event)
 
-		// Persist temperature and humidity readings to database for thermal analysis
+		// Persist sensor readings to database for time-series analysis
 		if valueType == "float" {
 			normalizedKey := strings.ToLower(key)
 			// Store temperature_f directly (integrations should send standardized Fahrenheit)
@@ -536,6 +558,24 @@ func (c *Consumer) handleState(deviceID string, payload []byte) {
 				c.persistSensorReading(deviceID, "temperature", floatValue)
 			} else if strings.Contains(normalizedKey, "humidity") {
 				c.persistSensorReading(deviceID, "humidity", floatValue)
+			} else if strings.Contains(normalizedKey, "power") {
+				c.persistSensorReading(deviceID, "power", floatValue)
+			} else if strings.Contains(normalizedKey, "energy") {
+				c.persistSensorReading(deviceID, "energy", floatValue)
+			}
+		} else if valueType == "bool" {
+			normalizedKey := strings.ToLower(key)
+			// Convert boolean to float for time-series (0=false, 1=true)
+			var floatVal float64
+			if boolVal, ok := value.(bool); ok && boolVal {
+				floatVal = 1.0
+			}
+			if strings.Contains(normalizedKey, "water") || strings.Contains(normalizedKey, "leak") {
+				c.persistSensorReading(deviceID, "water", floatVal)
+			} else if strings.Contains(normalizedKey, "motion") {
+				c.persistSensorReading(deviceID, "motion", floatVal)
+			} else if strings.Contains(normalizedKey, "contact") {
+				c.persistSensorReading(deviceID, "contact", floatVal)
 			}
 		}
 
@@ -609,7 +649,7 @@ func (c *Consumer) handleAttribute(deviceID, attrName string, payload []byte) {
 	}
 	c.eventBus.Publish(event)
 
-	// Persist temperature and humidity readings to database for thermal analysis
+	// Persist sensor readings to database for time-series analysis
 	if valueType == "float" {
 		normalizedAttr := strings.ToLower(attrName)
 		if strings.Contains(normalizedAttr, "temperature") || normalizedAttr == "air temperature" {
@@ -617,6 +657,24 @@ func (c *Consumer) handleAttribute(deviceID, attrName string, payload []byte) {
 			c.persistSensorReading(deviceID, "temperature", floatValue)
 		} else if strings.Contains(normalizedAttr, "humidity") {
 			c.persistSensorReading(deviceID, "humidity", floatValue)
+		} else if strings.Contains(normalizedAttr, "power") {
+			c.persistSensorReading(deviceID, "power", floatValue)
+		} else if strings.Contains(normalizedAttr, "energy") {
+			c.persistSensorReading(deviceID, "energy", floatValue)
+		}
+	} else if valueType == "bool" {
+		normalizedAttr := strings.ToLower(attrName)
+		// Convert boolean to float for time-series (0=false, 1=true)
+		var floatVal float64
+		if boolVal, ok := msg.Value.(bool); ok && boolVal {
+			floatVal = 1.0
+		}
+		if strings.Contains(normalizedAttr, "water") || strings.Contains(normalizedAttr, "leak") {
+			c.persistSensorReading(deviceID, "water", floatVal)
+		} else if strings.Contains(normalizedAttr, "motion") {
+			c.persistSensorReading(deviceID, "motion", floatVal)
+		} else if strings.Contains(normalizedAttr, "contact") {
+			c.persistSensorReading(deviceID, "contact", floatVal)
 		}
 	}
 
@@ -874,7 +932,7 @@ func (c *Consumer) getOutdoorTemp() *float64 {
 	return &temp
 }
 
-// persistSensorReading stores temperature/humidity readings in the database
+// persistSensorReading stores sensor readings in the database for time-series analysis
 func (c *Consumer) persistSensorReading(deviceID, readingType string, value float64) {
 	if c.readingRepo == nil {
 		return

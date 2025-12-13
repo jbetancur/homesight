@@ -281,47 +281,6 @@ async def lifespan(app: FastAPI):
     # Start health status updater in background
     health_task = asyncio.create_task(update_health_status())
 
-    # Start backend incident listener (polls backend API for new incidents)
-    async def listen_for_incidents():
-        """Poll backend API for new incidents and broadcast via SSE"""
-        logger.info("🚨 Starting incident listener task (polls every 2s)")
-        last_check = datetime.utcnow()
-        sse_service = get_sse_service()
-        
-        while True:
-            try:
-                await asyncio.sleep(2)  # Poll every 2 seconds
-                
-                # Fetch recent incidents from backend
-                async with httpx.AsyncClient() as client:
-                    response = await client.get(
-                        f"{config.backend_url}/api/incidents",
-                        timeout=5.0
-                    )
-                    
-                    if response.status_code == 200:
-                        incidents = response.json()
-                        
-                        # Broadcast new incidents (created after last_check)
-                        for incident in incidents:
-                            created_at_str = incident.get("created_at")
-                            if created_at_str:
-                                try:
-                                    created_at = datetime.fromisoformat(created_at_str.replace("Z", "+00:00"))
-                                    if created_at.replace(tzinfo=None) > last_check:
-                                        # New incident! Broadcast to SSE clients
-                                        logger.info(f"🚨 New incident detected: {incident.get('id')} ({incident.get('severity')})")
-                                        await sse_service.broadcast_incident(incident)
-                                except Exception as e:
-                                    logger.debug(f"Error parsing incident timestamp: {e}")
-                        
-                        last_check = datetime.utcnow()
-                    
-            except Exception as e:
-                logger.debug(f"Error polling incidents: {e}")
-    
-    incident_listener_task = asyncio.create_task(listen_for_incidents())
-
     # Optionally start vendor indexer (background documentation crawler)
     vendor_indexer_task = None
     if config.search.enable_vendor_indexer:
@@ -1356,13 +1315,3 @@ async def hsil_get_climate_insights():
     except Exception as e:
         logger.error(f"HSIL climate insights error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
-
-
-if __name__ == "__main__":
-    uvicorn.run(
-        "main:app",
-        host="0.0.0.0",
-        port=8001,
-        log_level="info",
-        reload=False
-    )

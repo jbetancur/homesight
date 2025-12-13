@@ -82,6 +82,12 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
   CMD curl -f http://localhost:8001/health || exit 1
 
 # ------------------------------------------------------------
-# Start the app
+# Start the app with Gunicorn + Uvicorn workers
+# Optimized for Vulkan GPU (AMD Radeon 780M) workloads:
+# - 2 workers: Balance between concurrency and GPU memory
+# - 1 thread per worker: GPU operations are synchronous
+# - 120s timeout: Allow time for LLM inference on GPU
+# - preload: Share model weights across workers (saves GPU memory)
+# See gunicorn.conf.py for full configuration
 # ------------------------------------------------------------
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8001"]
+CMD ["gunicorn", "-c", "gunicorn.conf.py", "main:app"]

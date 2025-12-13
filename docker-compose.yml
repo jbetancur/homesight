@@ -89,12 +89,19 @@ services:
       - TOKENIZERS_PARALLELISM=false
       # Vulkan backend for llama-cpp-python
       - GGML_VULKAN=1
+      - GGML_VULKAN_DEVICE=0
       # AMD RDNA3 (Phoenix / gfx1103) compatibility
       - HSA_OVERRIDE_GFX_VERSION=11.0.3
       - AMD_VULKAN_ICD=RADV
+      - VK_LOADER_DEBUG=error
+      # Gunicorn worker configuration
+      # CRITICAL: Must be 1 for llama.cpp due to KV cache state conflicts
+      - GUNICORN_WORKERS=1
+      # Backend services
       - BACKEND_URL=http://api:8080
       - MQTT_BROKER_URL=tcp://mosquitto:1883
       - HOMESIGHT_CONFIG=/etc/homesight/config.yaml
+      # API keys
       - BRAVE_SEARCH_API_KEY=${BRAVE_SEARCH_API_KEY}
       - BING_SEARCH_API_KEY=${BING_SEARCH_API_KEY}
       - OPENAI_API_KEY=${OPENAI_API_KEY}

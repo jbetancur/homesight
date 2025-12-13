@@ -14,8 +14,13 @@ Core components:
 """
 
 import logging
+import os
+import json
+import time
+import fcntl
 from typing import Optional, Dict, Any
 from datetime import datetime
+from pathlib import Path
 
 from .types import (
     EventContext,
@@ -35,6 +40,12 @@ from .river_feedback_adapter import RiverFeedbackAdapter
 from .incident_generator import IncidentGenerator
 
 logger = logging.getLogger(__name__)
+
+# Shared cache directory for multi-worker coordination
+CACHE_DIR = Path("/tmp/homesight_cache")
+CACHE_DIR.mkdir(exist_ok=True)
+CLIMATE_INSIGHTS_CACHE_FILE = CACHE_DIR / "climate_insights.json"
+CLIMATE_INSIGHTS_LOCK_FILE = CACHE_DIR / "climate_insights.lock"
 
 
 class HSILService:
@@ -117,13 +128,34 @@ class HSILService:
             backend_url=backend_url
         )
 
+        # Concurrency control for LLM access
+        import asyncio
+        self._llm_lock = asyncio.Lock()  # Prevent simultaneous LLM calls
+        self._background_task = None
+
         logger.info("✅ HSIL services initialized (simplified architecture)")
 
     async def start(self):
         """Start background services"""
         logger.info("Starting HSIL background services...")
-        await self.weather_sync.start()
+
+        # Initialize conversational agent (needed by all workers)
         await self.conversational_agent.initialize()
+
+        # Only run background tasks in one worker to avoid duplicate work
+        import asyncio
+        worker_id = os.getenv("WORKER_ID", "0")
+        if worker_id == "0" or not os.getenv("GUNICORN_WORKERS"):
+            logger.info(f"Worker {worker_id}: Starting background tasks (weather sync, climate insights)")
+
+            # Start weather sync (polls weather API every 10 min)
+            await self.weather_sync.start()
+
+            # Start climate insights regeneration (LLM call every 10 min)
+            self._background_task = asyncio.create_task(self._climate_insights_background_loop())
+        else:
+            logger.info(f"Worker {worker_id}: Skipping background tasks (only run in worker 0)")
+
         logger.info("✅ HSIL background services started")
 
     async def stop(self):
@@ -215,6 +247,7 @@ class HSILService:
     ) -> ConversationResponse:
         """
         Chat interface - LLM reasons from all available data.
+        No lock needed here - the LLM provider has its own thread safety for local models.
         """
         home_state = await self.get_home_state()
 
@@ -228,14 +261,14 @@ class HSILService:
         if response.action:
             await self.action_dispatcher.dispatch(response.action)
 
-            # Learn from user action
-            env = await self.weather_service.get_environmental_context()
-            await self.river_feedback.learn_from_user_feedback(
-                user_intent=message,
-                location="home",
-                action_taken=response.action,
-                env=env
-            )
+        # Learn from user action
+        env = await self.weather_service.get_environmental_context()
+        await self.river_feedback.learn_from_user_feedback(
+            user_intent=message,
+            location="home",
+            action_taken=response.action,
+            env=env
+        )
 
         return response
 
@@ -364,6 +397,25 @@ class HSILService:
             "timestamp": datetime.now().isoformat()
         }
 
+    async def _climate_insights_background_loop(self):
+        """Background task that regenerates climate insights every 10 minutes"""
+        import asyncio
+        import time
+
+        # Wait 2 minutes after startup before first generation
+        await asyncio.sleep(120)
+
+        while True:
+            try:
+                logger.info("Background: Regenerating climate insights...")
+                await self._generate_climate_insights_internal()
+                logger.info("Background: Climate insights regenerated successfully")
+            except Exception as e:
+                logger.error(f"Background climate insights regeneration failed: {e}")
+
+            # Wait 10 minutes before next regeneration
+            await asyncio.sleep(600)
+
     async def get_climate_insights(self) -> Dict[str, Any]:
         """
         Get AI-powered climate insights using ML learnings and LLM reasoning.
@@ -376,7 +428,40 @@ class HSILService:
         - Equipment health status
 
         Returns LLM-generated insights for display in UI.
+
+        Results are cached in shared file and regenerated in background every 10 minutes.
         """
+        # Check shared file cache first (works across all workers)
+        try:
+            if CLIMATE_INSIGHTS_CACHE_FILE.exists():
+                with open(CLIMATE_INSIGHTS_CACHE_FILE, 'r') as f:
+                    cache_data = json.load(f)
+                    cached_time = cache_data.get('cached_at', 0)
+                    # Cache is valid for up to 15 minutes (allows for background task delays)
+                    if time.time() - cached_time < 900:
+                        logger.info("Returning cached climate insights from shared file")
+                        return cache_data.get('data', {})
+        except Exception as e:
+            logger.warning(f"Failed to read cache file: {e}")
+
+        # If no cache, generate once (but don't block future requests)
+        logger.info("No cached insights, generating initial set...")
+        try:
+            return await self._generate_climate_insights_internal()
+        except Exception as e:
+            logger.error(f"Failed to generate initial climate insights: {e}")
+            return {
+                "insights": [{
+                    "type": "warning",
+                    "title": "Insights Unavailable",
+                    "description": "Climate insights are being generated. Please refresh in a moment."
+                }],
+                "timestamp": datetime.now().isoformat(),
+                "source": "error"
+            }
+
+    async def _generate_climate_insights_internal(self) -> Dict[str, Any]:
+        """Internal method to generate climate insights (called by API and background task)"""
         try:
             # Gather all necessary data
             home_state = await self.get_home_state()
@@ -466,11 +551,17 @@ Return ONLY a JSON array with this exact structure:
 
             insights = json.loads(response_text)
 
-            return {
+            result = {
                 "insights": insights,
                 "timestamp": datetime.now().isoformat(),
                 "source": "llm"
             }
+
+            # Cache the result to shared file (works across all workers)
+            self._write_climate_insights_cache(result)
+            logger.info("Generated and cached new climate insights")
+
+            return result
 
         except Exception as e:
             logger.error(f"Error generating climate insights: {e}", exc_info=True)
@@ -479,9 +570,12 @@ Return ONLY a JSON array with this exact structure:
                 home_state = await self.get_home_state()
                 weather_ctx = await self.weather_service.get_environmental_context()
                 climate_devices = [d for d in home_state.devices if d.type and "temperature" in d.type.lower()]
-                return await self._fallback_climate_insights(climate_devices, weather_ctx)
+                fallback_result = await self._fallback_climate_insights(climate_devices, weather_ctx)
+                # Cache fallback too
+                self._write_climate_insights_cache(fallback_result)
+                return fallback_result
             except:
-                return {
+                error_result = {
                     "insights": [{
                         "type": "warning",
                         "title": "Insights Unavailable",
@@ -490,6 +584,26 @@ Return ONLY a JSON array with this exact structure:
                     "timestamp": datetime.now().isoformat(),
                     "source": "error"
                 }
+                # Don't cache errors
+                return error_result
+
+    def _write_climate_insights_cache(self, result: Dict[str, Any]):
+        """Write climate insights to shared cache file with file locking"""
+        try:
+            # Use file locking to prevent race conditions across workers
+            with open(CLIMATE_INSIGHTS_LOCK_FILE, 'w') as lock_file:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+                try:
+                    cache_data = {
+                        'data': result,
+                        'cached_at': time.time()
+                    }
+                    with open(CLIMATE_INSIGHTS_CACHE_FILE, 'w') as f:
+                        json.dump(cache_data, f)
+                finally:
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+        except Exception as e:
+            logger.error(f"Failed to write climate insights cache: {e}")
 
     def _format_climate_devices(self, devices) -> str:
         """Format climate devices for LLM prompt"""

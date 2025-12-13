@@ -22,5 +22,9 @@ services:
       - /home/homesight/models:/home/homesight/models:rw
       - /etc/localtime:/etc/localtime:ro
       - /home/homesight/logs:/app/log:rw
-    # Enable uvicorn reload mode for auto-restart on code changes
-    command: ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8001", "--reload"]
+    # Use Gunicorn with reload for dev (automatically reloads on code changes)
+    # --reload watches for file changes and restarts workers
+    command: ["gunicorn", "-c", "gunicorn.conf.py", "main:app", "--reload"]
+    environment:
+      # Use 2 workers in dev for better performance (same as production)
+      - GUNICORN_WORKERS=2

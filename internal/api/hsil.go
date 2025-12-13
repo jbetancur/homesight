@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"time"
 )
 
 // HSIL proxy handlers - forward requests to ai-sidecar HSIL endpoints
@@ -114,8 +115,12 @@ func (s *Server) proxyToHSIL(w http.ResponseWriter, r *http.Request, path string
 		proxyReq.Header[k] = v
 	}
 
-	// Execute request
-	client := &http.Client{}
+	// Execute request with timeout
+	// Use 60s for HSIL endpoints that may call LLMs (climate-insights, chat, etc.)
+	// Local LLM inference can take 15-30 seconds depending on prompt complexity
+	client := &http.Client{
+		Timeout: 60 * time.Second,
+	}
 	resp, err := client.Do(proxyReq)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Failed to contact HSIL service: %v", err), http.StatusServiceUnavailable)
