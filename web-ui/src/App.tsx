@@ -17,8 +17,8 @@ import FloatingAIButton from './components/FloatingAIButton';
 import './App.css';
 
 const navItems = [
-  { label: 'Devices', icon: Activity, path: '/' },
-  { label: 'Home Intelligence', icon: Brain, path: '/hsil' },
+  { label: 'Home Intelligence', icon: Brain, path: '/' },
+  { label: 'Devices', icon: Activity, path: '/devices' },
   { label: 'Incidents', icon: AlertCircle, path: '/incidents' },
   { label: 'Integrations', icon: Layers, path: '/integrations' },
   { label: 'Settings', icon: Settings, path: '/settings' },
@@ -44,7 +44,7 @@ function NavbarContent() {
       <div className="navbar-main">
         <Group gap="sm" className="navbar-header">
           <Home size={28} color="#228be6" />
-          <Text size="lg" fw={700} c="blue.7">HomeSight</Text>
+          <Text size="lg" fw={700} c="blue.7">homesight.ai</Text>
         </Group>
 
         <Stack gap={0} className="navbar-links">
@@ -61,12 +61,6 @@ function NavbarContent() {
       </div>
 
       <div className="navbar-footer">
-        <a href="#" className="nav-link" onClick={(e) => e.preventDefault()}>
-          <Group gap="xs">
-            <Settings size={20} />
-            <span>Settings</span>
-          </Group>
-        </a>
         <a href="#" className="nav-link" onClick={(e) => e.preventDefault()}>
           <Group gap="xs">
             <LogOut size={20} />
@@ -117,8 +111,8 @@ function AppContent() {
       <AppShell.Main style={{ width: '100%', overflowX: 'auto' }}>
         <Container size="xl" py="md">
           <Routes>
-            <Route path="/" element={<DevicesView />} />
-            <Route path="/hsil" element={<HSILRoomView />} />
+            <Route path="/" element={<HSILRoomView />} />
+            <Route path="/devices" element={<DevicesView />} />
             <Route path="/devices/:deviceId/overview" element={<DeviceOverviewView />} />
             <Route path="/devices/:deviceId/sensors/:sensorId" element={<SensorDetailView />} />
             <Route path="/incidents" element={<IncidentsView />} />

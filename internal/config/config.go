@@ -124,5 +124,7 @@ func Default() *Config {
 	cfg.ZWave.Enabled = false
 	cfg.ZWave.WebSocketURL = getEnvOrDefault("ZWAVE_WEBSOCKET_URL", "ws://localhost:3001")
 	cfg.System.TemperatureUnit = getEnvOrDefault("TEMPERATURE_UNIT", "fahrenheit")
+	cfg.Weather.ZipCode = getEnvOrDefault("WEATHER_ZIP_CODE", "94102") // San Francisco default
+	cfg.Weather.RefreshIntervalMins = 15
 	return cfg
 }

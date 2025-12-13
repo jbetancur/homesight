@@ -25,6 +25,7 @@ import (
 	"github.com/homesight/homesight/internal/metrics"
 	"github.com/homesight/homesight/internal/model"
 	"github.com/homesight/homesight/internal/timezone"
+	"github.com/homesight/homesight/internal/weather"
 )
 
 // Server is the REST API server
@@ -57,6 +58,9 @@ type Server struct {
 
 	// Timezone service
 	timezoneService *timezone.Service
+
+	// Weather service
+	weatherService *weather.Service
 }
 
 // NewServer creates a new API server
@@ -74,6 +78,7 @@ func NewServer(
 	metricsSink metrics.MetricsSink,
 	aiClient ai.Client,
 	cfg *config.Config,
+	weatherService *weather.Service,
 ) *Server {
 	s := &Server{
 		router:                  chi.NewRouter(),
@@ -91,6 +96,7 @@ func NewServer(
 		addr:                    addr,
 		eventBus:                NewEventBus(),
 		cfg:                     cfg,
+		weatherService:          weatherService,
 	}
 
 	// Initialize timezone service
@@ -261,7 +267,6 @@ func (s *Server) setupRoutes() {
 			r.Get("/erratic", s.hsilGetErratic)
 			r.Get("/model-health", s.hsilGetModelHealth)
 			r.Get("/device-health", s.hsilGetDeviceHealth)
-			r.Get("/weather", s.handleWeather)
 			r.Get("/climate-insights", s.hsilGetClimateInsights)
 		})
 

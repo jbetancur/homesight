@@ -18,6 +18,7 @@ import (
 	"github.com/homesight/homesight/internal/integrations/zwave"
 	"github.com/homesight/homesight/internal/metrics"
 	"github.com/homesight/homesight/internal/rules"
+	"github.com/homesight/homesight/internal/weather"
 )
 
 func main() {
@@ -76,6 +77,23 @@ func main() {
 	// Initialize AI client
 	aiClient := ai.NewHTTPClient(cfg.AI.ServiceURL)
 	defer aiClient.Close()
+
+	// Initialize weather service
+	ctx := context.Background()
+	var weatherService *weather.Service
+	if cfg.Weather.ZipCode != "" {
+		var err error
+		weatherService, err = weather.NewService(ctx, cfg.Weather.ZipCode)
+		if err != nil {
+			log.Printf("[WEATHER] Failed to initialize: %v", err)
+			weatherService = nil
+		} else {
+			log.Printf("[WEATHER] Initialized for ZIP %s", cfg.Weather.ZipCode)
+			defer weatherService.Stop()
+		}
+	} else {
+		log.Println("[WEATHER] No ZIP code configured, weather service disabled")
+	}
 
 	// Determine MQTT broker URL for internal message bus
 	mqttBrokerURL := cfg.MQTT.BrokerURL
@@ -162,6 +180,7 @@ func main() {
 		metricsSink,
 		aiClient,
 		cfg,
+		weatherService,
 	)
 
 	// Set MQTT publisher for device commands

@@ -24,7 +24,7 @@ from collections import defaultdict
 from river import linear_model, anomaly, cluster, stats, optim, metrics
 
 from .types import EventContext, BehaviorPrediction, BehaviorPredictionType
-from .weather_service import EnvironmentalContext
+from .weather_client import EnvironmentalContext
 
 logger = logging.getLogger(__name__)
 

@@ -149,7 +149,7 @@ export default function HSILRoomView() {
 
   const fetchWeather = async () => {
     try {
-      const res = await fetch(`${API_BASE}/api/hsil/weather`);
+      const res = await fetch(`${API_BASE}/api/weather`);
       if (res.ok) {
         const data = await res.json();
         setWeather(data);

@@ -23,7 +23,7 @@ from .hil_types import (
     FusedContext, SensorSignal, TemporalContext, WeatherContext,
     BehavioralContext, SignalType
 )
-from .weather_service import WeatherService, EnvironmentalContext
+from .weather_client import WeatherClient, EnvironmentalContext
 
 logger = logging.getLogger(__name__)
 
@@ -44,7 +44,7 @@ class SensorFusionEngine:
 
     def __init__(
         self,
-        weather_service: Optional[WeatherService] = None,
+        weather_service: Optional[WeatherClient] = None,
         event_buffer: Optional[Dict] = None,
         learning_engine=None,
         backend_url: str = "http://localhost:8080"

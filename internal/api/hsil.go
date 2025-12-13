@@ -66,11 +66,6 @@ func (s *Server) hsilGetDeviceHealth(w http.ResponseWriter, r *http.Request) {
 	s.proxyToHSIL(w, r, "/device-health")
 }
 
-// handleWeather gets weather data from AI sidecar
-func (s *Server) handleWeather(w http.ResponseWriter, r *http.Request) {
-	s.proxyToHSIL(w, r, "/weather")
-}
-
 // hsilGetClimateInsights gets AI-powered climate insights
 func (s *Server) hsilGetClimateInsights(w http.ResponseWriter, r *http.Request) {
 	s.proxyToHSIL(w, r, "/climate-insights")

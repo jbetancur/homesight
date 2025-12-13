@@ -16,7 +16,7 @@ import sys
 from datetime import datetime
 from hsil.hsil_ml_river import HSILRiverLearningEngine
 from hsil.types import EventContext
-from hsil.weather_service import WeatherService, EnvironmentalContext, WeatherData, SunTimes, AirQuality
+from hsil.weather_service import WeatherClient, EnvironmentalContext, WeatherData, SunTimes, AirQuality
 
 
 async def test_river_ml():

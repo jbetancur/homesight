@@ -33,8 +33,7 @@ from .memory import HomeMemoryService
 from .action_dispatcher import ActionDispatcherService
 from .conversational_agent import ConversationalAgentService
 from .feedback_learning import FeedbackLearningService
-from .weather_service import WeatherService
-from .weather_sync import WeatherSyncService
+from .weather_client import WeatherClient
 from .hsil_ml_river import HSILRiverLearningEngine
 from .river_feedback_adapter import RiverFeedbackAdapter
 from .incident_generator import IncidentGenerator
@@ -74,17 +73,8 @@ class HSILService:
 
         logger.info("Initializing HSIL services...")
 
-        # Weather & Environmental
-        from config import get_config
-        config = get_config()
-        self.weather_service = WeatherService(
-            zip_code=config.weather.zip_code,
-            location_name=config.weather.location_name
-        )
-        self.weather_sync = WeatherSyncService(
-            weather_service=self.weather_service,
-            refresh_interval_minutes=config.weather.refresh_interval_minutes
-        )
+        # Weather client - fetches from Go API
+        self.weather_service = WeatherClient()
 
         # Event ingestion
         self.event_ingestion = EventIngestionService(db_path=db_path)
@@ -146,10 +136,9 @@ class HSILService:
         import asyncio
         worker_id = os.getenv("WORKER_ID", "0")
         if worker_id == "0" or not os.getenv("GUNICORN_WORKERS"):
-            logger.info(f"Worker {worker_id}: Starting background tasks (weather sync, climate insights)")
+            logger.info(f"Worker {worker_id}: Starting background tasks (climate insights)")
 
-            # Start weather sync (polls weather API every 10 min)
-            await self.weather_sync.start()
+            # Weather is now fetched on-demand from Go API - no polling needed
 
             # Start climate insights regeneration (LLM call every 10 min)
             self._background_task = asyncio.create_task(self._climate_insights_background_loop())
@@ -161,7 +150,7 @@ class HSILService:
     async def stop(self):
         """Stop background services"""
         logger.info("Stopping HSIL background services...")
-        await self.weather_sync.stop()
+        # Weather client doesn't need cleanup
         logger.info("✅ HSIL background services stopped")
 
     # ==================== EVENT PROCESSING ====================

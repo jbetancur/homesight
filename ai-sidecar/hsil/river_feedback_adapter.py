@@ -10,7 +10,7 @@ from typing import Optional, Dict, Any
 from datetime import datetime
 
 from .types import EventContext, ActionCommand
-from .weather_service import EnvironmentalContext
+from .weather_client import EnvironmentalContext
 
 logger = logging.getLogger(__name__)
 
