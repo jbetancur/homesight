@@ -126,6 +126,40 @@ start_zwave() {
     fi
 }
 
+start_web_ui() {
+    echo -e "${GREEN}Starting Web UI (Docker)...${NC}"
+
+    cd "$PROJECT_DIR"
+
+    # Stop any existing container
+    docker compose stop web-ui 2>/dev/null || true
+    docker compose rm -f web-ui 2>/dev/null || true
+
+    # Kill any host processes on port 5173
+    if lsof -ti:5173 >/dev/null 2>&1; then
+        echo -e "${YELLOW}Killing process on port 5173...${NC}"
+        lsof -ti:5173 | xargs kill -9 2>/dev/null || true
+        sleep 2
+    fi
+
+    # Build if image doesn't exist
+    if ! docker images homesight-web-ui --format "{{.Repository}}" | grep -q "homesight-web-ui"; then
+        echo -e "${YELLOW}Building Web UI Docker image...${NC}"
+        docker compose build web-ui
+    fi
+
+    # Start with docker compose
+    docker compose up -d web-ui
+
+    if [ $? -eq 0 ]; then
+        echo -e "${GREEN}✅ Web UI started in Docker${NC}"
+        echo "   URL: http://localhost:5173"
+    else
+        echo -e "${RED}❌ Failed to start Web UI${NC}"
+        return 1
+    fi
+}
+
 start_docker() {
     echo -e "${GREEN}Starting Docker services...${NC}"
 
@@ -177,6 +211,18 @@ stop_ai() {
     lsof -ti:8001 2>/dev/null | xargs kill -9 2>/dev/null || true
 
     echo -e "${GREEN}✅ AI Sidecar stopped${NC}"
+}
+
+stop_web_ui() {
+    echo -e "${YELLOW}Stopping Web UI...${NC}"
+
+    cd "$PROJECT_DIR"
+    docker compose stop web-ui 2>/dev/null || true
+    docker compose rm -f web-ui 2>/dev/null || true
+
+    lsof -ti:5173 2>/dev/null | xargs kill -9 2>/dev/null || true
+
+    echo -e "${GREEN}✅ Web UI stopped${NC}"
 }
 
 stop_docker() {
@@ -234,6 +280,18 @@ show_status() {
         echo -e "${RED}❌ ZWaveJS: Not running${NC}"
     fi
 
+    # Web UI
+    if docker ps --format '{{.Names}}' 2>/dev/null | grep -q '^homesight-web-ui$'; then
+        echo -e "${GREEN}✅ Web UI: Running in Docker${NC}"
+        if curl -s --max-time 2 http://localhost:5173 > /dev/null 2>&1; then
+            echo "   └─ URL: http://localhost:5173 (healthy)"
+        else
+            echo "   └─ URL: Not responding"
+        fi
+    else
+        echo -e "${RED}❌ Web UI: Not running${NC}"
+    fi
+
     # Docker monitoring services
     echo ""
     echo "Monitoring Services:"
@@ -243,13 +301,14 @@ show_status() {
         echo -e "  ${RED}❌ Prometheus: Not running${NC}"
     fi
     if docker ps --format '{{.Names}}' 2>/dev/null | grep -q '^homesight-grafana$'; then
-        echo -e "  ${GREEN}✅ Grafana: http://localhost:3000 (admin/admin)${NC}"
+        echo -e "  ${GREEN}✅ Grafana: http://localhost:3001 (admin/admin)${NC}"
     else
         echo -e "  ${RED}❌ Grafana: Not running${NC}"
     fi
 
     echo ""
     echo "Logs:"
+    echo "  Web UI:     docker compose logs -f web-ui"
     echo "  API:        docker compose logs -f api"
     echo "  AI:         docker compose logs -f ai-sidecar"
     echo "  MQTT:       docker compose logs -f mosquitto"
@@ -259,6 +318,7 @@ show_status() {
 clean_all() {
     echo -e "${RED}🧹 Cleaning all HomeSight processes...${NC}"
 
+    stop_web_ui
     stop_daemon
     stop_ai
     stop_mosquitto
@@ -268,7 +328,7 @@ clean_all() {
     rm -f "$PID_DIR"/*.pid 2>/dev/null || true
 
     # Clean up ports
-    for port in 8080 8001 1883 9090; do
+    for port in 5173 8080 8001 1883 9090; do
         lsof -ti:$port 2>/dev/null | xargs kill -9 2>/dev/null || true
     done
 
@@ -284,6 +344,7 @@ case "${1:-}" in
         start_daemon
         start_ai
         start_zwave
+        start_web_ui
         start_docker
 
         echo ""
@@ -292,6 +353,7 @@ case "${1:-}" in
     stop)
         echo "🏠 Stopping HomeSight..."
         echo ""
+        stop_web_ui
         stop_daemon
         stop_ai
         stop_mosquitto
@@ -304,6 +366,7 @@ case "${1:-}" in
         echo "🏠 Restarting HomeSight..."
         echo ""
 
+        stop_web_ui
         stop_daemon
         stop_ai
         stop_mosquitto
@@ -313,6 +376,7 @@ case "${1:-}" in
         start_daemon
         start_ai
         start_zwave
+        start_web_ui
         start_docker
 
         # Wait for services to be fully ready (AI sidecar loads LLM model)
@@ -327,43 +391,34 @@ case "${1:-}" in
         ;;
     logs)
         case "${2:-}" in
+            ui|web-ui) docker compose logs -f web-ui ;;
             api|daemon) docker compose logs -f api ;;
             ai) docker compose logs -f ai-sidecar ;;
             mqtt|mosquitto) docker compose logs -f mosquitto ;;
             zwave|zwavejs) docker compose logs -f zwavejs ;;
-            *) echo "Usage: $0 logs [api|ai|mqtt|zwave]" ;;
+            *) echo "Usage: $0 logs [ui|api|ai|mqtt|zwave]" ;;
         esac
         ;;
     build)
         echo "🏠 Building HomeSight Docker images..."
         echo ""
-        
-        # Build web UI first
-        echo -e "${GREEN}Building Web UI...${NC}"
-        cd "$PROJECT_DIR/web-ui"
-        npm run build
-        
+
         # Build Docker images
         echo -e "${GREEN}Building Docker images...${NC}"
         cd "$PROJECT_DIR"
-        docker compose build api ai-sidecar
-        
+        docker compose build api ai-sidecar web-ui
+
         echo -e "${GREEN}✅ Build complete${NC}"
         ;;
     rebuild)
         echo "🏠 Rebuilding HomeSight (no cache)..."
         echo ""
-        
-        # Build web UI first
-        echo -e "${GREEN}Building Web UI...${NC}"
-        cd "$PROJECT_DIR/web-ui"
-        npm run build
-        
+
         # Rebuild Docker images without cache
         echo -e "${GREEN}Rebuilding Docker images (no cache)...${NC}"
         cd "$PROJECT_DIR"
-        docker compose build --no-cache api ai-sidecar
-        
+        docker compose build --no-cache api ai-sidecar web-ui
+
         echo -e "${GREEN}✅ Rebuild complete${NC}"
         ;;
     *)
@@ -377,7 +432,7 @@ case "${1:-}" in
         echo "  restart  Restart all services"
         echo "  clean    Kill all processes and clean ports"
         echo "  status   Show service status"
-        echo "  logs     Show logs (api|ai|mqtt|zwave)"
+        echo "  logs     Show logs (ui|api|ai|mqtt|zwave)"
         echo "  build    Build Docker images"
         echo "  rebuild  Rebuild Docker images (no cache)"
         exit 1

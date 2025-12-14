@@ -228,7 +228,9 @@ export function EntityCard({ entity, onUpdate }: EntityCardProps) {
           <Group gap="sm">
             {getEntityIcon(entity, 20)}
             <div>
-              <Text fw={600} size="sm">{entity.name}</Text>
+              <Text fw={600} size="sm">{entity.metadata.label}</Text>
+              <Text size="xs" c="dimmed">{entity.name}</Text>
+              {/* <Text fw={600} size="sm">{entity.property_key}</Text> */}
               <Text size="xs" c="dimmed">{entity.category}</Text>
             </div>
           </Group>
@@ -250,7 +252,8 @@ export function EntityCard({ entity, onUpdate }: EntityCardProps) {
         <Group gap="sm">
           {getEntityIcon(entity, 20)}
           <div>
-            <Text fw={600} size="sm">{entity.name}</Text>
+            <Text fw={600} size="sm">{entity.metadata.label}</Text>
+            <Text size="xs" c="dimmed">{entity.name}</Text>
             <Text size="xs" c="dimmed">{entity.category}</Text>
           </div>
         </Group>

@@ -10,9 +10,11 @@ import (
 // PopulateUnifiedContractFromEntities populates the unified contract fields
 // (readings, battery, controls) from the device entities
 func PopulateUnifiedContractFromEntities(device *model.Device) {
-	if device.Entities == nil || len(device.Entities) == 0 {
+	if len(device.Entities) == 0 {
 		return
 	}
+
+	log.Printf("[ENTITY-MAPPER] PopulateUnifiedContractFromEntities called for device %s with %d entities", device.ID, len(device.Entities))
 
 	// Initialize contract fields if nil
 	if device.Readings == nil {
@@ -20,6 +22,7 @@ func PopulateUnifiedContractFromEntities(device *model.Device) {
 	}
 	if device.Battery == nil && hasBatteryEntity(device.Entities) {
 		device.Battery = &model.DeviceBattery{}
+		log.Printf("[ENTITY-MAPPER] Initialized battery object for device %s", device.ID)
 	}
 	if device.Controls == nil && hasControlEntity(device.Entities) {
 		device.Controls = &model.DeviceControls{}
@@ -29,6 +32,97 @@ func PopulateUnifiedContractFromEntities(device *model.Device) {
 	for _, entity := range device.Entities {
 		mapEntityToContract(device, &entity)
 	}
+
+	// Post-processing: Detect AC-powered devices and clear battery warnings
+	if device.Battery != nil {
+		log.Printf("[ENTITY-MAPPER] Post-processing check for %s: battery level=%d, is_low=%v", device.ID, device.Battery.Level, device.Battery.IsLow)
+
+		// Check if device is AC-powered (has backup battery, not primary battery)
+		isACPowered := isACPoweredDevice(device.Entities)
+
+		if isACPowered {
+			// Device has AC power with backup battery - don't flag as low battery
+			device.Battery.IsLow = false
+			log.Printf("[ENTITY-MAPPER] ✓ Post-processing: Device %s is AC-powered with backup battery, clearing low battery flag", device.ID)
+		} else if device.Battery.Level == 0 && device.Battery.IsLow {
+			// For battery-only devices, check if battery is disconnected
+			for _, entity := range device.Entities {
+				if cc, ok := entity.Metadata["command_class"].(float64); ok && int(cc) == CC_BATTERY {
+					propName := strings.ToLower(entity.Name)
+					if propName == "disconnected" {
+						if disconnected, ok := entity.Value.(bool); ok && disconnected {
+							device.Battery.IsLow = false
+							log.Printf("[ENTITY-MAPPER] ✓ Post-processing: Battery disconnected, clearing low battery flag for device %s", device.ID)
+							break
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
+// isACPoweredDevice detects if a Z-Wave device is AC-powered with backup battery
+// Returns true if device is AC-powered (battery is backup only, not primary power source)
+// Uses multiple heuristics:
+// 1. Wake Up interval >= 1 hour (3600s) indicates AC power
+//    - Battery-only devices typically wake every 1-15 minutes to save power
+//    - AC devices can wake less frequently (12-24 hours) since power isn't constrained
+// 2. Presence of "backup" entity indicating optional backup battery
+// 3. Battery "disconnected" flag indicating optional/removable backup battery
+// 4. No Wake Up entity at all (always-listening AC devices don't need wake-up)
+func isACPoweredDevice(entities []model.DeviceEntity) bool {
+	const wakeUpIntervalThreshold = 3600 // 1 hour in seconds
+	hasWakeUpEntity := false
+
+	for _, entity := range entities {
+		cc, ok := entity.Metadata["command_class"].(float64)
+		if !ok {
+			continue
+		}
+
+		propName := strings.ToLower(entity.Name)
+
+		// Check for Wake Up command class (132)
+		if int(cc) == 132 {
+			hasWakeUpEntity = true
+
+			// Check if wake up interval is high (AC-powered)
+			if propName == "wakeupinterval" {
+				if interval, ok := entity.Value.(float64); ok {
+					if interval >= wakeUpIntervalThreshold {
+						log.Printf("[ENTITY-MAPPER] Detected AC power via Wake Up interval: %.0fs (>= %ds threshold)", interval, wakeUpIntervalThreshold)
+						return true
+					}
+				}
+			}
+		}
+
+		// Check for explicit backup battery indicator
+		if propName == "backup" {
+			if backup, ok := entity.Value.(bool); ok && backup {
+				log.Printf("[ENTITY-MAPPER] Detected AC power via backup battery flag")
+				return true
+			}
+		}
+
+		// Check for battery disconnected (indicating optional backup)
+		if (propName == "disconnected" || propName == "battery disconnected") && int(cc) == CC_BATTERY {
+			if disconnected, ok := entity.Value.(bool); ok && disconnected {
+				log.Printf("[ENTITY-MAPPER] Detected AC power via battery disconnected flag")
+				return true
+			}
+		}
+	}
+
+	// If device has battery but NO Wake Up entity, it's always-listening (AC-powered)
+	// Battery-powered devices ALWAYS have Wake Up to conserve power
+	if !hasWakeUpEntity {
+		log.Printf("[ENTITY-MAPPER] Detected AC power: No Wake Up entity (always-listening device)")
+		return true
+	}
+
+	return false
 }
 
 // hasBatteryEntity checks if there's a battery entity
@@ -86,6 +180,13 @@ func mapEntityToContract(device *model.Device, entity *model.DeviceEntity) {
 		mapBinarySwitchEntity(device, entity, propName)
 
 	case CC_SENSOR_BINARY:
+		// Handle battery disconnected sensor from binary sensor CC too
+		if propName == "disconnected" && device.Battery != nil {
+			if disconnected, ok := entity.Value.(bool); ok && disconnected {
+				device.Battery.IsLow = false
+				log.Printf("[ENTITY-MAPPER] Battery disconnected (from binary sensor), clearing low battery flag")
+			}
+		}
 		mapBinarySensorEntity(device, entity, propName)
 
 	default:
@@ -106,6 +207,12 @@ func mapBatteryEntity(device *model.Device, entity *model.DeviceEntity, propName
 			device.Battery.Level = int(level)
 			device.Battery.IsLow = level < 20
 			log.Printf("[ENTITY-MAPPER] Mapped battery level: %d%%", int(level))
+		}
+	case "disconnected":
+		// If battery is disconnected (backup battery not installed), don't flag as low
+		if disconnected, ok := entity.Value.(bool); ok && disconnected {
+			device.Battery.IsLow = false
+			log.Printf("[ENTITY-MAPPER] Battery disconnected, clearing low battery flag")
 		}
 	case "islow":
 		if isLow, ok := entity.Value.(bool); ok {
@@ -168,14 +275,30 @@ func mapMultilevelSensorEntity(device *model.Device, entity *model.DeviceEntity,
 func mapNotificationEntity(device *model.Device, entity *model.DeviceEntity, propName string) {
 	// Notification entities typically report alarm states
 	var isActive bool
+	var numValue float64
 	switch v := entity.Value.(type) {
 	case bool:
 		isActive = v
 	case float64:
 		isActive = v != 0
+		numValue = v
 	case int:
 		isActive = v != 0
+		numValue = float64(v)
 	default:
+		return
+	}
+
+	// Check for Power Management notification - backup battery status
+	// Value 18 = "Back-up battery disconnected"
+	if strings.Contains(propName, "power management") ||
+		strings.Contains(propName, "backup battery") {
+		log.Printf("[ENTITY-MAPPER] Power Management entity detected: value=%.0f, battery_exists=%v", numValue, device.Battery != nil)
+		if device.Battery != nil && numValue == 18 {
+			device.Battery.IsLow = false
+			log.Printf("[ENTITY-MAPPER] ✓ Power Management: Backup battery disconnected (value=18), cleared low battery flag for device %s", device.ID)
+		}
+		// Don't map power management notifications to readings
 		return
 	}
 

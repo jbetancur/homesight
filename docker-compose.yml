@@ -201,11 +201,30 @@ services:
         max-size: "10m"
         max-file: "3"
 
+  web-ui:
+    build:
+      context: .
+      dockerfile: docker/web-ui/Dockerfile
+    image: homesight-web-ui
+    container_name: homesight-web-ui
+    ports:
+      - "0.0.0.0:80:80"
+    depends_on:
+      - api
+    restart: unless-stopped
+    networks:
+      - homesight
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
   grafana:
     image: grafana/grafana:latest
     container_name: homesight-grafana
     ports:
-      - "3000:3000"
+      - "3001:3000"
     environment:
       - GF_SECURITY_ADMIN_USER=admin
       - GF_SECURITY_ADMIN_PASSWORD=admin

@@ -386,15 +386,15 @@ func (s *Service) checkIncident(nodeID int, commandClass int, property string, v
 		deviceID := fmt.Sprintf("zwave-%d", nodeID)
 		device, _ := s.deviceRepo.Get(s.ctx, deviceID)
 
-		// Check if device is battery-powered (not listening)
-		isListening := false
-		if device != nil && device.RawData != nil {
-			if listening, ok := device.RawData["is_listening"].(bool); ok {
-				isListening = listening
+		// Skip battery incidents for AC-powered devices with backup batteries
+		if device != nil && device.Entities != nil {
+			if s.isACPoweredDevice(device.Entities) {
+				log.Printf("[ZWAVE-SERVICE] Skipping battery incident for %s - device is AC-powered with backup battery", deviceID)
+				return
 			}
 		}
 
-		if level, ok := value.(float64); ok && level <= 20 && level > 0 && !isListening {
+		if level, ok := value.(float64); ok && level <= 20 && level > 0 {
 			s.createIncident(nodeID, "Low Battery", fmt.Sprintf("Battery level is %d%%", int(level)), model.SeverityLow, map[string]any{
 				"battery_level": level,
 			})
@@ -590,15 +590,13 @@ func (s *Service) checkStaleDevices() {
 			continue
 		}
 
-		// Only check battery-powered devices
-		isBatteryPowered := false
-		if device.RawData != nil {
-			if isListening, ok := device.RawData["is_listening"].(bool); ok && !isListening {
-				isBatteryPowered = true
-			}
+		// Only check battery-powered devices (skip AC-powered devices with backup batteries)
+		if device.Entities != nil && s.isACPoweredDevice(device.Entities) {
+			continue
 		}
 
-		if !isBatteryPowered {
+		// Also skip if no battery entity present
+		if device.Battery == nil {
 			continue
 		}
 
@@ -640,4 +638,84 @@ func extractNodeID(deviceID string) int {
 	var nodeID int
 	fmt.Sscanf(deviceID, "zwave-%d", &nodeID)
 	return nodeID
+}
+
+// isACPoweredDevice detects if a Z-Wave device is AC-powered with backup battery
+// Returns true if device is AC-powered (battery is backup only, not primary power source)
+// Uses multiple heuristics:
+// 1. Wake Up interval >= 1 hour (3600s) indicates AC power
+//    - Battery-only devices typically wake every 1-15 minutes to save power
+//    - AC devices can wake less frequently (12-24 hours) since power isn't constrained
+// 2. Presence of "backup" entity indicating optional backup battery
+// 3. Battery "disconnected" flag indicating optional/removable backup battery
+// 4. No Wake Up entity at all (always-listening AC devices don't need wake-up)
+func (s *Service) isACPoweredDevice(entities []model.DeviceEntity) bool {
+	const wakeUpIntervalThreshold = 3600 // 1 hour in seconds
+	const CC_WAKE_UP = 132
+	const CC_BATTERY = 128
+	hasWakeUpEntity := false
+
+	for _, entity := range entities {
+		cc, ok := entity.Metadata["command_class"].(float64)
+		if !ok {
+			continue
+		}
+
+		propName := ""
+		if name, ok := entity.Metadata["property"].(string); ok {
+			propName = name
+		} else {
+			propName = entity.Name
+		}
+
+		// Normalize to lowercase for comparison
+		propNameLower := ""
+		for _, r := range propName {
+			if r >= 'A' && r <= 'Z' {
+				propNameLower += string(r + 32)
+			} else {
+				propNameLower += string(r)
+			}
+		}
+
+		// Check for Wake Up command class (132)
+		if int(cc) == CC_WAKE_UP {
+			hasWakeUpEntity = true
+
+			// Check if wake up interval is high (AC-powered)
+			if propNameLower == "wakeupinterval" {
+				if interval, ok := entity.Value.(float64); ok {
+					if interval >= wakeUpIntervalThreshold {
+						log.Printf("[ZWAVE-SERVICE] Detected AC power via Wake Up interval: %.0fs (>= %ds threshold)", interval, wakeUpIntervalThreshold)
+						return true
+					}
+				}
+			}
+		}
+
+		// Check for explicit backup battery indicator
+		if propNameLower == "backup" {
+			if backup, ok := entity.Value.(bool); ok && backup {
+				log.Printf("[ZWAVE-SERVICE] Detected AC power via backup battery flag")
+				return true
+			}
+		}
+
+		// Check for battery disconnected (indicating optional backup)
+		if (propNameLower == "disconnected" || propNameLower == "battery disconnected") && int(cc) == CC_BATTERY {
+			if disconnected, ok := entity.Value.(bool); ok && disconnected {
+				log.Printf("[ZWAVE-SERVICE] Detected AC power via battery disconnected flag")
+				return true
+			}
+		}
+	}
+
+	// If device has battery but NO Wake Up entity, it's always-listening (AC-powered)
+	// Battery-powered devices ALWAYS have Wake Up to conserve power
+	if !hasWakeUpEntity {
+		log.Printf("[ZWAVE-SERVICE] Detected AC power: No Wake Up entity (always-listening device)")
+		return true
+	}
+
+	return false
 }

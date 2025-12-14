@@ -1,6 +1,7 @@
 import { useDraggable } from '@dnd-kit/core';
 import { CSS } from '@dnd-kit/utilities';
-import { Paper, Group, Text, ThemeIcon, Badge, Stack } from '@mantine/core';
+import { Paper, Group, Text, ThemeIcon, Stack } from '@mantine/core';
+import { Sparkline } from '@mantine/charts';
 import {
   Thermometer,
   Droplet,
@@ -13,9 +14,10 @@ import {
   Radio,
   TrendingUp,
   TrendingDown,
+  Minus,
 } from 'lucide-react';
 import { useState, useEffect } from 'react';
-import { TimeAgo, Sparkline } from '../shared';
+import { TimeAgo } from '../shared';
 import { API_BASE_WITH_PATHS as API_BASE } from '../../apiConfig';
 import type { Device, DeviceReadings } from './types';
 
@@ -48,12 +50,7 @@ function getDeviceIcon(device: Device) {
   }
 
   // Check for temperature sensors
-  if (
-    'temperature_f' in readings ||
-    model.includes('temp') ||
-    model.includes('zse44') ||
-    name.includes('temp')
-  ) {
+  if ('temperature_f' in readings) {
     return { icon: Thermometer, color: 'orange' };
   }
 
@@ -63,7 +60,7 @@ function getDeviceIcon(device: Device) {
   }
 
   // Check for motion sensors
-  if (model.includes('motion') || name.includes('motion')) {
+  if ('motion' in readings) {
     return { icon: Activity, color: 'violet' };
   }
 
@@ -86,7 +83,7 @@ function getDisplayReadings(readings: DeviceReadings | undefined): Array<{ label
   if (temp !== undefined && temp !== 0 && typeof temp === 'number') {
     display.push({
       label: 'Temp',
-      value: `${temp.toFixed(1)}°F`,
+      value: `${temp.toFixed(1)}°`,
       icon: Thermometer,
     });
   }
@@ -104,11 +101,11 @@ function getDisplayReadings(readings: DeviceReadings | undefined): Array<{ label
   // Water leak status
   const water = readings.water;
   if (water !== undefined) {
+    const value = !water ? 'Dry' : 'LEAK!';
     // Handle boolean or number values (objects are ignored)
-    const waterValue = typeof water === 'object' ? false : water;
     display.push({
       label: 'Water',
-      value: waterValue === 0 || waterValue === false ? 'Dry' : 'LEAK!',
+      value,
       icon: Droplet,
     });
   }
@@ -130,7 +127,8 @@ export function DraggableSensor({
   onClick,
   isRecentlyUpdated = false,
 }: DraggableSensorProps) {
-  const [sparklineData, setSparklineData] = useState<number[]>([]);
+  const [tempSparklineData, setTempSparklineData] = useState<number[]>([]);
+  const [humiditySparklineData, setHumiditySparklineData] = useState<number[]>([]);
   const [tempTrend, setTempTrend] = useState<ReadingTrend | null>(null);
   const [humidityTrend, setHumidityTrend] = useState<ReadingTrend | null>(null);
 
@@ -161,7 +159,7 @@ export function DraggableSensor({
             const readings = await tempResponse.json();
             if (Array.isArray(readings) && readings.length > 0) {
               const temps = readings.map((r: { value: number }) => r.value).filter((v: number) => v > 0);
-              setSparklineData(temps);
+              setTempSparklineData(temps);
 
               // Calculate trend from last two readings
               if (temps.length >= 2) {
@@ -188,6 +186,7 @@ export function DraggableSensor({
             const readings = await humidityResponse.json();
             if (Array.isArray(readings) && readings.length > 0) {
               const humidities = readings.map((r: { value: number }) => r.value).filter((v: number) => v > 0);
+              setHumiditySparklineData(humidities);
 
               if (humidities.length >= 2) {
                 const current = humidities[humidities.length - 1];
@@ -317,9 +316,9 @@ export function DraggableSensor({
           </Group>
         </Group>
 
-        {/* Readings row with trends and sparkline */}
+        {/* Readings row with trends - cleaner layout */}
         {displayReadings.length > 0 && (
-          <Group gap="xs" ml={editMode ? 28 : 22} align="center" wrap="nowrap">
+          <Stack gap="xs" ml={editMode ? 28 : 22}>
             {displayReadings.map((reading) => {
               const ReadingIcon = reading.icon;
               const isAlert = reading.value === 'LEAK!';
@@ -328,40 +327,53 @@ export function DraggableSensor({
 
               // Get trend info
               const trend = isTemp ? tempTrend : isHumidity ? humidityTrend : null;
-              const showTrend = trend && trend.direction !== 'stable' && trend.delta !== undefined;
+              const sparklineData = isTemp ? tempSparklineData : isHumidity ? humiditySparklineData : [];
+              const showTrend = trend && trend.delta !== undefined;
 
               return (
-                <Group key={reading.label} gap={4}>
-                  <Badge
-                    size="sm"
-                    variant="light"
-                    color={isAlert ? 'red' : 'gray'}
-                    leftSection={<ReadingIcon size={10} />}
-                  >
-                    {reading.value}
-                  </Badge>
-                  {showTrend && trend.delta !== undefined && (
-                    <Group gap={2}>
-                      {trend.direction === 'up' ? (
-                        <TrendingUp size={10} color="var(--mantine-color-red-6)" />
-                      ) : (
-                        <TrendingDown size={10} color="var(--mantine-color-blue-6)" />
-                      )}
-                      <Text size="xs" c={trend.direction === 'up' ? 'red' : 'blue'}>
-                        {isTemp
-                          ? `${Math.abs(trend.delta).toFixed(1)}°`
-                          : `${Math.abs(trend.delta).toFixed(0)}%`
-                        }
-                      </Text>
-                    </Group>
+                <Group key={reading.label} gap="sm" wrap="nowrap" justify="space-between">
+                  <Group gap="xs" wrap="nowrap">
+                    <ReadingIcon size={12} style={{ color: isAlert ? 'var(--mantine-color-red-6)' : 'var(--mantine-color-dimmed)' }} />
+                    <Text fw={500} size="md">
+                      {reading.value}
+                    </Text>
+                    {showTrend && trend.delta !== undefined && (
+                      <Group gap={4} wrap="nowrap">
+                        {trend.direction === 'up' ? (
+                          <TrendingUp size={12} color="var(--mantine-color-orange-6)" />
+                        ) : trend.direction === 'down' ? (
+                          <TrendingDown size={12} color="var(--mantine-color-blue-6)" />
+                        ) : (
+                          <Minus size={12} color="var(--mantine-color-gray-6)" />
+                        )}
+                        <Text
+                          size="xs"
+                          c={trend.direction === 'up' ? 'orange' : trend.direction === 'down' ? 'blue' : 'dimmed'}
+                          fw={500}
+                        >
+                          {isTemp
+                            ? `${Math.abs(trend.delta).toFixed(1)}°`
+                            : `${Math.abs(trend.delta).toFixed(0)}%`
+                          }
+                        </Text>
+                      </Group>
+                    )}
+                  </Group>
+                  {sparklineData.length > 2 && (
+                    <Sparkline
+                      data={sparklineData}
+                      w={50}
+                      h={16}
+                      fillOpacity={0}
+                      trendColors={{ positive: 'orange.6', negative: 'cyan.6', neutral: 'gray.5' }}
+                      strokeWidth={2}
+                      curveType="step"
+                    />
                   )}
                 </Group>
               );
             })}
-            {sparklineData.length > 2 && (
-              <Sparkline data={sparklineData} width={50} height={16} />
-            )}
-          </Group>
+          </Stack>
         )}
       </Stack>
     </Paper>

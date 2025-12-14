@@ -70,14 +70,23 @@ docker-rebuild-ai:
 	@echo "Rebuilding AI sidecar with no cache..."
 	@docker compose build --no-cache ai-sidecar
 
-# Docker commands - All services
-docker-build: web-build
-	@echo "Building all Docker images..."
-	@docker compose build api ai-sidecar
+# Docker commands - Web UI
+docker-build-ui:
+	@echo "Building Web UI Docker image..."
+	@docker compose build web-ui
 
-docker-rebuild: web-build
+docker-rebuild-ui:
+	@echo "Rebuilding Web UI with no cache..."
+	@docker compose build --no-cache web-ui
+
+# Docker commands - All services
+docker-build:
+	@echo "Building all Docker images..."
+	@docker compose build api ai-sidecar web-ui
+
+docker-rebuild:
 	@echo "Rebuilding all Docker images (no cache)..."
-	@docker compose build --no-cache api ai-sidecar
+	@docker compose build --no-cache api ai-sidecar web-ui
 
 docker-restart:
 	@echo "Restarting all containers..."
@@ -91,6 +100,10 @@ docker-restart-ai:
 	@echo "Restarting AI sidecar container..."
 	@docker compose restart ai-sidecar
 
+docker-restart-ui:
+	@echo "Restarting Web UI container..."
+	@docker compose restart web-ui
+
 docker-logs:
 	@echo "Showing all logs..."
 	@docker compose logs -f
@@ -102,6 +115,10 @@ docker-logs-api:
 docker-logs-ai:
 	@echo "Showing AI sidecar logs..."
 	@docker compose logs -f ai-sidecar
+
+docker-logs-ui:
+	@echo "Showing Web UI logs..."
+	@docker compose logs -f web-ui
 
 docker-logs-zwave:
 	@echo "Showing zwave logs..."
@@ -119,7 +136,7 @@ docker-ps:
 	@docker compose ps
 
 # Full rebuild commands
-rebuild-all: web-build docker-rebuild
+rebuild-all: docker-rebuild
 	@echo "✅ Full rebuild complete!"
 	@echo ""
 	@echo "Run './scripts/homesight.sh start' to start all services"
@@ -132,7 +149,11 @@ rebuild-ai: docker-rebuild-ai
 	@echo "✅ AI sidecar rebuilt!"
 	@echo "Run 'docker compose restart ai-sidecar'"
 
-rebuild-quick: web-build docker-build docker-restart
+rebuild-ui: docker-rebuild-ui
+	@echo "✅ Web UI rebuilt!"
+	@echo "Run 'docker compose restart web-ui'"
+
+rebuild-quick: docker-build docker-restart
 	@echo "✅ Quick rebuild complete"
 
 # Development shortcuts
@@ -152,16 +173,20 @@ status:
 # Development Mode (Hot-reload for AI sidecar, quick rebuild for Go API)
 # ==============================================================================
 
-# Start all services in dev mode (AI sidecar with hot-reload)
+# Start all services in dev mode (AI sidecar + Web UI with hot-reload)
 dev:
 	@echo "🔧 Starting HomeSight in development mode..."
 	@docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d
 	@echo ""
 	@echo "✅ Dev mode running!"
-	@echo "   📝 Python changes: Auto-reload (no action needed)"
-	@echo "   🔨 Go changes:     Run 'make rebuild-api && make dev-restart-api'"
-	@echo "   📊 Status:         make status"
-	@echo "   📜 Logs:           make dev-logs"
+	@echo "   📝 Python changes:   Auto-reload (no action needed)"
+	@echo "   ⚛️  React changes:    Auto-reload with HMR (no action needed)"
+	@echo "   🔨 Go changes:       Run 'make rebuild-api && make dev-restart-api'"
+	@echo "   📊 Status:           make status"
+	@echo "   📜 Logs:             make dev-logs"
+	@echo ""
+	@echo "   🌐 Web UI:           http://localhost:5173"
+	@echo "   🔧 API:              http://localhost:8080"
 
 # Start only AI sidecar in dev mode
 dev-ai:
@@ -186,3 +211,6 @@ dev-restart-api:
 
 dev-restart-ai:
 	@docker compose -f docker-compose.yml -f docker-compose.dev.yml restart ai-sidecar
+
+dev-restart-ui:
+	@docker compose -f docker-compose.yml -f docker-compose.dev.yml restart web-ui

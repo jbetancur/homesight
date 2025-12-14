@@ -22,6 +22,8 @@ from typing import Optional, Dict, Any
 from datetime import datetime
 from pathlib import Path
 
+from config import get_config
+
 from .types import (
     EventContext,
     DeviceState,
@@ -72,6 +74,9 @@ class HSILService:
         self.llm_provider = llm_provider
 
         logger.info("Initializing HSIL services...")
+
+        # Get config
+        config = get_config()
 
         # Weather client - fetches from Go API
         self.weather_service = WeatherClient()

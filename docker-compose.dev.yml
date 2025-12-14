@@ -12,6 +12,23 @@
 #   make dev-stop   - Stop dev mode
 
 services:
+  web-ui:
+    # Override production image with Node.js for dev server
+    build:
+      context: .
+      dockerfile: docker/web-ui/Dockerfile.dev
+    # Mount source code for hot-reloading (React changes apply automatically)
+    volumes:
+      - ./web-ui:/app:rw
+      - /app/node_modules
+    # Vite dev server with HMR
+    command: ["npm", "run", "dev"]
+    ports:
+      - "0.0.0.0:5173:5173"
+    environment:
+      - VITE_API_URL=http://localhost:8080
+      - VITE_HMR_HOST=${VITE_HMR_HOST:-localhost}
+
   ai-sidecar:
     # Mount source code for hot-reloading (Python changes apply automatically)
     volumes:
