@@ -119,6 +119,44 @@ class DocumentService:
         }
 
         try:
+            # Check if we already have RAG documents for this manufacturer/model
+            # Skip re-ingestion unless force refresh is requested
+            if not force and self.rag.has_documents_for_model(manufacturer, model):
+                logger.info(f"RAG dedup: Found existing documents for {manufacturer} {model}, skipping ingestion")
+                tracker.complete_ingestion(manufacturer, model, time.time() - start_time, "deduped")
+
+                # Retrieve existing KB content from RAG to return to Go backend
+                # This ensures the Go backend can still store KB even when deduping
+                kb_content = None
+                try:
+                    # Query RAG for comprehensive knowledge (category filter)
+                    where_filter = {
+                        "$and": [
+                            {"manufacturer": {"$eq": manufacturer}},
+                            {"model": {"$eq": model}},
+                            {"category": {"$eq": "comprehensive_knowledge"}}
+                        ]
+                    }
+                    existing_docs = self.rag.collection.get(where=where_filter, limit=1)
+                    if existing_docs and existing_docs.get('documents') and len(existing_docs['documents']) > 0:
+                        kb_content = existing_docs['documents'][0]
+                        logger.info(f"Retrieved existing KB content for {manufacturer} {model} ({len(kb_content)} chars)")
+                except Exception as e:
+                    logger.warning(f"Could not retrieve existing KB content: {e}")
+
+                return {
+                    "status": "success",
+                    "manufacturer": manufacturer,
+                    "model": model,
+                    "sources_found": ["existing_rag_documents"],
+                    "source_urls": [],
+                    "total_sources": 1,
+                    "force_refresh": False,
+                    "deduped": True,
+                    "kb_content": kb_content,  # Include existing KB content
+                    "message": f"Using existing RAG knowledge base for {manufacturer} {model}"
+                }
+
             # If force refresh, clean up existing RAG entries for this device
             if force:
                 logger.info(f"Force refresh: cleaning RAG entries for {manufacturer} {model}")

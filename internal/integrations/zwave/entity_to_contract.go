@@ -7,6 +7,63 @@ import (
 	"github.com/homesight/homesight/internal/model"
 )
 
+// GetDeviceBatteryThreshold extracts the device-specific battery low threshold
+// from Z-Wave Configuration CC entities. This is manufacturer-agnostic as it:
+// 1. Uses standard Z-Wave Configuration CC (0x70/112)
+// 2. Matches by label pattern, not hardcoded property numbers
+// Returns nil if no device-specific threshold is configured.
+func GetDeviceBatteryThreshold(entities []model.DeviceEntity) *float64 {
+	for _, entity := range entities {
+		// Only check Configuration CC (112) - standard across all Z-Wave devices
+		cc, ok := entity.Metadata["command_class"].(float64)
+		if !ok || int(cc) != CC_CONFIGURATION {
+			continue
+		}
+
+		// Match by label pattern (manufacturer-agnostic)
+		// Different devices may use: "Low Battery Threshold", "Battery Alarm Level",
+		// "Low Battery Alarm Threshold", "Battery Report Threshold", etc.
+		label := strings.ToLower(entity.Name)
+
+		// Look for battery threshold configuration parameters
+		isBatteryThreshold := strings.Contains(label, "battery") &&
+			(strings.Contains(label, "threshold") ||
+				strings.Contains(label, "alarm") ||
+				strings.Contains(label, "level"))
+
+		// Also check the label metadata field (some devices store it there)
+		if !isBatteryThreshold {
+			if labelMeta, ok := entity.Metadata["label"].(string); ok {
+				labelMetaLower := strings.ToLower(labelMeta)
+				isBatteryThreshold = strings.Contains(labelMetaLower, "battery") &&
+					(strings.Contains(labelMetaLower, "threshold") ||
+						strings.Contains(labelMetaLower, "alarm") ||
+						strings.Contains(labelMetaLower, "level"))
+			}
+		}
+
+		if isBatteryThreshold {
+			// Extract value - can be float64 or int
+			var threshold float64
+			switch v := entity.Value.(type) {
+			case float64:
+				threshold = v
+			case int:
+				threshold = float64(v)
+			default:
+				continue
+			}
+
+			// Validate threshold is sensible (1-100%)
+			if threshold > 0 && threshold <= 100 {
+				log.Printf("[ENTITY-MAPPER] Found device-specific battery threshold: %.0f%% from entity %s", threshold, entity.Name)
+				return &threshold
+			}
+		}
+	}
+	return nil
+}
+
 // PopulateUnifiedContractFromEntities populates the unified contract fields
 // (readings, battery, controls) from the device entities
 func PopulateUnifiedContractFromEntities(device *model.Device) {
@@ -38,7 +95,7 @@ func PopulateUnifiedContractFromEntities(device *model.Device) {
 		log.Printf("[ENTITY-MAPPER] Post-processing check for %s: battery level=%d, is_low=%v", device.ID, device.Battery.Level, device.Battery.IsLow)
 
 		// Check if device is AC-powered (has backup battery, not primary battery)
-		isACPowered := isACPoweredDevice(device.Entities)
+		isACPowered := IsACPoweredDevice(device.Entities)
 
 		if isACPowered {
 			// Device has AC power with backup battery - don't flag as low battery
@@ -71,7 +128,7 @@ func PopulateUnifiedContractFromEntities(device *model.Device) {
 // 2. Presence of "backup" entity indicating optional backup battery
 // 3. Battery "disconnected" flag indicating optional/removable backup battery
 // 4. No Wake Up entity at all (always-listening AC devices don't need wake-up)
-func isACPoweredDevice(entities []model.DeviceEntity) bool {
+func IsACPoweredDevice(entities []model.DeviceEntity) bool {
 	const wakeUpIntervalThreshold = 3600 // 1 hour in seconds
 	hasWakeUpEntity := false
 
@@ -195,6 +252,10 @@ func mapEntityToContract(device *model.Device, entity *model.DeviceEntity) {
 	}
 }
 
+// DefaultBatteryLowThreshold is the default battery low threshold (%)
+// Used when neither device-specific nor config threshold is available
+const DefaultBatteryLowThreshold = 20.0
+
 // mapBatteryEntity maps battery-related entities
 func mapBatteryEntity(device *model.Device, entity *model.DeviceEntity, propName string) {
 	if device.Battery == nil {
@@ -205,8 +266,17 @@ func mapBatteryEntity(device *model.Device, entity *model.DeviceEntity, propName
 	case "level":
 		if level, ok := entity.Value.(float64); ok {
 			device.Battery.Level = int(level)
-			device.Battery.IsLow = level < 20
-			log.Printf("[ENTITY-MAPPER] Mapped battery level: %d%%", int(level))
+
+			// Get threshold: device-specific > default
+			// Note: config threshold is applied later during event handling
+			threshold := DefaultBatteryLowThreshold
+			if deviceThreshold := GetDeviceBatteryThreshold(device.Entities); deviceThreshold != nil {
+				threshold = *deviceThreshold
+				log.Printf("[ENTITY-MAPPER] Using device-specific battery threshold: %.0f%%", threshold)
+			}
+
+			device.Battery.IsLow = level < threshold
+			log.Printf("[ENTITY-MAPPER] Mapped battery level: %d%% (threshold: %.0f%%, isLow: %v)", int(level), threshold, device.Battery.IsLow)
 		}
 	case "disconnected":
 		// If battery is disconnected (backup battery not installed), don't flag as low

@@ -39,6 +39,12 @@ from .weather_client import WeatherClient
 from .hsil_ml_river import HSILRiverLearningEngine
 from .river_feedback_adapter import RiverFeedbackAdapter
 from .incident_generator import IncidentGenerator
+from .climate_insights import (
+    compute_climate_context,
+    generate_rule_based_insights,
+    generate_llm_insights,
+    validate_insights,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -412,18 +418,11 @@ class HSILService:
 
     async def get_climate_insights(self) -> Dict[str, Any]:
         """
-        Get AI-powered climate insights using ML learnings and LLM reasoning.
+        Get AI-powered climate insights using hybrid approach:
+        1. Rule-based computation of all numeric facts
+        2. LLM reasoning with strict guardrails (optional)
 
-        Combines:
-        - Current device readings (temperature, humidity, etc.)
-        - Weather data and correlations
-        - ML-learned baselines and anomalies
-        - Comfort preferences
-        - Equipment health status
-
-        Returns LLM-generated insights for display in UI.
-
-        Results are cached in shared file and regenerated in background every 10 minutes.
+        Results are cached and regenerated in background every 10 minutes.
         """
         # Check shared file cache first (works across all workers)
         try:
@@ -431,19 +430,19 @@ class HSILService:
                 with open(CLIMATE_INSIGHTS_CACHE_FILE, 'r') as f:
                     cache_data = json.load(f)
                     cached_time = cache_data.get('cached_at', 0)
-                    # Cache is valid for up to 15 minutes (allows for background task delays)
+                    # Cache is valid for up to 15 minutes
                     if time.time() - cached_time < 900:
-                        logger.info("Returning cached climate insights from shared file")
+                        logger.debug("Returning cached climate insights")
                         return cache_data.get('data', {})
         except Exception as e:
             logger.warning(f"Failed to read cache file: {e}")
 
-        # If no cache, generate once (but don't block future requests)
-        logger.info("No cached insights, generating initial set...")
+        # Generate fresh insights
+        logger.info("No cached insights, generating...")
         try:
             return await self._generate_climate_insights_internal()
         except Exception as e:
-            logger.error(f"Failed to generate initial climate insights: {e}")
+            logger.error(f"Failed to generate climate insights: {e}")
             return {
                 "insights": [{
                     "type": "warning",
@@ -455,136 +454,60 @@ class HSILService:
             }
 
     async def _generate_climate_insights_internal(self) -> Dict[str, Any]:
-        """Internal method to generate climate insights (called by API and background task)"""
+        """
+        Generate climate insights using hybrid architecture:
+        1. compute_climate_context() - all numeric facts computed deterministically
+        2. generate_llm_insights() or generate_rule_based_insights() - insight generation
+        3. validate_insights() - post-validation against ground truth
+        """
         try:
-            # Gather all necessary data
-            home_state = await self.get_home_state()
-            weather_ctx = await self.weather_service.get_environmental_context()
-            ml_stats = await self.learning.get_stats()
-            preferences = await self.get_learned_preferences()
-
-            # Extract climate-relevant devices
-            climate_devices = []
-            for device in home_state.devices:
-                # Include temperature, humidity, thermostats, HVAC, etc.
-                device_type_lower = device.type.lower() if device.type else ""
-                readings = device.readings or {}
-
-                if any(keyword in device_type_lower for keyword in ["temperature", "humidity", "thermostat", "hvac", "climate"]):
-                    climate_devices.append({
-                        "id": device.id,
-                        "label": device.label,
-                        "type": device.type,
-                        "location": device.location,
-                        "readings": readings,
-                        "value": device.value
-                    })
-                # Also include if readings contain climate metrics
-                elif any(key in readings for key in ["temperature", "humidity", "targetTemperature"]):
-                    climate_devices.append({
-                        "id": device.id,
-                        "label": device.label,
-                        "type": device.type,
-                        "location": device.location,
-                        "readings": readings,
-                        "value": device.value
-                    })
-
-            # Build prompt for LLM
-            prompt = f"""Analyze the current climate conditions and provide 3-5 actionable insights.
-
-Current Climate Data:
-{self._format_climate_devices(climate_devices)}
-
-Weather Context:
-{self._format_weather_context(weather_ctx)}
-
-ML Learned Baselines:
-{self._format_ml_stats(ml_stats)}
-
-Comfort Preferences:
-{preferences.get('river_comfort_preferences', {})}
-
-Generate exactly 3-5 insights following these rules:
-1. Each insight must have: type (info/warning/success), title, and description
-2. Types: "info" for general observations, "warning" for issues, "success" for positive conditions
-3. Focus on: comfort analysis, weather impact, equipment efficiency, energy savings, health concerns
-4. Be specific and actionable
-5. Use actual data from above (temperatures, humidity, equipment status)
-6. Reference specific rooms/zones when relevant
-7. IMPORTANT: When comparing indoor and outdoor temperatures:
-   - If indoor > outdoor, say "warmer inside than outside" or "indoor temperature is higher"
-   - If indoor < outdoor, say "cooler inside than outside" or "indoor temperature is lower"
-   - Be mathematically accurate with all temperature comparisons
-
-Return ONLY a JSON array with this exact structure:
-[
-  {{"type": "info|warning|success", "title": "Brief title", "description": "Detailed insight with specific data"}}
-]"""
-
-            # Call LLM
-            if not self.llm_provider or not self.llm_provider.is_available():
-                # Fallback to simple insights if LLM unavailable
-                return await self._fallback_climate_insights(climate_devices, weather_ctx)
-
-            response_text, _ = self.llm_provider.chat(
-                messages=[{"role": "user", "content": prompt}],
-                tools=None,
-                temperature=0.3,
-                max_tokens=1000
+            # Step 1: Compute all climate facts (pure data, no LLM)
+            context = await compute_climate_context(
+                backend_url=self.backend_url,
+                weather_service=self.weather_service,
             )
 
-            # Parse JSON response
-            import json
-            # Extract JSON array from response (handle markdown code blocks)
-            response_text = response_text.strip()
-            if response_text.startswith("```"):
-                # Remove markdown code block
-                lines = response_text.split("\n")
-                response_text = "\n".join(lines[1:-1]) if len(lines) > 2 else response_text
+            # Step 2: Generate insights
+            # Try LLM first if available, fall back to rules
+            use_llm = self.llm_provider and self.llm_provider.is_available()
 
-            insights = json.loads(response_text)
+            if use_llm:
+                logger.info("Generating climate insights with LLM")
+                insights = await generate_llm_insights(context, self.llm_provider)
+                # Step 3: Validate LLM output against ground truth
+                insights = validate_insights(insights, context)
+                source = "llm"
+            else:
+                logger.info("Generating climate insights with rules")
+                insights = generate_rule_based_insights(context)
+                source = "rule_based"
 
+            # Convert to dict format
             result = {
-                "insights": insights,
+                "insights": [i.model_dump() for i in insights],
                 "timestamp": datetime.now().isoformat(),
-                "source": "llm"
+                "source": source
             }
 
-            # Cache the result to shared file (works across all workers)
+            # Cache result
             self._write_climate_insights_cache(result)
-            logger.info("Generated and cached new climate insights")
-
             return result
 
         except Exception as e:
             logger.error(f"Error generating climate insights: {e}", exc_info=True)
-            # Fallback to simple insights on error
-            try:
-                home_state = await self.get_home_state()
-                weather_ctx = await self.weather_service.get_environmental_context()
-                climate_devices = [d for d in home_state.devices if d.type and "temperature" in d.type.lower()]
-                fallback_result = await self._fallback_climate_insights(climate_devices, weather_ctx)
-                # Cache fallback too
-                self._write_climate_insights_cache(fallback_result)
-                return fallback_result
-            except:
-                error_result = {
-                    "insights": [{
-                        "type": "warning",
-                        "title": "Insights Unavailable",
-                        "description": "Unable to generate climate insights at this time."
-                    }],
-                    "timestamp": datetime.now().isoformat(),
-                    "source": "error"
-                }
-                # Don't cache errors
-                return error_result
+            return {
+                "insights": [{
+                    "type": "warning",
+                    "title": "Insights Unavailable",
+                    "description": "Unable to generate climate insights at this time."
+                }],
+                "timestamp": datetime.now().isoformat(),
+                "source": "error"
+            }
 
     def _write_climate_insights_cache(self, result: Dict[str, Any]):
         """Write climate insights to shared cache file with file locking"""
         try:
-            # Use file locking to prevent race conditions across workers
             with open(CLIMATE_INSIGHTS_LOCK_FILE, 'w') as lock_file:
                 fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
                 try:
@@ -598,97 +521,3 @@ Return ONLY a JSON array with this exact structure:
                     fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
         except Exception as e:
             logger.error(f"Failed to write climate insights cache: {e}")
-
-    def _format_climate_devices(self, devices) -> str:
-        """Format climate devices for LLM prompt"""
-        if not devices:
-            return "No climate devices found"
-
-        lines = []
-        for device in devices:
-            readings = device.get("readings", {})
-            location = device.get("location", "Unknown")
-            label = device.get("label", "Unknown")
-
-            reading_str = ", ".join([f"{k}={v}" for k, v in readings.items()])
-            lines.append(f"- {label} ({location}): {reading_str}")
-
-        return "\n".join(lines)
-
-    def _format_weather_context(self, weather_ctx) -> str:
-        """Format weather context for LLM prompt"""
-        if not weather_ctx:
-            return "Weather data unavailable"
-
-        # EnvironmentalContext has nested weather object
-        weather = weather_ctx.weather if hasattr(weather_ctx, 'weather') else weather_ctx
-
-        return f"""Temperature: {weather.temperature}°F
-Feels Like: {weather.feels_like}°F
-Humidity: {weather.humidity}%
-Conditions: {weather.description}
-Wind: {weather.wind_speed} mph"""
-
-    def _format_ml_stats(self, stats) -> str:
-        """Format ML stats for LLM prompt"""
-        device_health = stats.get("device_health", [])
-        if not device_health:
-            return "No ML baseline data available yet"
-
-        lines = []
-        for device in device_health[:10]:  # Limit to top 10
-            device_id = device.get("device_id", "unknown")
-            baseline = device.get("baseline", {})
-            mean = baseline.get("mean")
-            if mean is not None:
-                lines.append(f"- {device_id}: baseline={mean:.1f}, anomaly_score={device.get('anomaly_score', 0):.2f}")
-
-        return "\n".join(lines) if lines else "Learning baselines..."
-
-    async def _fallback_climate_insights(self, climate_devices, weather_ctx) -> Dict[str, Any]:
-        """Fallback insights when LLM is unavailable"""
-        insights = []
-
-        # Simple temperature check
-        if climate_devices:
-            temps = []
-            for device in climate_devices:
-                readings = device.get("readings", {})
-                if "temperature" in readings:
-                    temps.append(readings["temperature"])
-
-            if temps:
-                avg_temp = sum(temps) / len(temps)
-                if avg_temp < 65:
-                    insights.append({
-                        "type": "info",
-                        "title": "Cool Indoor Temperature",
-                        "description": f"Average temperature is {avg_temp:.1f}°F. Consider adjusting heating."
-                    })
-                elif avg_temp > 78:
-                    insights.append({
-                        "type": "info",
-                        "title": "Warm Indoor Temperature",
-                        "description": f"Average temperature is {avg_temp:.1f}°F. Consider adjusting cooling."
-                    })
-
-        # Weather insight
-        if weather_ctx:
-            insights.append({
-                "type": "info",
-                "title": f"Current Weather: {weather_ctx.conditions}",
-                "description": f"Outside temperature is {weather_ctx.temperature}°F with {weather_ctx.humidity}% humidity."
-            })
-
-        if not insights:
-            insights.append({
-                "type": "info",
-                "title": "Climate Monitoring Active",
-                "description": "Gathering baseline data. Insights will improve as the system learns your patterns."
-            })
-
-        return {
-            "insights": insights,
-            "timestamp": datetime.now().isoformat(),
-            "source": "fallback"
-        }

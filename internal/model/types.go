@@ -278,6 +278,7 @@ const (
 	StatusOpen         IncidentStatus = "open"
 	StatusAcknowledged IncidentStatus = "acknowledged"
 	StatusResolved     IncidentStatus = "resolved"
+	StatusIgnored      IncidentStatus = "ignored" // Dismissed as false positive or not actionable
 )
 
 // IncidentType represents the type of incident
@@ -315,6 +316,10 @@ type Incident struct {
 	CreatedAt   time.Time        `json:"created_at"`
 	UpdatedAt   time.Time        `json:"updated_at"`
 	ResolvedAt  *time.Time       `json:"resolved_at"`
+	// Status change tracking
+	AcknowledgedAt *time.Time `json:"acknowledged_at,omitempty"` // When user acknowledged the incident
+	IgnoredAt      *time.Time `json:"ignored_at,omitempty"`      // When user dismissed/ignored the incident
+	Notes          string     `json:"notes,omitempty"`           // User notes on status change
 	// AI Analysis fields
 	AnalysisStatus string         `json:"analysis_status"` // "pending", "completed", "failed"
 	Analysis       string         `json:"analysis"`

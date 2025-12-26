@@ -80,6 +80,48 @@ func (s *Service) Resolve(ctx context.Context, id string) error {
 	return s.repo.Upsert(ctx, incident)
 }
 
+// Acknowledge marks an incident as acknowledged (user has seen it)
+func (s *Service) Acknowledge(ctx context.Context, id string, notes string) error {
+	incident, err := s.repo.Get(ctx, id)
+	if err != nil {
+		return err
+	}
+	if incident == nil {
+		return fmt.Errorf("incident not found: %s", id)
+	}
+
+	now := time.Now()
+	incident.Status = model.StatusAcknowledged
+	incident.AcknowledgedAt = &now
+	incident.UpdatedAt = now
+	if notes != "" {
+		incident.Notes = notes
+	}
+
+	return s.repo.Upsert(ctx, incident)
+}
+
+// Ignore marks an incident as ignored/dismissed (false positive or not actionable)
+func (s *Service) Ignore(ctx context.Context, id string, notes string) error {
+	incident, err := s.repo.Get(ctx, id)
+	if err != nil {
+		return err
+	}
+	if incident == nil {
+		return fmt.Errorf("incident not found: %s", id)
+	}
+
+	now := time.Now()
+	incident.Status = model.StatusIgnored
+	incident.IgnoredAt = &now
+	incident.UpdatedAt = now
+	if notes != "" {
+		incident.Notes = notes
+	}
+
+	return s.repo.Upsert(ctx, incident)
+}
+
 // Delete removes an incident (for demo/testing purposes)
 func (s *Service) Delete(ctx context.Context, id string) error {
 	return s.repo.Delete(ctx, id)

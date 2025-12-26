@@ -400,10 +400,27 @@ func (s *Server) handleZWaveValueUpdated(event zwave.Event) {
 	case zwave.CC_BATTERY:
 		if property == "level" {
 			if level, ok := newValue.(float64); ok {
-				// Create low battery incident if needed
-				if level < 20 {
+				// Skip battery incidents for AC-powered devices (battery is backup only)
+				if zwave.IsACPoweredDevice(device.Entities) {
+					log.Printf("[ZWAVE] Skipping battery alert for AC-powered device %s (backup battery only)", device.Name)
+					// Still clear any existing incidents for this device
+					s.clearZWaveIncidents(device.ID, "low_battery")
+					break
+				}
+
+				// Get threshold: device-specific > config > default
+				threshold := s.cfg.GetBatteryLowThreshold() // From config.yaml or default 20%
+				if deviceThreshold := zwave.GetDeviceBatteryThreshold(device.Entities); deviceThreshold != nil {
+					threshold = *deviceThreshold
+					log.Printf("[ZWAVE] Using device-specific battery threshold for %s: %.0f%%", device.Name, threshold)
+				}
+
+				if level < threshold && level > 0 {
 					s.createZWaveIncident(device, "low_battery", "warning",
-						fmt.Sprintf("Battery low: %d%%", int(level)))
+						fmt.Sprintf("Battery low: %d%% (threshold: %.0f%%)", int(level), threshold))
+				} else if level >= threshold {
+					// Battery recovered - auto-resolve any open low_battery incidents
+					s.clearZWaveIncidents(device.ID, "low_battery")
 				}
 			}
 		}

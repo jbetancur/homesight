@@ -23,6 +23,12 @@ type IncidentService interface {
 	// Resolve marks an incident as resolved
 	Resolve(ctx context.Context, id string) error
 
+	// Acknowledge marks an incident as acknowledged (user has seen it)
+	Acknowledge(ctx context.Context, id string, notes string) error
+
+	// Ignore marks an incident as ignored/dismissed (false positive or not actionable)
+	Ignore(ctx context.Context, id string, notes string) error
+
 	// Delete removes an incident (for demo/testing purposes)
 	Delete(ctx context.Context, id string) error
 

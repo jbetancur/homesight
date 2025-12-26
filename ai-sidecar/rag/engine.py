@@ -335,6 +335,21 @@ class RAGEngine:
             rag_retrieval_duration.observe(duration)
             rag_retrievals.labels(status=status).inc()
 
+    def has_documents_for_model(self, manufacturer: str, model: str) -> bool:
+        """Check if documents exist in RAG for a specific manufacturer/model"""
+        try:
+            # Use shared utility for consistent ChromaDB where clause
+            where = build_chromadb_where(manufacturer, model)
+            # Check if any documents exist
+            results = self.collection.get(where=where, limit=1)
+            has_docs = bool(results and results.get('ids') and len(results['ids']) > 0)
+            if has_docs:
+                logger.info(f"Found existing RAG documents for {manufacturer} {model}")
+            return has_docs
+        except Exception as e:
+            logger.warning(f"Error checking for existing documents for {manufacturer} {model}: {e}")
+            return False
+
     def delete_device_docs(self, manufacturer: str, model: str) -> bool:
         """Delete all documents for a specific device from the RAG database"""
         try:

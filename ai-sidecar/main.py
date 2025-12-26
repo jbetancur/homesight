@@ -349,93 +349,216 @@ async def metrics():
 @app.post("/analyze", response_model=AnalyzeResponse)
 async def analyze(request: AnalyzeRequest):
     """
-    Get relevant documentation for an incident or device.
-    
-    Queries RAG for device-specific documentation and returns structured results.
-    No LLM inference - just document retrieval for speed.
-    
-    For AI-powered troubleshooting, use /hsil/chat with your question.
+    Get contextual AI analysis for an incident.
+
+    Fetches device context, zone info, and recent incidents to provide
+    actionable recommendations using LLM reasoning.
     """
-    if not rag_engine:
-        raise HTTPException(status_code=503, detail="RAG engine not initialized")
+    import httpx
 
     try:
-        # Extract device and incident info
+        config = get_config()
+        # Extract incident info
         data = request.data
         device_id = data.get("device_id", "")
         incident_type = data.get("type", "unknown")
         severity = data.get("severity", "unknown")
-        manufacturer = data.get("manufacturer", "")
-        model = data.get("model", "")
-        
-        # Build RAG query from incident data - include manufacturer/model for better matching
-        query_parts = []
-        if manufacturer:
-            query_parts.append(manufacturer)
-        if model:
-            query_parts.append(model)
-        query_parts.append(incident_type)
-        if device_id and not model:  # Only add device_id if no model provided
-            query_parts.append(device_id)
-        if data.get("description"):
-            query_parts.append(data["description"][:100])
-        
-        query = " ".join(query_parts)
-        
-        # Build manufacturer filter for ChromaDB if manufacturer specified
-        where_filter = None
-        if manufacturer:
-            where_filter = {"manufacturer": manufacturer.title()}
-        
-        # Query RAG for relevant documentation with manufacturer filter
-        results = rag_engine.query(query, n_results=5, where=where_filter)
-        
-        # Build structured response from RAG results
+        description = data.get("description", "")
+
+        # Fetch device context from Go API
+        device_context = None
+        device_incidents = []
+        zone_devices = []
+
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            # Get device details
+            if device_id:
+                try:
+                    resp = await client.get(f"{config.backend_url}/api/devices/{device_id}")
+                    if resp.status_code == 200:
+                        device_context = resp.json()
+                except Exception as e:
+                    logger.warning(f"Failed to fetch device {device_id}: {e}")
+
+                # Get recent incidents for this device
+                try:
+                    resp = await client.get(f"{config.backend_url}/api/devices/{device_id}/incidents")
+                    if resp.status_code == 200:
+                        device_incidents = resp.json() or []
+                        # Filter to recent incidents (last 5)
+                        device_incidents = device_incidents[:5]
+                except Exception as e:
+                    logger.warning(f"Failed to fetch incidents for {device_id}: {e}")
+
+            # Get zone context if device has a zone
+            zone_id = device_context.get("zone_id") if device_context else None
+            if zone_id and zone_id != "N/A":
+                try:
+                    resp = await client.get(f"{config.backend_url}/api/devices")
+                    if resp.status_code == 200:
+                        all_devices = resp.json()
+                        devices_list = all_devices.get("devices", []) if isinstance(all_devices, dict) else all_devices
+                        zone_devices = [d for d in devices_list if d.get("zone_id") == zone_id and d.get("id") != device_id]
+                except Exception as e:
+                    logger.warning(f"Failed to fetch zone devices: {e}")
+
+        # Query RAG for relevant documentation
+        rag_sources = []
+        if rag_engine:
+            manufacturer = device_context.get("manufacturer", "") if device_context else ""
+            model = device_context.get("model", "") if device_context else ""
+
+            query_parts = []
+            if manufacturer:
+                query_parts.append(manufacturer)
+            if model:
+                query_parts.append(model)
+            query_parts.append(incident_type.replace("_", " "))
+            if description:
+                query_parts.append(description[:100])
+
+            query = " ".join(query_parts)
+            where_filter = {"manufacturer": manufacturer.title()} if manufacturer else None
+
+            try:
+                results = rag_engine.query(query, n_results=3, where=where_filter)
+                for r in results or []:
+                    relevance = r.get('relevance_score', 0)
+                    if relevance > 0.25:
+                        rag_sources.append({
+                            "source": r['metadata'].get('source', 'Documentation'),
+                            "relevance": relevance,
+                            "excerpt": r['text'][:300].strip()
+                        })
+            except Exception as e:
+                logger.warning(f"RAG query failed: {e}")
+
+        # Build contextual analysis using LLM
         insights = []
-        sources = []
-        
-        if results:
-            for r in results:
-                relevance = r.get('relevance_score', 0)
-                if relevance > 0.2:  # Filter low-relevance results
-                    source = r['metadata'].get('source', 'Documentation')
-                    excerpt = r['text'][:500].strip()
-                    insights.append(f"**{source}** (relevance: {relevance:.0%}):\n{excerpt}")
-                    sources.append({
-                        "source": source,
-                        "relevance": relevance,
-                        "type": r['metadata'].get('type', 'unknown')
-                    })
-        
-        if not insights:
-            insights = [
-                "No device-specific documentation found in knowledge base.",
-                "Try asking a question in the chat for AI-powered troubleshooting."
+        actions = []
+        analysis = ""
+
+        if llm_provider and llm_provider.is_available():
+            # Build context for LLM
+            context_parts = []
+
+            if device_context:
+                device_info = f"Device: {device_context.get('name', device_id)}"
+                if device_context.get('manufacturer'):
+                    device_info += f" ({device_context.get('manufacturer')} {device_context.get('model', '')})"
+                if zone_id:
+                    device_info += f" in {zone_id}"
+                context_parts.append(device_info)
+
+                # Add battery status if relevant
+                if device_context.get("battery"):
+                    battery = device_context["battery"]
+                    context_parts.append(f"Battery: {battery.get('level', 'unknown')}%")
+
+            if device_incidents:
+                recent = [f"- {i.get('title', 'Unknown')} ({i.get('status', 'unknown')})" for i in device_incidents[:3]]
+                context_parts.append(f"Recent incidents on this device:\n" + "\n".join(recent))
+
+            if zone_devices:
+                other_devices = [d.get('name', d.get('id')) for d in zone_devices[:3]]
+                context_parts.append(f"Other devices in {zone_id}: {', '.join(other_devices)}")
+
+            if rag_sources:
+                docs = [f"- {s['source']}: {s['excerpt'][:150]}..." for s in rag_sources[:2]]
+                context_parts.append("Relevant documentation:\n" + "\n".join(docs))
+
+            prompt = f"""Analyze this home automation incident and provide actionable recommendations.
+
+Incident: {incident_type.replace('_', ' ').title()}
+Severity: {severity}
+Description: {description}
+
+Context:
+{chr(10).join(context_parts)}
+
+Provide a brief analysis (2-3 sentences) and 2-3 specific actionable steps. Focus on practical troubleshooting.
+Be concise and specific to this device and situation.
+
+Format your response as:
+ANALYSIS: <your analysis>
+ACTIONS:
+1. <action 1>
+2. <action 2>
+3. <action 3>"""
+
+            try:
+                response = await llm_provider.generate(prompt, max_tokens=300)
+
+                # Parse LLM response
+                if "ANALYSIS:" in response and "ACTIONS:" in response:
+                    parts = response.split("ACTIONS:")
+                    analysis = parts[0].replace("ANALYSIS:", "").strip()
+
+                    action_lines = parts[1].strip().split("\n")
+                    for line in action_lines:
+                        line = line.strip()
+                        if line and line[0].isdigit():
+                            # Remove number prefix
+                            action = line.lstrip("0123456789.").strip()
+                            if action:
+                                actions.append(action)
+                else:
+                    # Fallback if format isn't followed
+                    analysis = response.strip()
+                    actions = ["Check device status in the Devices view", "Use Chat with AI for detailed troubleshooting"]
+
+            except Exception as e:
+                logger.error(f"LLM analysis failed: {e}")
+                analysis = f"Analysis unavailable. {incident_type.replace('_', ' ').title()} detected on {device_context.get('name', device_id) if device_context else device_id}."
+                actions = ["Check device status", "Review device documentation"]
+        else:
+            # Fallback without LLM
+            device_name = device_context.get('name', device_id) if device_context else device_id
+            analysis = f"{incident_type.replace('_', ' ').title()} detected on {device_name}."
+
+            if device_incidents:
+                analysis += f" This device has {len(device_incidents)} recent incident(s)."
+
+            actions = [
+                f"Check {device_name} physical status and connections",
+                "Review device readings in the Devices view",
+                "Use Chat with AI for detailed troubleshooting steps"
             ]
-        
-        # Build analysis summary
-        analysis = f"Found {len(sources)} relevant documents for {incident_type}"
-        if device_id:
-            analysis += f" on device {device_id}"
-        
+
+        # Build insights from context
+        if device_incidents and len(device_incidents) > 1:
+            insights.append(f"This device has had {len(device_incidents)} incidents recently - may indicate a recurring issue")
+
+        if device_context and device_context.get("battery", {}).get("is_low"):
+            insights.append("Device battery is low - this may be related to the current issue")
+
+        if zone_devices:
+            insights.append(f"There are {len(zone_devices)} other device(s) in the same zone that may be affected")
+
+        if rag_sources:
+            insights.append(f"Found {len(rag_sources)} relevant documentation source(s)")
+
+        if not insights:
+            insights.append("No additional context available for this incident")
+
         return AnalyzeResponse(
             analysis=analysis,
             insights=insights,
-            actions=[
-                "Review the documentation excerpts above",
-                "Ask follow-up questions in chat for specific troubleshooting",
-                "Check device knowledge base for more details"
-            ],
+            actions=actions if actions else ["Check device status", "Use Chat with AI for help"],
             metadata={
                 "type": incident_type,
                 "severity": severity,
                 "device_id": device_id,
-                "sources": sources,
-                "documentation_available": len(sources) > 0
+                "zone_id": zone_id,
+                "device_name": device_context.get("name") if device_context else None,
+                "recent_incidents_count": len(device_incidents),
+                "zone_devices_count": len(zone_devices),
+                "rag_sources": rag_sources,
+                "documentation_available": len(rag_sources) > 0
             }
         )
     except Exception as e:
-        logger.error(f"Analysis error: {e}")
+        logger.error(f"Analysis error: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 

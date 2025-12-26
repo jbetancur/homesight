@@ -28,7 +28,9 @@ import {
   Send,
   AlertCircle,
   CheckCircle,
-  Clock
+  Eye,
+  EyeOff,
+  XCircle
 } from 'lucide-react';
 import { useEventSubscription } from '../useEventSubscription';
 import ReactMarkdown from 'react-markdown';
@@ -51,8 +53,18 @@ function getSeverityColor(severity?: string) {
 function getStatusIcon(status?: string) {
   switch (status?.toLowerCase()) {
     case 'resolved': return <CheckCircle size={16} />;
-    case 'acknowledged': return <Clock size={16} />;
+    case 'acknowledged': return <Eye size={16} />;
+    case 'ignored': return <EyeOff size={16} />;
     default: return <AlertCircle size={16} />;
+  }
+}
+
+function getStatusColor(status?: string) {
+  switch (status?.toLowerCase()) {
+    case 'resolved': return 'green';
+    case 'acknowledged': return 'blue';
+    case 'ignored': return 'gray';
+    default: return 'red';
   }
 }
 
@@ -69,7 +81,8 @@ export function IncidentsView() {
   const [incidents, setIncidents] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [expandedId, setExpandedId] = useState<string | null>(null);
-  const [statusFilter, setStatusFilter] = useState<string>('open'); // 'all', 'open', 'resolved'
+  const [statusFilter, setStatusFilter] = useState<string>('open'); // 'all', 'open', 'acknowledged', 'ignored', 'resolved'
+  const [actionLoading, setActionLoading] = useState<Record<string, string>>({}); // track loading state per incident action
   const [recommendations, setRecommendations] = useState<Record<string, AIRecommendation>>({});
   const [chatModal, setChatModal] = useState<{open: boolean, incidentId: string | null}>({open: false, incidentId: null});
   const [chatMessages, setChatMessages] = useState<{role: 'user' | 'assistant', content: string}[]>([]);
@@ -304,6 +317,54 @@ export function IncidentsView() {
     setTechnicianNotes('');
   };
 
+  const handleAcknowledge = async (incidentId: string) => {
+    setActionLoading(prev => ({ ...prev, [incidentId]: 'acknowledge' }));
+    try {
+      const response = await fetch(`${API_BASE}/incidents/${incidentId}/acknowledge`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ notes: '' })
+      });
+      if (response.ok) {
+        const updated = await response.json();
+        setIncidents(prev => prev.map(i => i.id === incidentId ? updated : i));
+        incidentsRef.current = incidentsRef.current.map(i => i.id === incidentId ? updated : i);
+      }
+    } catch (error) {
+      console.error('Failed to acknowledge incident:', error);
+    } finally {
+      setActionLoading(prev => {
+        const newState = { ...prev };
+        delete newState[incidentId];
+        return newState;
+      });
+    }
+  };
+
+  const handleIgnore = async (incidentId: string) => {
+    setActionLoading(prev => ({ ...prev, [incidentId]: 'ignore' }));
+    try {
+      const response = await fetch(`${API_BASE}/incidents/${incidentId}/ignore`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ notes: '' })
+      });
+      if (response.ok) {
+        const updated = await response.json();
+        setIncidents(prev => prev.map(i => i.id === incidentId ? updated : i));
+        incidentsRef.current = incidentsRef.current.map(i => i.id === incidentId ? updated : i);
+      }
+    } catch (error) {
+      console.error('Failed to ignore incident:', error);
+    } finally {
+      setActionLoading(prev => {
+        const newState = { ...prev };
+        delete newState[incidentId];
+        return newState;
+      });
+    }
+  };
+
   if (loading) {
     return (
       <Stack align="center" justify="center" style={{ minHeight: '50vh' }}>
@@ -316,11 +377,13 @@ export function IncidentsView() {
   // Filter incidents based on status
   const filteredIncidents = statusFilter === 'all'
     ? incidents
+    : statusFilter === 'active'
+    ? incidents.filter((i: any) => i.status === 'open' || i.status === 'acknowledged')
     : incidents.filter((i: any) => i.status === statusFilter);
 
-  // Separate active and resolved incidents
-  const activeIncidents = filteredIncidents.filter((i: any) => i.status !== 'resolved');
-  const resolvedIncidents = filteredIncidents.filter((i: any) => i.status === 'resolved');
+  // Separate active and closed incidents
+  const activeIncidents = filteredIncidents.filter((i: any) => i.status === 'open' || i.status === 'acknowledged');
+  const closedIncidents = filteredIncidents.filter((i: any) => i.status === 'resolved' || i.status === 'ignored');
 
   if (incidents.length === 0) {
     return (
@@ -338,14 +401,15 @@ export function IncidentsView() {
         <div>
           <Title order={2}>Incidents</Title>
           <Text size="sm" c="dimmed">
-            {activeIncidents.length} active, {resolvedIncidents.length} resolved
+            {activeIncidents.length} active, {closedIncidents.length} closed
           </Text>
         </div>
         <SegmentedControl
           value={statusFilter}
           onChange={setStatusFilter}
           data={[
-            { label: 'Active', value: 'open' },
+            { label: 'Active', value: 'active' },
+            { label: 'Ignored', value: 'ignored' },
             { label: 'Resolved', value: 'resolved' },
             { label: 'All', value: 'all' },
           ]}
@@ -372,12 +436,15 @@ export function IncidentsView() {
                         {incident.created_at && !isNaN(new Date(incident.created_at).getTime())
                           ? new Date(incident.created_at).toLocaleString()
                           : 'Unknown date'}
+                        {incident.status === 'acknowledged' && incident.acknowledged_at && (
+                          <> • Ack: {new Date(incident.acknowledged_at).toLocaleString()}</>
+                        )}
                       </Text>
                     </div>
                   </Group>
                   <Group gap="xs">
                     <Badge color={getSeverityColor(incident.severity)}>{incident.severity}</Badge>
-                    <Badge variant="light">{incident.status}</Badge>
+                    <Badge variant="light" color={getStatusColor(incident.status)}>{incident.status}</Badge>
                     {incident.type && <Badge color="grape" variant="dot">{incident.type.replace(/_/g, ' ')}</Badge>}
                     <ActionIcon
                       variant="subtle"
@@ -580,6 +647,30 @@ export function IncidentsView() {
                       >
                         Call Technician
                       </Button>
+                      {incident.status === 'open' && (
+                        <Button
+                          leftSection={actionLoading[incident.id] === 'acknowledge' ? <Loader size={14} /> : <Eye size={16} />}
+                          variant="light"
+                          color="blue"
+                          size="xs"
+                          disabled={!!actionLoading[incident.id]}
+                          onClick={() => handleAcknowledge(incident.id)}
+                        >
+                          Acknowledge
+                        </Button>
+                      )}
+                      {(incident.status === 'open' || incident.status === 'acknowledged') && (
+                        <Button
+                          leftSection={actionLoading[incident.id] === 'ignore' ? <Loader size={14} /> : <XCircle size={16} />}
+                          variant="light"
+                          color="gray"
+                          size="xs"
+                          disabled={!!actionLoading[incident.id]}
+                          onClick={() => handleIgnore(incident.id)}
+                        >
+                          Dismiss
+                        </Button>
+                      )}
                     </Group>
 
                     <Divider />
@@ -609,35 +700,43 @@ export function IncidentsView() {
       </>
       )}
 
-      {resolvedIncidents.length > 0 && (
+      {closedIncidents.length > 0 && (
         <>
-          <Title order={5} c="green" mt="xl">Resolved Incidents</Title>
+          <Title order={5} c="dimmed" mt="xl">Closed Incidents</Title>
           <Stack gap="sm">
-            {resolvedIncidents.map((incident: any) => (
-            <Card key={incident.id} withBorder padding="md" shadow="sm" opacity={0.7}>
-              <Stack gap="sm">
-                <Group justify="space-between" wrap="nowrap">
-                  <Group gap="sm">
-                    {getStatusIcon(incident.status)}
-                    <div>
-                      <Text fw={600} size="md">{incident.title}</Text>
-                      <Text size="xs" c="dimmed">
-                        Resolved: {incident.resolved_at && !isNaN(new Date(incident.resolved_at).getTime())
-                          ? new Date(incident.resolved_at).toLocaleString()
-                          : 'Unknown'}
-                      </Text>
-                    </div>
-                  </Group>
-                  <Group gap="xs">
-                    <Badge color={getSeverityColor(incident.severity)}>{incident.severity}</Badge>
-                    <Badge variant="light" color="green">{incident.status}</Badge>
-                    {incident.type && <Badge color="grape" variant="dot">{incident.type.replace(/_/g, ' ')}</Badge>}
-                  </Group>
-                </Group>
-                <Text size="sm">{incident.description}</Text>
-              </Stack>
-            </Card>
-          ))}
+            {closedIncidents.map((incident: any) => {
+              const closedAt = incident.status === 'resolved' ? incident.resolved_at :
+                              incident.status === 'ignored' ? incident.ignored_at : null;
+              const closedLabel = incident.status === 'resolved' ? 'Resolved' : 'Dismissed';
+              return (
+                <Card key={incident.id} withBorder padding="md" shadow="sm" opacity={0.7}>
+                  <Stack gap="sm">
+                    <Group justify="space-between" wrap="nowrap">
+                      <Group gap="sm">
+                        {getStatusIcon(incident.status)}
+                        <div>
+                          <Text fw={600} size="md">{incident.title}</Text>
+                          <Text size="xs" c="dimmed">
+                            {closedLabel}: {closedAt && !isNaN(new Date(closedAt).getTime())
+                              ? new Date(closedAt).toLocaleString()
+                              : 'Unknown'}
+                          </Text>
+                        </div>
+                      </Group>
+                      <Group gap="xs">
+                        <Badge color={getSeverityColor(incident.severity)}>{incident.severity}</Badge>
+                        <Badge variant="light" color={getStatusColor(incident.status)}>{incident.status}</Badge>
+                        {incident.type && <Badge color="grape" variant="dot">{incident.type.replace(/_/g, ' ')}</Badge>}
+                      </Group>
+                    </Group>
+                    <Text size="sm">{incident.description}</Text>
+                    {incident.notes && (
+                      <Text size="xs" c="dimmed" fs="italic">Notes: {incident.notes}</Text>
+                    )}
+                  </Stack>
+                </Card>
+              );
+            })}
           </Stack>
         </>
       )}

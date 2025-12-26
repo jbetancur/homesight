@@ -93,6 +93,7 @@ func (s *SQLiteDB) initSchema() error {
 			readings TEXT,
 			controls TEXT,
 			battery TEXT,
+			ac_power TEXT,
 			connectivity TEXT,
 			entities TEXT,
 			raw_data TEXT,
@@ -133,6 +134,9 @@ func (s *SQLiteDB) initSchema() error {
 			created_at DATETIME NOT NULL,
 			updated_at DATETIME NOT NULL,
 			resolved_at DATETIME,
+			acknowledged_at DATETIME,
+			ignored_at DATETIME,
+			notes TEXT,
 			analysis_status TEXT DEFAULT 'pending',
 			analysis TEXT,
 			insights TEXT,
@@ -318,6 +322,10 @@ func (s *SQLiteDB) runMigrations() error {
 		// Ignore error if column already exists
 	}
 	_, err = s.db.Exec(`ALTER TABLE devices ADD COLUMN battery TEXT`)
+	if err != nil {
+		// Ignore error if column already exists
+	}
+	_, err = s.db.Exec(`ALTER TABLE devices ADD COLUMN ac_power TEXT`)
 	if err != nil {
 		// Ignore error if column already exists
 	}
@@ -690,15 +698,18 @@ func (r *IncidentRepo) Get(ctx context.Context, id string) (*model.Incident, err
 	var i model.Incident
 	var dataJSON sql.NullString
 	var resolvedAt sql.NullTime
+	var acknowledgedAt sql.NullTime
+	var ignoredAt sql.NullTime
+	var notes sql.NullString
 	var insightsJSON sql.NullString
 	var actionsJSON sql.NullString
 	var analysisDataJSON sql.NullString
 	var analyzedAt sql.NullTime
 
 	err := r.db.QueryRowContext(ctx,
-		`SELECT id, type, title, description, severity, status, device_id, sensor_id, zone_id, asset_id, rule_name, data, created_at, updated_at, resolved_at, analysis_status, analysis, insights, actions, analysis_data, analyzed_at
+		`SELECT id, type, title, description, severity, status, device_id, sensor_id, zone_id, asset_id, rule_name, data, created_at, updated_at, resolved_at, acknowledged_at, ignored_at, notes, analysis_status, analysis, insights, actions, analysis_data, analyzed_at
 		 FROM incidents WHERE id = ?`, id).Scan(
-		&i.ID, &i.Type, &i.Title, &i.Description, &i.Severity, &i.Status, &i.DeviceID, &i.SensorID, &i.ZoneID, &i.AssetID, &i.RuleName, &dataJSON, &i.CreatedAt, &i.UpdatedAt, &resolvedAt, &i.AnalysisStatus, &i.Analysis, &insightsJSON, &actionsJSON, &analysisDataJSON, &analyzedAt)
+		&i.ID, &i.Type, &i.Title, &i.Description, &i.Severity, &i.Status, &i.DeviceID, &i.SensorID, &i.ZoneID, &i.AssetID, &i.RuleName, &dataJSON, &i.CreatedAt, &i.UpdatedAt, &resolvedAt, &acknowledgedAt, &ignoredAt, &notes, &i.AnalysisStatus, &i.Analysis, &insightsJSON, &actionsJSON, &analysisDataJSON, &analyzedAt)
 
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -709,6 +720,15 @@ func (r *IncidentRepo) Get(ctx context.Context, id string) (*model.Incident, err
 
 	if resolvedAt.Valid {
 		i.ResolvedAt = &resolvedAt.Time
+	}
+	if acknowledgedAt.Valid {
+		i.AcknowledgedAt = &acknowledgedAt.Time
+	}
+	if ignoredAt.Valid {
+		i.IgnoredAt = &ignoredAt.Time
+	}
+	if notes.Valid {
+		i.Notes = notes.String
 	}
 	if dataJSON.Valid {
 		json.Unmarshal([]byte(dataJSON.String), &i.Data)
@@ -730,7 +750,7 @@ func (r *IncidentRepo) Get(ctx context.Context, id string) (*model.Incident, err
 }
 
 func (r *IncidentRepo) List(ctx context.Context, filters map[string]any) ([]model.Incident, error) {
-	query := `SELECT id, type, title, description, severity, status, device_id, sensor_id, zone_id, asset_id, rule_name, data, created_at, updated_at, resolved_at, analysis_status, analysis, insights, actions, analysis_data, analyzed_at FROM incidents WHERE 1=1`
+	query := `SELECT id, type, title, description, severity, status, device_id, sensor_id, zone_id, asset_id, rule_name, data, created_at, updated_at, resolved_at, acknowledged_at, ignored_at, notes, analysis_status, analysis, insights, actions, analysis_data, analyzed_at FROM incidents WHERE 1=1`
 	args := make([]any, 0)
 
 	if status, ok := filters["status"]; ok {
@@ -755,17 +775,29 @@ func (r *IncidentRepo) List(ctx context.Context, filters map[string]any) ([]mode
 		var i model.Incident
 		var dataJSON sql.NullString
 		var resolvedAt sql.NullTime
+		var acknowledgedAt sql.NullTime
+		var ignoredAt sql.NullTime
+		var notes sql.NullString
 		var insightsJSON sql.NullString
 		var actionsJSON sql.NullString
 		var analysisDataJSON sql.NullString
 		var analyzedAt sql.NullTime
 
-		if err := rows.Scan(&i.ID, &i.Type, &i.Title, &i.Description, &i.Severity, &i.Status, &i.DeviceID, &i.SensorID, &i.ZoneID, &i.AssetID, &i.RuleName, &dataJSON, &i.CreatedAt, &i.UpdatedAt, &resolvedAt, &i.AnalysisStatus, &i.Analysis, &insightsJSON, &actionsJSON, &analysisDataJSON, &analyzedAt); err != nil {
+		if err := rows.Scan(&i.ID, &i.Type, &i.Title, &i.Description, &i.Severity, &i.Status, &i.DeviceID, &i.SensorID, &i.ZoneID, &i.AssetID, &i.RuleName, &dataJSON, &i.CreatedAt, &i.UpdatedAt, &resolvedAt, &acknowledgedAt, &ignoredAt, &notes, &i.AnalysisStatus, &i.Analysis, &insightsJSON, &actionsJSON, &analysisDataJSON, &analyzedAt); err != nil {
 			return nil, err
 		}
 
 		if resolvedAt.Valid {
 			i.ResolvedAt = &resolvedAt.Time
+		}
+		if acknowledgedAt.Valid {
+			i.AcknowledgedAt = &acknowledgedAt.Time
+		}
+		if ignoredAt.Valid {
+			i.IgnoredAt = &ignoredAt.Time
+		}
+		if notes.Valid {
+			i.Notes = notes.String
 		}
 		if dataJSON.Valid {
 			json.Unmarshal([]byte(dataJSON.String), &i.Data)
@@ -796,11 +828,11 @@ func (r *IncidentRepo) Upsert(ctx context.Context, incident *model.Incident) err
 	analysisDataJSON, _ := json.Marshal(incident.AnalysisData)
 
 	_, err := r.db.ExecContext(ctx,
-		`INSERT OR REPLACE INTO incidents (id, type, title, description, severity, status, device_id, sensor_id, zone_id, asset_id, rule_name, data, created_at, updated_at, resolved_at, analysis_status, analysis, insights, actions, analysis_data, analyzed_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT OR REPLACE INTO incidents (id, type, title, description, severity, status, device_id, sensor_id, zone_id, asset_id, rule_name, data, created_at, updated_at, resolved_at, acknowledged_at, ignored_at, notes, analysis_status, analysis, insights, actions, analysis_data, analyzed_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		incident.ID, incident.Type, incident.Title, incident.Description, incident.Severity, incident.Status,
 		incident.DeviceID, incident.SensorID, incident.ZoneID, incident.AssetID, incident.RuleName,
-		string(dataJSON), incident.CreatedAt, incident.UpdatedAt, incident.ResolvedAt,
+		string(dataJSON), incident.CreatedAt, incident.UpdatedAt, incident.ResolvedAt, incident.AcknowledgedAt, incident.IgnoredAt, incident.Notes,
 		incident.AnalysisStatus, incident.Analysis, string(insightsJSON), string(actionsJSON), string(analysisDataJSON), incident.AnalyzedAt)
 	return err
 }

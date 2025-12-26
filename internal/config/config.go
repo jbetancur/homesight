@@ -50,6 +50,49 @@ type Config struct {
 		Enabled      bool   `yaml:"enabled"`
 		WebSocketURL string `yaml:"websocket_url"`
 	} `yaml:"zwave"`
+
+	Alerts AlertsConfig `yaml:"alerts"`
+}
+
+// AlertsConfig holds alert threshold configuration
+type AlertsConfig struct {
+	Battery BatteryAlertConfig `yaml:"battery"`
+	Freeze  FreezeAlertConfig  `yaml:"freeze"`
+}
+
+// BatteryAlertConfig holds battery alert thresholds
+type BatteryAlertConfig struct {
+	LowThreshold      float64 `yaml:"low_threshold"`      // Default battery low % (20)
+	CriticalThreshold float64 `yaml:"critical_threshold"` // Critical battery % (10)
+}
+
+// FreezeAlertConfig holds freeze alert thresholds
+type FreezeAlertConfig struct {
+	Threshold float64 `yaml:"threshold"` // Temperature °F below which freeze risk alerts trigger (35)
+}
+
+// GetBatteryLowThreshold returns the battery low threshold with sensible default
+func (c *Config) GetBatteryLowThreshold() float64 {
+	if c.Alerts.Battery.LowThreshold > 0 {
+		return c.Alerts.Battery.LowThreshold
+	}
+	return 20.0 // Default: 20%
+}
+
+// GetBatteryCriticalThreshold returns the critical battery threshold with sensible default
+func (c *Config) GetBatteryCriticalThreshold() float64 {
+	if c.Alerts.Battery.CriticalThreshold > 0 {
+		return c.Alerts.Battery.CriticalThreshold
+	}
+	return 10.0 // Default: 10%
+}
+
+// GetFreezeThreshold returns the freeze risk temperature threshold with sensible default
+func (c *Config) GetFreezeThreshold() float64 {
+	if c.Alerts.Freeze.Threshold > 0 {
+		return c.Alerts.Freeze.Threshold
+	}
+	return 35.0 // Default: 35°F
 }
 
 // getEnvOrDefault returns the environment variable value or a default

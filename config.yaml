@@ -184,3 +184,16 @@ zwave:
   websocket_url: "ws://zwavejs:3000"     # Docker: ws://zwavejs:3000, Local: ws://localhost:3001
   # Note: Z-Wave events are published to homesight/zwave/+/discovery, state, etc.
   # Commands are consumed from homesight/cmd/zwave-+
+
+# Alert Configuration
+# Default thresholds for incidents - device-specific settings take precedence if available
+alerts:
+  battery:
+    # Battery low threshold (%). Device-specific thresholds from Z-Wave config entities
+    # (Configuration CC, "Low Battery Threshold" parameter) take precedence over this.
+    low_threshold: 20
+    # Critical threshold (%) - used for escalating severity
+    critical_threshold: 10
+  freeze:
+    # Temperature threshold (°F) below which freeze risk alerts trigger
+    threshold: 35

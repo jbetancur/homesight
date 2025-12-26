@@ -66,8 +66,8 @@ func main() {
 	eventBus := events.NewChannelEventBus()
 	defer eventBus.Close()
 
-	// Initialize rules engine with device repository for enrichment
-	ruleEngine := rules.NewDefaultRuleEngine(deviceRepo)
+	// Initialize rules engine with device repository for enrichment and config for thresholds
+	ruleEngine := rules.NewDefaultRuleEngine(deviceRepo, cfg)
 	defer ruleEngine.Close()
 
 	// Initialize incident service

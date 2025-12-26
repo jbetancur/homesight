@@ -157,6 +157,8 @@ func (s *Server) setupRoutes() {
 			r.Get("/", s.listIncidents)
 			r.Get("/{id}", s.getIncident)
 			r.Post("/{id}/resolve", s.resolveIncident)
+			r.Post("/{id}/acknowledge", s.acknowledgeIncident)
+			r.Post("/{id}/ignore", s.ignoreIncident)
 			r.Patch("/{id}/analysis", s.updateIncidentAnalysis) // Update incident analysis (from AI sidecar)
 			// Demo/Testing endpoints - In production, guard with admin authentication
 			r.Post("/", s.createIncident)       // Manual incident creation (testing only)
@@ -433,6 +435,94 @@ func (s *Server) resolveIncident(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]string{"status": "resolved"})
 }
 
+// acknowledgeIncident marks an incident as acknowledged (user has seen it)
+func (s *Server) acknowledgeIncident(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	id := chi.URLParam(r, "id")
+
+	// Parse optional notes from body
+	var payload struct {
+		Notes string `json:"notes"`
+	}
+	// Ignore decode errors - notes are optional
+	json.NewDecoder(r.Body).Decode(&payload)
+
+	// Get incident before acknowledging to include in event
+	incident, err := s.incidentService.Get(ctx, id)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if incident == nil {
+		http.Error(w, "incident not found", http.StatusNotFound)
+		return
+	}
+
+	if err := s.incidentService.Acknowledge(ctx, id, payload.Notes); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Get updated incident after acknowledgment
+	updatedIncident, _ := s.incidentService.Get(ctx, id)
+	if updatedIncident != nil {
+		incident = updatedIncident
+	}
+
+	// Publish incident updated event
+	if s.eventBus != nil {
+		s.eventBus.Publish(Event{Type: IncidentUpdated, Data: incident})
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(incident)
+}
+
+// ignoreIncident marks an incident as ignored/dismissed (false positive or not actionable)
+func (s *Server) ignoreIncident(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	id := chi.URLParam(r, "id")
+
+	// Parse optional notes from body
+	var payload struct {
+		Notes string `json:"notes"`
+	}
+	// Ignore decode errors - notes are optional
+	json.NewDecoder(r.Body).Decode(&payload)
+
+	// Get incident before ignoring to include in event
+	incident, err := s.incidentService.Get(ctx, id)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if incident == nil {
+		http.Error(w, "incident not found", http.StatusNotFound)
+		return
+	}
+
+	if err := s.incidentService.Ignore(ctx, id, payload.Notes); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Get updated incident after ignoring
+	updatedIncident, _ := s.incidentService.Get(ctx, id)
+	if updatedIncident != nil {
+		incident = updatedIncident
+	}
+
+	// Publish incident updated event
+	if s.eventBus != nil {
+		s.eventBus.Publish(Event{Type: IncidentUpdated, Data: incident})
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(incident)
+}
+
 // updateIncidentAnalysis updates the analysis results for an incident (called by AI sidecar)
 func (s *Server) updateIncidentAnalysis(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
@@ -543,8 +633,17 @@ func (s *Server) enrichDeviceWithState(ctx context.Context, device model.Device)
 		// Determine controllable flag from controls
 		enriched["controllable"] = true
 	}
+
+	enriched["ac_power"] = s.isACPoweredDevice(device.Entities)
+
 	if device.Battery != nil {
-		enriched["battery"] = device.Battery
+		// Create battery object with ac_power field
+		batteryData := map[string]interface{}{
+			"level":       device.Battery.Level,
+			"is_low":      device.Battery.IsLow,
+			"is_charging": device.Battery.IsCharging,
+		}
+		enriched["battery"] = batteryData
 		enriched["battery_level"] = device.Battery.Level
 		enriched["battery_low"] = device.Battery.IsLow
 	}
@@ -621,6 +720,87 @@ func (s *Server) enrichDeviceWithState(ctx context.Context, device model.Device)
 	}
 
 	return enriched
+}
+
+// isACPoweredDevice detects if a Z-Wave device is AC-powered with backup battery
+// Returns true if device is AC-powered (battery is backup only, not primary power source)
+// Uses multiple heuristics:
+// 1. Wake Up interval >= 1 hour (3600s) indicates AC power
+//   - Battery-only devices typically wake every 1-15 minutes to save power
+//   - AC devices can wake less frequently (12-24 hours) since power isn't constrained
+//
+// 2. Presence of "backup" entity indicating optional backup battery
+// 3. Battery "disconnected" flag indicating optional/removable backup battery
+// 4. No Wake Up entity at all (always-listening AC devices don't need wake-up)
+func (s *Server) isACPoweredDevice(entities []model.DeviceEntity) bool {
+	const wakeUpIntervalThreshold = 3600 // 1 hour in seconds
+	const CC_WAKE_UP = 132
+	const CC_BATTERY = 128
+	hasWakeUpEntity := false
+
+	log.Printf("[DEBUG] isACPoweredDevice: entities count=%d", len(entities))
+
+	for _, entity := range entities {
+		cc, ok := entity.Metadata["command_class"].(float64)
+		if !ok {
+			continue
+		}
+
+		propName := ""
+		if name, ok := entity.Metadata["property"].(string); ok {
+			propName = name
+		} else {
+			propName = entity.Name
+		}
+
+		// Normalize to lowercase for comparison
+		propNameLower := ""
+		for _, r := range propName {
+			if r >= 'A' && r <= 'Z' {
+				propNameLower += string(r + 32)
+			} else {
+				propNameLower += string(r)
+			}
+		}
+
+		// Check for Wake Up command class (132)
+		if int(cc) == CC_WAKE_UP {
+			hasWakeUpEntity = true
+
+			// Check if wake up interval is high (AC-powered)
+			if propNameLower == "wakeupinterval" {
+				if interval, ok := entity.Value.(float64); ok {
+					if interval >= wakeUpIntervalThreshold {
+						return true
+					}
+				}
+			}
+		}
+
+		// Check for explicit backup battery indicator
+		if propNameLower == "backup" {
+			log.Printf("[DEBUG] Found backup entity: value=%v, type=%T", entity.Value, entity.Value)
+			if backup, ok := entity.Value.(bool); ok && backup {
+				log.Printf("[DEBUG] Detected AC power via backup=true")
+				return true
+			}
+		}
+
+		// Check for battery disconnected (indicating optional backup)
+		if (propNameLower == "disconnected" || propNameLower == "battery disconnected") && int(cc) == CC_BATTERY {
+			if disconnected, ok := entity.Value.(bool); ok && disconnected {
+				return true
+			}
+		}
+	}
+
+	// If device has battery but NO Wake Up entity, it's always-listening (AC-powered)
+	// Battery-powered devices ALWAYS have Wake Up to conserve power
+	if !hasWakeUpEntity {
+		return true
+	}
+
+	return false
 }
 
 // enrichEventData enriches device events with battery_level, readings, etc.

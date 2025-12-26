@@ -82,7 +82,7 @@ interface Device {
   manufacturer?: string;
   model?: string;
   capabilities?: string[];
-
+  ac_power: boolean;
   // Unified contract
   readings?: DeviceReadings;
   controls?: DeviceControls;
@@ -561,7 +561,7 @@ export function DeviceOverviewView() {
       </Card>
 
       {/* Current Readings - Always visible at the top */}
-      {((device.readings && Object.keys(device.readings).length > 0) ||device.battery?.level !== undefined || device.battery) && (
+      {(device.readings && Object.keys(device.readings).length > 0) && (
         <Card withBorder p="lg">
           <Stack gap="md">
             <Text fw={600} size="lg">Current Readings</Text>
@@ -571,7 +571,7 @@ export function DeviceOverviewView() {
                 const batteryLevel = device.battery?.level;
                 const batteryLow = device.battery?.is_low; 
 
-                if (batteryLevel === undefined) return null;
+                if (batteryLevel === undefined || device.ac_power) return null;
 
                 return (
                   <Grid.Col span={{ base: 12, sm: 6, md: 4 }}>
