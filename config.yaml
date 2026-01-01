@@ -123,13 +123,13 @@ ai:
       # 16384: ~12K words, noticeable memory increase
       # 32768+: Very long context but requires significant GPU/RAM
       n_ctx: 16384          # Context window size (increased for tool schemas + conversation history)
-      n_threads: 4         # CPU threads (reduced to avoid contention with Gunicorn)
+      n_threads: 6         # CPU threads (reduced to avoid contention with Gunicorn)
       n_gpu_layers: -1      # -1 = all layers on GPU (Vulkan acceleration)
-      n_batch: 512          # Batch size for prompt processing (higher = better GPU utilization)
+      n_batch: 1024          # Batch size for prompt processing (higher = better GPU utilization)
       
       # Chat inference settings
       temperature: 0.1      # Sampling temperature (0.0-1.0, lower = less hallucination)
-      max_tokens: 400         # Max tokens per chat response
+      max_tokens: 8000         # Max tokens per chat response
       max_system_prompt_chars: 20000  # Max chars for system prompt (conservative for stability)
       max_user_message_chars: 4000     # Max chars for user message
       max_prompt_chars: 24000 # Max total prompt chars (~6K tokens, leaves 10K buffer for n_ctx=16K)

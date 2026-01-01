@@ -28,6 +28,7 @@ import io
 import pytesseract
 import httpx
 from .html_fetcher import fetch_html
+from hsil.prompts import get_prompt, get_prompt_section
 from bs4 import BeautifulSoup
 import pypdf
 import tempfile
@@ -145,35 +146,16 @@ class LLMDocumentFinder:
                 f"{manufacturer} {model} documentation"
             ]
 
-        system = (
-            "You are an expert at device documentation search. Generate search keywords "
-            "that will help find official manuals. Include model variants, common "
-            "alternative names, and document type keywords. Respond with JSON only."
+        # Load prompts from external YAML for hot-reload capability
+        system = get_prompt_section("doc_search", "keyword_generation_system")
+
+        user = get_prompt(
+            "doc_search",
+            "keyword_generation_user",
+            manufacturer=manufacturer,
+            model=model,
+            device_type=device_type or 'unknown'
         )
-
-        user = f"""
-Generate search keywords for finding documentation for:
-
-Manufacturer: {manufacturer}
-Model: {model}
-Type: {device_type or 'unknown'}
-
-Return JSON in this format:
-{{
-  "keywords": [
-    "{manufacturer} {model} manual pdf",
-    "{manufacturer} {model} user guide",
-    "...additional search queries..."
-  ],
-  "model_variants": ["{model}", "...possible variants..."]
-}}
-
-Include:
-- Full product name variations
-- Model number with/without hyphens
-- Common abbreviations
-- Document types (manual, guide, datasheet, installation)
-"""
 
         try:
             content = await self._chat(system, user)
@@ -236,30 +218,16 @@ Title: {result.title}
 Snippet: {result.snippet[:150]}
 """)
 
-        system = (
-            "You are an expert at identifying official manufacturer documentation. "
-            "Rank search results by likelihood of being the official manual. "
-            "Prefer PDFs, official manufacturer domains, and exact model matches. "
-            "Respond with JSON only."
+        # Load prompts from external YAML for hot-reload capability
+        system = get_prompt_section("doc_search", "result_ranking_system")
+
+        user = get_prompt(
+            "doc_search",
+            "result_ranking_user",
+            manufacturer=manufacturer,
+            model=model,
+            result_summaries=''.join(result_summaries)
         )
-
-        user = f"""
-Rank these search results for finding the official manual for:
-
-Manufacturer: {manufacturer}
-Model: {model}
-
-Search Results:
-{''.join(result_summaries)}
-
-Return JSON in this format:
-{{
-  "ranked_indices": [1, 3, 2, ...],
-  "confidence": "high|medium|low"
-}}
-
-The ranked_indices should be result numbers (1-based) in order of best to worst.
-"""
 
         try:
             content = await self._chat(system, user, model="gpt-4o-mini")

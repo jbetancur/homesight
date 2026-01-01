@@ -2,7 +2,8 @@ import { useDroppable } from '@dnd-kit/core';
 import { Card, Text, Badge, Group, Stack, ActionIcon } from '@mantine/core';
 import { Settings } from 'lucide-react';
 import { DraggableSensor } from './DraggableSensor';
-import { RoomStats, calculateRoomTemperature, getTemperatureHeatmapColor } from '../shared';
+import { calculateRoomTemperature, getTemperatureHeatmapColor } from '../shared';
+import { useAlerts } from '../../context/AlertsContext';
 import type { Device, Room } from './types';
 
 interface DroppableRoomCardProps {
@@ -27,8 +28,22 @@ export function DroppableRoomCard({
     data: { room },
   });
 
-  const hasCritical = room.devices.some((d) => d.state === 'critical' || d.active);
-  const hasWarning = room.devices.some((d) => d.state === 'warning');
+  const { hasDeviceAlert, activeIncidents } = useAlerts();
+
+  // Check for alerts based on incident context (not device.active which may be stale)
+  const hasCritical = room.devices.some((d) => {
+    const hasAlert = hasDeviceAlert(d.id);
+    if (!hasAlert) return false;
+    // Check if any active incident for this device is critical/high
+    const deviceIncidents = activeIncidents.filter(i => i.device_id === d.id);
+    return deviceIncidents.some(i => i.severity === 'critical' || i.severity === 'high');
+  });
+  const hasWarning = room.devices.some((d) => {
+    const hasAlert = hasDeviceAlert(d.id);
+    if (!hasAlert) return false;
+    const deviceIncidents = activeIncidents.filter(i => i.device_id === d.id);
+    return deviceIncidents.some(i => i.severity === 'medium' || i.severity === 'low');
+  });
 
   // Heatmap coloring
   const roomTemp = calculateRoomTemperature(room.devices);
@@ -71,7 +86,6 @@ export function DroppableRoomCard({
         <Group justify="space-between" align="flex-start">
           <div>
             <Text fw={600}>{room.name}</Text>
-            {room.devices.length > 0 && <RoomStats devices={room.devices} compact />}
           </div>
           <Group gap="xs">
             {heatmapMode && roomTemp && (

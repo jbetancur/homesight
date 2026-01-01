@@ -138,7 +138,6 @@ class TemporalContext(BaseModel):
 class WeatherContext(BaseModel):
     """External weather conditions"""
     temperature: float
-    feels_like: float
     humidity: int
     pressure: int = 1013
     wind_speed: float = 0.0

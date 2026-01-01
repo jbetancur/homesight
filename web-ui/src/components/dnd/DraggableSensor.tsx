@@ -19,6 +19,7 @@ import {
 import { useState, useEffect } from 'react';
 import { TimeAgo } from '../shared';
 import { API_BASE_WITH_PATHS as API_BASE } from '../../apiConfig';
+import { useAlerts } from '../../context/AlertsContext';
 import type { Device, DeviceReadings } from './types';
 
 interface DraggableSensorProps {
@@ -55,7 +56,7 @@ function getDeviceIcon(device: Device) {
   }
 
   // Check for humidity sensors
-  if ('Humidity' in readings || 'humidity' in readings) {
+  if ('humidity' in readings) {
     return { icon: Droplet, color: 'cyan' };
   }
 
@@ -88,8 +89,8 @@ function getDisplayReadings(readings: DeviceReadings | undefined): Array<{ label
     });
   }
 
-  // Humidity - prefer "Humidity" over raw "humidity"
-  const humidity = readings.humidity
+  // Humidity
+  const humidity = readings.humidity;
   if (humidity !== undefined && humidity !== 0 && typeof humidity === 'number') {
     display.push({
       label: 'Humidity',
@@ -101,18 +102,15 @@ function getDisplayReadings(readings: DeviceReadings | undefined): Array<{ label
   // Water leak status
   const water = readings.water;
   if (water !== undefined) {
-    const value = !water ? 'Dry' : 'LEAK!';
-    // Handle boolean or number values (objects are ignored)
     display.push({
       label: 'Water',
-      value,
+      value: !water ? 'Dry' : 'LEAK!',
       icon: Droplet,
     });
   }
 
   return display;
 }
-
 
 interface ReadingTrend {
   current: number;
@@ -158,10 +156,14 @@ export function DraggableSensor({
           if (tempResponse.ok) {
             const readings = await tempResponse.json();
             if (Array.isArray(readings) && readings.length > 0) {
-              const temps = readings.map((r: { value: number }) => r.value).filter((v: number) => v > 0);
+              // API returns newest first, reverse for sparkline (oldest to newest, left to right)
+              const temps = readings
+                .map((r: { value: number }) => r.value)
+                .filter((v: number) => v > 0)
+                .reverse();
               setTempSparklineData(temps);
 
-              // Calculate trend from last two readings
+              // Calculate trend: current (newest) vs previous
               if (temps.length >= 2) {
                 const current = temps[temps.length - 1];
                 const previous = temps[temps.length - 2];
@@ -170,7 +172,7 @@ export function DraggableSensor({
                   current,
                   previous,
                   delta,
-                  direction: Math.abs(delta) < 0.1 ? 'stable' : delta > 0 ? 'up' : 'down',
+                  direction: Math.abs(delta) < 0.5 ? 'stable' : delta > 0 ? 'up' : 'down',
                 });
               }
             }
@@ -185,9 +187,14 @@ export function DraggableSensor({
           if (humidityResponse.ok) {
             const readings = await humidityResponse.json();
             if (Array.isArray(readings) && readings.length > 0) {
-              const humidities = readings.map((r: { value: number }) => r.value).filter((v: number) => v > 0);
+              // API returns newest first, reverse for sparkline (oldest to newest, left to right)
+              const humidities = readings
+                .map((r: { value: number }) => r.value)
+                .filter((v: number) => v > 0)
+                .reverse();
               setHumiditySparklineData(humidities);
 
+              // Calculate trend: current (newest) vs previous
               if (humidities.length >= 2) {
                 const current = humidities[humidities.length - 1];
                 const previous = humidities[humidities.length - 2];
@@ -210,32 +217,39 @@ export function DraggableSensor({
     fetchHistory();
   }, [device.id, device.readings?.temperature_f, device.readings?.humidity]);
 
+  // Use alerts context for alert state instead of device.active which may be stale
+  const { hasDeviceAlert, activeIncidents } = useAlerts();
+  const hasAlert = hasDeviceAlert(device.id);
+  const deviceIncidents = activeIncidents.filter(i => i.device_id === device.id);
+  const hasCriticalAlert = hasAlert && deviceIncidents.some(i => i.severity === 'critical' || i.severity === 'high');
+  const hasWarningAlert = hasAlert && deviceIncidents.some(i => i.severity === 'medium' || i.severity === 'low');
+
   const style = {
     transform: CSS.Translate.toString(transform),
     opacity: isDragging ? 0.5 : 1,
     cursor: editMode ? 'grab' : 'pointer',
     transition: isDragging ? undefined : 'all 0.3s ease-in-out',
-    borderWidth: device.active || device.state === 'critical' ? '2px' : '1px',
+    borderWidth: hasCriticalAlert ? '2px' : '1px',
     borderColor:
-      device.active || device.state === 'critical'
+      hasCriticalAlert
         ? 'var(--mantine-color-red-6)'
-        : device.state === 'warning'
+        : hasWarningAlert
           ? 'var(--mantine-color-yellow-6)'
           : isRecentlyUpdated
             ? 'var(--mantine-color-blue-5)'
             : undefined,
     backgroundColor:
-      device.active || device.state === 'critical'
+      hasCriticalAlert
         ? 'var(--mantine-color-red-0)'
-        : device.state === 'warning'
+        : hasWarningAlert
           ? 'var(--mantine-color-yellow-0)'
           : isRecentlyUpdated
             ? 'var(--mantine-color-blue-0)'
             : undefined,
     boxShadow:
-      device.active || device.state === 'critical'
+      hasCriticalAlert
         ? '0 0 20px rgba(250, 82, 82, 0.5)'
-        : device.state === 'warning'
+        : hasWarningAlert
           ? '0 0 15px rgba(250, 176, 5, 0.3)'
           : undefined,
   };
@@ -266,7 +280,7 @@ export function DraggableSensor({
             <ThemeIcon
               size="sm"
               variant="light"
-              color={device.state === 'critical' || device.active ? 'red' : iconColor}
+              color={hasCriticalAlert ? 'red' : hasWarningAlert ? 'yellow' : iconColor}
             >
               <DeviceIcon size={14} />
             </ThemeIcon>
@@ -274,6 +288,9 @@ export function DraggableSensor({
               <Text size="sm" fw={500}>
                 {device.display_name || device.name}
               </Text>
+              <Text size="sm" fw={400}>
+                {device.id}
+              </Text>              
               <TimeAgo timestamp={device.last_updated} />
             </div>
           </Group>
@@ -308,8 +325,8 @@ export function DraggableSensor({
                 </Text>
               </Group>
             )}
-            {device.active && (
-              <ThemeIcon size="xs" color="red" variant="filled">
+            {hasAlert && (
+              <ThemeIcon size="xs" color={hasCriticalAlert ? 'red' : 'yellow'} variant="filled">
                 <AlertTriangle size={10} />
               </ThemeIcon>
             )}

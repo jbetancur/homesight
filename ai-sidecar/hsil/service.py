@@ -44,6 +44,7 @@ from .climate_insights import (
     generate_rule_based_insights,
     generate_llm_insights,
     validate_insights,
+    analyze_trend_patterns,
 )
 
 logger = logging.getLogger(__name__)
@@ -459,6 +460,7 @@ class HSILService:
         1. compute_climate_context() - all numeric facts computed deterministically
         2. generate_llm_insights() or generate_rule_based_insights() - insight generation
         3. validate_insights() - post-validation against ground truth
+        4. analyze_trend_patterns() - ML + LLM trend pattern detection
         """
         try:
             # Step 1: Compute all climate facts (pure data, no LLM)
@@ -482,9 +484,26 @@ class HSILService:
                 insights = generate_rule_based_insights(context)
                 source = "rule_based"
 
+            # Step 4: Analyze trend patterns (ML + optional LLM)
+            # Build zones dict from context
+            zones_data = {z.zone_id: {"name": z.zone_name, "type": z.zone_type, "attributes": z.attributes} for z in context.zones}
+
+            trend_patterns = []
+            try:
+                trend_patterns = await analyze_trend_patterns(
+                    backend_url=self.backend_url,
+                    learning_engine=self.learning,
+                    llm_provider=self.llm_provider,
+                    zones_data=zones_data,
+                )
+                logger.info(f"Detected {len(trend_patterns)} trend patterns")
+            except Exception as e:
+                logger.warning(f"Trend pattern analysis failed: {e}")
+
             # Convert to dict format
             result = {
                 "insights": [i.model_dump() for i in insights],
+                "trend_patterns": [tp.model_dump() for tp in trend_patterns],
                 "timestamp": datetime.now().isoformat(),
                 "source": source
             }
@@ -501,6 +520,7 @@ class HSILService:
                     "title": "Insights Unavailable",
                     "description": "Unable to generate climate insights at this time."
                 }],
+                "trend_patterns": [],
                 "timestamp": datetime.now().isoformat(),
                 "source": "error"
             }

@@ -14,6 +14,7 @@
 services:
   web-ui:
     # Override production image with Node.js for dev server
+    image: homesight-web-ui-dev
     build:
       context: .
       dockerfile: docker/web-ui/Dockerfile.dev
@@ -31,6 +32,8 @@ services:
 
   ai-sidecar:
     # Mount source code for hot-reloading (Python changes apply automatically)
+    # Prompts in ai-sidecar/prompts/*.yaml can be edited without rebuild
+    # Changes are picked up on next request (or call reload_prompts())
     volumes:
       - ./ai-sidecar:/app:rw
       - ./config.yaml:/etc/homesight/config.yaml:ro

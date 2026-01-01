@@ -14,6 +14,7 @@ import HSILRoomView from './views/HSILRoomView';
 import SettingsView from './views/SettingsView';
 import FloatingAIAssistant from './components/FloatingAIAssistant';
 import FloatingAIButton from './components/FloatingAIButton';
+import { HeaderAlertIndicator } from './components/HeaderAlertIndicator';
 import './App.css';
 
 const navItems = [
@@ -105,7 +106,7 @@ function AppContent() {
             size="sm"
           />
           <Text size="md" fw={700}>HomeSight Admin Dashboard</Text>
-          <div style={{ width: 40 }} />
+          <HeaderAlertIndicator />
         </Group>
       </AppShell.Header>
       <AppShell.Main style={{ width: '100%', overflowX: 'auto' }}>

@@ -18,6 +18,7 @@ from rag.engine import RAGEngine
 from config import get_config
 from services.ingestion_tracker import IngestionTracker
 from metrics.metrics import kb_ingestions, kb_average_confidence, kb_sources
+from hsil.prompts import get_prompt, get_prompt_section
 
 logger = logging.getLogger(__name__)
 
@@ -331,141 +332,22 @@ class DocumentService:
             # Build source references section instruction
             # NOTE: Source URLs are now appended directly to generated content, not via prompt
 
-            prompt = f"""You are a technical documentation expert. You will generate a COMPREHENSIVE, DETAILED knowledge base entry for a device using ONLY verifiable information from the provided input text and publicly known manufacturer data.
-
-⚠️ STRICT RULES (NEVER BREAK THESE):
-- NEVER invent or guess specifications, dimensions, button sequences, pairing steps, or any technical detail.
-- If data is not explicitly known or publicly documented, write:
-  "Specification not available from manufacturer documentation."
-- DO NOT infer facts from similar models.
-- DO NOT hallucinate part numbers, frequencies, or metrics.
-- ONLY use information that is explicitly in the provided documentation or widely confirmed by the manufacturer.
-- NEVER use first-person phrases like "I couldn't find", "I was unable to", or "I don't have access to"
-- Output must be written in third-person, factual documentation style
-
-You may only use:
-✔ The manufacturer-provided document
-✔ The device name/model
-✔ Widely confirmed public information
-✔ Industry-standard general behaviors (ONLY if noted as "typical, but not confirmed")
-
----
-
-INPUT
-Manufacturer: {manufacturer}
-Model: {model}
-Type: {device_type}
-Source Documentation:
-{{documentation_text}}
-
----
-
-OUTPUT STRUCTURE
-Generate a Markdown document with the following sections.
-
-## Overview
-- Device description and primary purpose
-- Key features (list ALL from documentation)
-- Typical use cases
-- Placement recommendations (indoor/outdoor, IP rating if applicable)
-
-## Installation
-- Step-by-step physical installation
-- Battery installation (EXACT battery type, how to access battery compartment)
-- Initial LED indicator behavior
-- QR code/SmartStart information if applicable
-
-## Configuration
-- Pairing/inclusion procedure (EXACT button sequences and timing, step by step)
-- Exclusion procedure (EXACT steps)
-- Factory reset procedure (EXACT button sequence and timing)
-- Wake-up mode (default interval, how to manually wake, how to adjust)
-- Association groups (list ALL groups with group numbers, purposes, max devices)
-- **Advanced Parameters Table** - Create a COMPLETE table with ALL parameters:
-  | Parameter | Description | Values | Default | Size |
-  Include EVERY parameter from the documentation, not just important ones
-- Command class details and supported features
-- LED indicator patterns and meanings (all colors, blink patterns)
-
-## Troubleshooting
-- Device not pairing/responding (specific solutions)
-- LED indicator not working
-- False alerts or missed detections
-- Connectivity/range issues
-- Battery issues
-- Include EXACT troubleshooting steps from documentation
-
-## Specifications
-- Model number (exact, including all variants like 800LR)
-- Power source (EXACT battery type: e.g., CR2450, not just "coin cell")
-- Expected battery life
-- Operating temperature range
-- Storage temperature range
-- Wireless range (normal and Long Range if applicable)
-- Physical dimensions (L x W x H)
-- Weight
-- IP rating (if applicable)
-- Supported command classes (list ALL with versions, e.g., ASSOCIATION_V3)
-- Z-Wave frequency
-- Certification information
-- Compatibility information
-- Warranty details
-
-For any unavailable spec, write:
-"Specification not available from manufacturer documentation."
-
----
-
-STYLE REQUIREMENTS
-- Extract ALL specific values, procedures, and technical details from the documentation
-- Use precise, technical language
-- NEVER assume or guess missing information
-- If unsure, explicitly mark the data as unavailable
-- Use bullet points and numbered lists for procedures
-- Keep formatting structured and consistent for ingestion into a knowledge base
-- For tables, use PROPER markdown table format with each row on its own line:
-  ```
-  | Column 1 | Column 2 |
-  |----------|----------|
-  | Value 1  | Value 2  |
-  ```
-- NEVER put multiple table rows on the same line"""
+            # Load prompt from external YAML for hot-reload capability
+            prompt = get_prompt(
+                "kb_generation",
+                "user_prompt",
+                manufacturer=manufacturer,
+                model=model,
+                device_type=device_type,
+                documentation_text="{documentation_text}"  # Placeholder for later substitution
+            )
 
             # Build messages; include documentation_text if present and instruct model to use it
+            # Load system prompt from external YAML for hot-reload capability
             messages = [
                 {
                     "role": "system",
-                    "content": """You are an expert technical writer generating EXHAUSTIVE device documentation.
-Follow these rules STRICTLY:
-
-1. USE ONLY information explicitly provided in the user prompt or the provided documentation text.
-2. NEVER guess, infer, or create any technical details. If a detail is not present, state: "Specification not available from manufacturer documentation."
-3. NEVER invent part numbers, pairing steps, reset sequences, LED patterns, or measurements.
-4. NEVER use first-person phrases. Do NOT write: "I couldn't find", "I was unable to", "I don't have access to"
-5. ALWAYS write in third-person factual style: "Specification not available", "Documentation not provided", etc.
-6. If no documentation is provided, generate a minimal template with all sections marked as unavailable.
-7. Output must be structured Markdown suitable for knowledge base ingestion.
-8. EXTRACT EVERYTHING - do not summarize. Include ALL details, ALL parameters, ALL steps.
-9. Generate LONG, COMPREHENSIVE documentation. Aim for 3000-5000 words when source documentation is provided.
-10. Include COMPLETE parameter tables with every parameter number, description, values, and defaults.
-11. CRITICAL: For markdown tables, put EACH ROW on its own line. Never combine rows.
-
-TABLE FORMAT EXAMPLE (follow exactly):
-| Parameter | Description | Default |
-|-----------|-------------|---------|
-| 1         | LED on/off  | 1       |
-| 2         | Report time | 0       |
-
-UNACCEPTABLE OUTPUT EXAMPLES (NEVER USE):
-❌ "I couldn't find specific information about..."
-❌ "I was unable to locate documentation for..."
-❌ "I don't have access to the official manual..."
-
-ACCEPTABLE OUTPUT EXAMPLES:
-✅ "Specification not available from manufacturer documentation."
-✅ "Procedure not documented by manufacturer."
-✅ "Official documentation not provided."
-"""
+                    "content": get_prompt_section("kb_generation", "system_prompt")
                 }
             ]
 

@@ -258,7 +258,6 @@ class SensorFusionEngine:
 
             return WeatherContext(
                 temperature=env.weather.temperature,
-                feels_like=env.weather.feels_like,
                 humidity=env.weather.humidity,
                 pressure=env.weather.pressure,
                 wind_speed=env.weather.wind_speed,

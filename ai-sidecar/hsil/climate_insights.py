@@ -9,11 +9,14 @@ Architecture:
 3. generate_llm_insights() - LLM with strict guardrails
 """
 
+import json
 import logging
 from typing import Optional, Dict, Any, List
-from datetime import datetime
+from datetime import datetime, timedelta
 from pydantic import BaseModel, Field
 import httpx
+
+from .prompts import get_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -89,7 +92,6 @@ class GlobalClimateStats(BaseModel):
 class WeatherSummary(BaseModel):
     """Outdoor weather summary"""
     temperature: Optional[float] = None
-    feels_like: Optional[float] = None
     humidity: Optional[int] = None
     description: Optional[str] = None
     wind_speed: Optional[float] = None
@@ -195,7 +197,6 @@ async def compute_climate_context(
         if weather_ctx and weather_ctx.weather:
             context.weather = WeatherSummary(
                 temperature=weather_ctx.weather.temperature,
-                feels_like=weather_ctx.weather.feels_like,
                 humidity=weather_ctx.weather.humidity,
                 description=weather_ctx.weather.description,
                 wind_speed=weather_ctx.weather.wind_speed,
@@ -701,6 +702,7 @@ def build_llm_prompt(context: ClimateContext) -> str:
     Build the LLM prompt with all pre-computed facts embedded.
 
     The LLM cannot invent numbers - it can only reference values from this prompt.
+    Prompt template loaded from external YAML for hot-reload capability.
     """
     gs = context.global_stats
 
@@ -762,8 +764,7 @@ def build_llm_prompt(context: ClimateContext) -> str:
     if context.weather:
         outdoor_temp = context.weather.temperature
         sections.append("\n## OUTDOOR WEATHER (USE FOR SEASONAL CONTEXT)")
-        sections.append(f"- Temperature: {outdoor_temp:.0f}°F "
-                       f"(feels like {context.weather.feels_like:.0f}°F)")
+        sections.append(f"- Temperature: {outdoor_temp:.0f}°F")
         sections.append(f"- Humidity: {context.weather.humidity}%")
         sections.append(f"- Conditions: {context.weather.description}")
         # Add explicit seasonal guidance
@@ -776,63 +777,17 @@ def build_llm_prompt(context: ClimateContext) -> str:
 
     context_text = "\n".join(sections)
 
-    prompt = f"""You are a home climate analyst. Generate 3-5 actionable insights based ONLY on the facts provided below.
-
-{context_text}
-
-## STRICT RULES
-
-1. **ONLY USE PROVIDED DATA**: Never invent numbers. Only use exact values from the data above.
-
-2. **HUMIDITY THRESHOLDS** (FIXED - do not override):
-   - <30% = TOO DRY (needs humidifier)
-   - 30-50% = IDEAL (no action needed)
-   - >50% = TOO HUMID (needs dehumidifier)
-   - Pre-computed status: {gs.rooms_too_dry} too dry, {gs.rooms_ideal_humidity} ideal, {gs.rooms_too_humid} too humid
-   - If a room is listed as "too dry", it IS too dry - never say otherwise
-
-3. **TEMPERATURE VARIATION**: Current level is "{gs.temp_variation_level or 'unknown'}" ({gs.temp_range:.1f}°F range)
-
-4. **NEVER CONTRADICT ZONE ATTRIBUTES** (CRITICAL):
-   - If a zone has insulation listed (e.g., "closed cell spray foam"), NEVER suggest "add insulation"
-   - If a zone has HVAC vent, NEVER suggest "add heating/cooling"
-   - Your recommendations MUST be consistent with the listed attributes
-   - Example: If Study has "closed cell spray foam insulation" and is cold, the issue is NOT insulation - suggest checking windows, drafts, or heat source instead
-
-5. **USE ZONE ATTRIBUTES FOR EXPLANATIONS**:
-   - If a zone is HOT and has "has_windows=True", mention windows may allow heat gain
-   - If a zone is COLD and has "has_hvac_vent=False", mention lack of heating
-   - If a zone has "Insulation=none", mention this affects temperature
-   - If a zone has "has_cooling_system=central_ac" but is hot, suggest checking AC
-   - ONLY mention attributes that are actually listed - never assume
-
-6. **SPECIFIC ROOM NAMES**: Use actual room names from the data (e.g., "Basement", "Study", "Dining Room")
-
-7. **SEASONAL CONTEXT** (CRITICAL - FOLLOW EXACTLY):
-   - Outdoor temp below 50°F = WINTER MODE:
-     * ONLY discuss heating systems (boiler, radiators, furnace, baseboard heat)
-     * NEVER mention AC or cooling - it's irrelevant in winter
-     * Warm room in winter = boiler/heating working well (POSITIVE)
-     * Cold room in winter = heating issue or drafts (investigate)
-   - Outdoor temp above 75°F = SUMMER MODE:
-     * ONLY discuss cooling systems (AC, fans)
-     * NEVER mention heating - it's irrelevant in summer
-   - If a zone has "has_heating_system: boiler" and it's warm in winter, say "boiler is heating effectively"
-   - DO NOT mention AC/cooling systems when outdoor temp is below 50°F
-
-8. **ACTIONABLE RECOMMENDATIONS**: Based on zone attributes AND season:
-   - Winter + room warm + has boiler/radiators = "heating system working effectively" (positive!)
-   - Winter + room cold + has windows → "check window seals for drafts"
-   - Winter + room cold + no heating → "consider portable heater"
-   - Summer + room hot + has windows → "check if blinds are closed"
-   - Summer + room hot + has AC → "check if AC is working properly"
-
-## OUTPUT FORMAT
-
-Return ONLY a JSON array (no markdown):
-[
-  {{"type": "info|warning|success", "title": "Brief title", "description": "Specific insight with room names, values, and fact-based recommendations"}}
-]"""
+    # Load prompt template from external YAML and format with context
+    prompt = get_prompt(
+        "climate_insights",
+        "analysis_prompt",
+        context=context_text,
+        rooms_too_dry=gs.rooms_too_dry,
+        rooms_ideal_humidity=gs.rooms_ideal_humidity,
+        rooms_too_humid=gs.rooms_too_humid,
+        temp_variation_level=gs.temp_variation_level or 'unknown',
+        temp_range=f"{gs.temp_range:.1f}" if gs.temp_range else "0"
+    )
 
     return prompt
 
@@ -861,7 +816,6 @@ async def generate_llm_insights(
         )
 
         # Parse JSON response
-        import json
         response_text = response_text.strip()
 
         # Remove markdown code block if present
@@ -945,3 +899,255 @@ def validate_insights(insights: List[ClimateInsight], context: ClimateContext) -
             validated.append(insight)
 
     return validated if validated else generate_rule_based_insights(context)
+
+
+# =============================================================================
+# TREND PATTERN ANALYSIS
+# =============================================================================
+
+class TrendPatternInsight(BaseModel):
+    """A trend pattern insight for a specific device"""
+    device_id: str
+    device_name: str
+    zone_name: Optional[str] = None
+    metric: str  # "temperature" or "humidity"
+    pattern_type: str  # "morning_low_evening_high", "diurnal_cycle", etc.
+    daily_swing: float
+    min_value: float
+    max_value: float
+    typical_low_time: Optional[str] = None
+    typical_high_time: Optional[str] = None
+    insight: str  # LLM-generated or rule-based explanation
+    is_normal: bool = True
+    likely_cause: Optional[str] = None
+    recommendation: Optional[str] = None
+
+
+async def analyze_trend_patterns(
+    backend_url: str,
+    learning_engine: Any,
+    llm_provider: Any,
+    zones_data: Dict[str, Any],
+) -> List[TrendPatternInsight]:
+    """
+    Analyze temperature/humidity trend patterns for all climate devices.
+
+    Steps:
+    1. Fetch recent readings (48 hours) for each climate device
+    2. Use ML engine to detect patterns (cyclical, erratic, etc.)
+    3. Use LLM to generate human-readable insights
+
+    Args:
+        backend_url: Backend API URL
+        learning_engine: HSILRiverLearningEngine instance
+        llm_provider: LLM provider for generating insights
+        zones_data: Dict of zone_id -> zone info
+
+    Returns:
+        List of TrendPatternInsight for devices with detected patterns
+    """
+    insights: List[TrendPatternInsight] = []
+
+    # Fetch devices with climate readings
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        try:
+            resp = await client.get(f"{backend_url}/api/devices")
+            resp.raise_for_status()
+            data = resp.json()
+            devices = data.get("devices", []) if isinstance(data, dict) else data
+        except Exception as e:
+            logger.error(f"Failed to fetch devices for trend analysis: {e}")
+            return insights
+
+        # Filter to climate devices (those with temperature or humidity)
+        climate_devices = []
+        for device in devices:
+            readings = device.get("readings", {})
+            if readings.get("temperature") or readings.get("temperature_f") or readings.get("humidity"):
+                climate_devices.append(device)
+
+        logger.debug(f"Analyzing trends for {len(climate_devices)} climate devices")
+
+        # Track which device+metric combinations we've already analyzed
+        analyzed_combinations: set[str] = set()
+
+        # Analyze each device
+        for device in climate_devices[:5]:  # Limit to 5 devices to avoid slow response
+            device_id = device.get("id", "")
+            device_name = device.get("display_name") or device.get("name", device_id)
+            zone_id = device.get("zone_id", "")
+            zone_info = zones_data.get(zone_id, {})
+            zone_name = zone_info.get("name", zone_id) if zone_id else None
+
+            readings_data = device.get("readings", {})
+
+            # Check which metrics this device has
+            for metric in ["temperature", "humidity"]:
+                if metric not in readings_data and f"{metric}_f" not in readings_data:
+                    continue
+
+                # Skip if we've already analyzed this device+metric
+                combo_key = f"{device_id}:{metric}"
+                if combo_key in analyzed_combinations:
+                    continue
+                analyzed_combinations.add(combo_key)
+
+                # Fetch historical readings (last 48 hours)
+                try:
+                    since = (datetime.now() - timedelta(hours=48)).isoformat() + "Z"
+                    resp = await client.get(
+                        f"{backend_url}/api/sensors/{device_id}/readings",
+                        params={"type": metric, "since": since, "limit": 200}
+                    )
+                    if resp.status_code != 200:
+                        continue
+
+                    readings = resp.json()
+                    if not readings or len(readings) < 6:
+                        continue
+
+                    # Analyze pattern using ML engine
+                    pattern = await learning_engine.analyze_device_trend_pattern(
+                        device_id=device_id,
+                        metric=metric,
+                        readings=readings
+                    )
+
+                    if not pattern or not pattern.get("pattern_detected"):
+                        continue
+
+                    # Generate insight - use rule-based for speed (skip LLM per-pattern)
+                    # LLM calls per-pattern are too slow (~10s each)
+                    # Use zone_name for display if available
+                    display_name = zone_name if zone_name else device_name
+                    llm_insight = {
+                        "insight": _generate_rule_based_trend_insight(pattern, display_name),
+                        "is_normal": pattern.get("pattern_type") == "morning_low_evening_high",
+                        "likely_cause": "HVAC setback schedule" if pattern.get("pattern_type") == "morning_low_evening_high" else None,
+                        "recommendation": None if pattern.get("daily_swing", 0) < 8 else "Consider checking HVAC or insulation",
+                    }
+
+                    insight = TrendPatternInsight(
+                        device_id=device_id,
+                        device_name=device_name,
+                        zone_name=zone_name,
+                        metric=metric,
+                        pattern_type=pattern.get("pattern_type", "unknown"),
+                        daily_swing=pattern.get("daily_swing", 0),
+                        min_value=pattern.get("min_value", 0),
+                        max_value=pattern.get("max_value", 0),
+                        typical_low_time=pattern.get("typical_low_time"),
+                        typical_high_time=pattern.get("typical_high_time"),
+                        insight=llm_insight.get("insight", _generate_rule_based_trend_insight(pattern, device_name)),
+                        is_normal=llm_insight.get("is_normal", True),
+                        likely_cause=llm_insight.get("likely_cause"),
+                        recommendation=llm_insight.get("recommendation"),
+                    )
+                    insights.append(insight)
+
+                except Exception as e:
+                    logger.warning(f"Failed to analyze trends for {device_id}/{metric}: {e}")
+                    continue
+
+    return insights
+
+
+async def _generate_trend_llm_insight(
+    pattern: Dict[str, Any],
+    device_name: str,
+    zone_name: Optional[str],
+    zone_info: Dict[str, Any],
+    llm_provider: Any,
+) -> Dict[str, Any]:
+    """
+    Generate LLM insight for a detected trend pattern.
+
+    Falls back to rule-based if LLM unavailable.
+    """
+    if not llm_provider or not llm_provider.is_available():
+        return {
+            "insight": _generate_rule_based_trend_insight(pattern, device_name),
+            "is_normal": True,
+            "likely_cause": "HVAC scheduling" if pattern.get("pattern_type") == "morning_low_evening_high" else None,
+            "recommendation": None,
+        }
+
+    # Build context for LLM
+    pattern_data = f"""
+Device: {device_name} ({zone_name or 'Unknown Zone'})
+Metric: {pattern.get('metric', 'temperature')}
+Pattern Type: {pattern.get('pattern_type', 'unknown')}
+Daily Swing: {pattern.get('daily_swing', 0)}°F
+Min Value: {pattern.get('min_value', 0)}°F at {pattern.get('typical_low_time', 'unknown')}
+Max Value: {pattern.get('max_value', 0)}°F at {pattern.get('typical_high_time', 'unknown')}
+Current Deviation from Expected: {pattern.get('deviation_from_expected', 'N/A')}°F
+Pattern Regularity: {pattern.get('pattern_regularity', 0):.0%}
+"""
+
+    # Zone context
+    zone_context = "No zone attributes available."
+    if zone_info:
+        attrs = zone_info.get("attributes", {})
+        if attrs:
+            attr_list = []
+            for k, v in attrs.items():
+                if v is True:
+                    attr_list.append(f"- Has {k.replace('_', ' ')}")
+                elif v and v not in (False, "none", ""):
+                    attr_list.append(f"- {k.replace('_', ' ')}: {v}")
+            if attr_list:
+                zone_context = f"Zone: {zone_name}\n" + "\n".join(attr_list[:5])
+
+    try:
+        prompt = get_prompt(
+            "climate_insights",
+            "trend_pattern_prompt",
+            pattern_data=pattern_data,
+            zone_context=zone_context,
+        )
+
+        response_text, _ = llm_provider.chat(
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.3,
+            max_tokens=300,
+        )
+
+        # Parse JSON response
+        response_text = response_text.strip()
+        if response_text.startswith("```"):
+            lines = response_text.split("\n")
+            response_text = "\n".join(lines[1:-1]) if len(lines) > 2 else response_text
+
+        result = json.loads(response_text)
+        return result
+
+    except Exception as e:
+        logger.warning(f"LLM trend insight failed: {e}")
+        return {
+            "insight": _generate_rule_based_trend_insight(pattern, device_name),
+            "is_normal": True,
+            "likely_cause": None,
+            "recommendation": None,
+        }
+
+
+def _generate_rule_based_trend_insight(pattern: Dict[str, Any], device_name: str) -> str:
+    """Generate a simple rule-based insight when LLM is unavailable."""
+    pattern_type = pattern.get("pattern_type", "unknown")
+    swing = pattern.get("daily_swing", 0)
+    low_time = pattern.get("typical_low_time", "morning")
+    high_time = pattern.get("typical_high_time", "evening")
+    metric = pattern.get("metric", "temperature")
+
+    # Use appropriate unit
+    unit = "%" if metric == "humidity" else "°F"
+    metric_label = "humidity" if metric == "humidity" else "temperature"
+
+    if pattern_type == "morning_low_evening_high":
+        if metric == "humidity":
+            return f"{device_name} shows a regular daily humidity cycle: {swing:.0f}% swing from lows around {low_time} to highs around {high_time}."
+        return f"{device_name} shows a regular daily cycle: {swing:.1f}°F swing from lows around {low_time} to highs around {high_time}. This is typical HVAC setback behavior."
+    elif pattern_type == "morning_high_evening_low":
+        return f"{device_name} shows an unusual pattern: highs in the morning, lows in the evening ({swing:.1f}{unit} swing). Consider checking HVAC schedule."
+    else:
+        return f"{device_name} shows a {swing:.1f}{unit} daily {metric_label} swing between {pattern.get('min_value', 0):.1f}{unit} and {pattern.get('max_value', 0):.1f}{unit}."

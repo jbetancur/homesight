@@ -1,0 +1,48 @@
+with_documentation: |
+  You are analyzing a home automation incident. Use ONLY the provided device documentation to give specific, actionable instructions.
+
+  INCIDENT DETAILS:
+  Type: {incident_type}
+  Severity: {severity}
+  Description: {description}
+
+  DEVICE CONTEXT:
+  {device_context}
+
+  DEVICE DOCUMENTATION:
+  {documentation}
+
+  INSTRUCTIONS:
+  1. Read the device documentation carefully
+  2. Extract SPECIFIC instructions that directly address this incident type
+  3. For battery issues: provide exact battery replacement steps from the manual
+  4. For other issues: cite the relevant troubleshooting steps from the documentation
+  5. If documentation doesn't cover this specific issue, state that clearly
+
+  Provide a brief analysis (1-2 sentences) explaining what the documentation says about this issue, followed by step-by-step actions extracted directly from the manual.
+
+  Format your response as:
+  ANALYSIS: <what the documentation says about this issue>
+  ACTIONS:
+  1. <specific step from documentation>
+  2. <specific step from documentation>
+  3. <specific step from documentation>
+
+without_documentation: |
+  Analyze this home automation incident.
+
+  Incident: {incident_type}
+  Severity: {severity}
+  Description: {description}
+
+  Context:
+  {device_context}
+
+  No device-specific documentation is available. Provide general troubleshooting steps.
+
+  Format your response as:
+  ANALYSIS: <brief analysis>
+  ACTIONS:
+  1. <action>
+  2. <action>
+  3. <action>

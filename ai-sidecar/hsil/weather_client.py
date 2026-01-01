@@ -14,7 +14,6 @@ logger = logging.getLogger(__name__)
 class WeatherData(BaseModel):
     """Current weather conditions"""
     temperature: float
-    feels_like: float
     humidity: int
     pressure: int
     description: str

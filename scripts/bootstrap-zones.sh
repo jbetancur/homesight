@@ -26,6 +26,26 @@ curl -s -X POST "$API_URL/api/zones" \
     "home_id": "default"
   }'
 
+# Dining Room
+curl -s -X POST "$API_URL/api/zones" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "id": "dining-room",
+    "name": "Dining Room",
+    "type": "dining_room",
+    "home_id": "default"
+  }'
+
+# Dining Room
+curl -s -X POST "$API_URL/api/zones" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "id": "primary-bedroom",
+    "name": "Primary Bedroom",
+    "type": "bedroom",
+    "home_id": "default"
+  }'
+
 # Bedroom
 curl -s -X POST "$API_URL/api/zones" \
   -H "Content-Type: application/json" \
@@ -63,7 +83,8 @@ curl -s -X POST "$API_URL/api/zones" \
     "id": "garage",
     "name": "Garage",
     "type": "garage",
-    "home_id": "default"
+    "home_id": "default",
+    "hidden": true
   }'
 
 

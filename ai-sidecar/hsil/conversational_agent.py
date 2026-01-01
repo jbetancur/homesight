@@ -20,6 +20,7 @@ from .types import (
 from .device_ontology import DeviceOntology
 from .home_health_engine import HomeHealthEngine
 from .tools import ToolRegistry
+from .prompts import get_prompt_section
 
 logger = logging.getLogger(__name__)
 
@@ -191,20 +192,14 @@ class ConversationalAgentService:
                 # Format tool results in a more structured way
                 tool_summary = self._format_tool_results_for_synthesis(tool_results)
                 
+                synthesis_instruction = get_prompt_section("orchestrator", "synthesis_instruction").strip()
                 messages.append({
                     "role": "user",
                     "content": f"""Here are the results from the tools you called:
 
 {tool_summary}
 
-IMPORTANT: Do NOT just repeat the JSON data! Instead:
-1. Analyze the data and extract key insights
-2. Present the information in natural, conversational language
-3. Focus on what's relevant to the user's question
-4. Be concise and friendly
-5. CRITICAL: Be mathematically accurate - check all numerical comparisons (e.g., 70°F is WARMER than 30°F)
-
-Now provide your response to the user in plain English:"""
+{synthesis_instruction}"""
                 })
 
                 # Second LLM call: synthesis with tool results
@@ -633,12 +628,13 @@ Now provide your response to the user in plain English:"""
         Build system prompt for LLM orchestrator.
 
         Lightweight - only essential context. LLM will use tools for detailed data.
+        Prompts loaded from external YAML for hot-reload capability.
         """
         parts = [
-            "You are HomeSight, a friendly AI assistant helping homeowners monitor their smart home.",
+            get_prompt_section("orchestrator", "system_prompt").strip(),
             "",
         ]
-        
+
         # Add home profile if available
         if "home_profile" in context:
             logger.info(f"📋 Home profile found in context: {list(context['home_profile'].keys())}")
@@ -648,58 +644,18 @@ Now provide your response to the user in plain English:"""
         else:
             logger.warning("⚠️  No home profile in context!")
 
-        parts.extend([
-            "## DO NOT BREAK THESE RULES",
-            "1. Do NOT invent device IDs, zones, attributes, or documentation.",
-            "2. If information is missing: reply EXACTLY with \"I don't have that information.\"",
-            "3. ONLY use data shown in the Device List below unless a tool is explicitly required.",
-            "4. For documentation: ALWAYS call get_device_documentation before answering.",
-            "5. If a zone name is unclear or not shown, ALWAYS call list_zones.",
-            "",
-
-            "## TOOL USAGE (DETERMINISTIC)",
-            "You must follow these tool rules with NO exceptions:",
-            "- For CURRENT sensor values → NEVER call tools. Read values directly from the device list.",
-            "- For HISTORY or TRENDS → ALWAYS call get_sensor_readings.",
-            "- For COMFORT or PREFERENCES → ALWAYS call get_comfort_preferences.",
-            "- For DEVICE CONTROL → ALWAYS call set_device_value.",
-            "- For FINDING DEVICES/ZONES → ALWAYS call list_devices or list_zones.",
-            "- For DOCUMENTATION → ALWAYS call get_device_documentation.",
-            "",
-            "If a user request requires a tool, YOU MUST call the correct tool.",
-            "If no tool is needed, YOU MUST answer directly without a tool call.",
-            "",
-
-            "## NUMERIC COMPARISON RULES",
-            "When comparing numbers:",
-            "1. Identify which value is larger.",
-            "2. Calculate the difference.",
-            "3. Use: 'slightly' (<5), 'noticeably' (5–20), 'much' (>20).",
-            "4. State BOTH values explicitly.",
-            "",
-
-            "## COMMUNICATION STYLE (STRICT)",
-            "- Speak simply and casually.",
-            "- Avoid technical words: use 'acting strange' instead of 'erratic', 'unusual' instead of 'anomaly'.",
-            "- Keep responses short and direct.",
-            "",
-
-            "## AMBIGUOUS REQUEST PROTOCOL",
-            "If a user asks a vague question (e.g., 'Is the basement protected?'):",
-            "1. ALWAYS call list_devices for that zone.",
-            "2. Check four protection categories:",
-            "   - Security (motion, entry sensors, cameras)",
-            "   - Water (leak sensors, shutoff valves, sump pumps)",
-            "   - Environmental (temp, humidity, smoke, CO)",
-            "   - Structural (moisture, foundation sensors)",
-            "3. Report what EXISTS and what is MISSING.",
-            "4. NEVER assume 'protection' only means security.",
-            "",
-
-            "## FAILURE MODE",
-            "If unsure what tool to use, or if the request is impossible:",
-            "Reply EXACTLY with: \"I don't have enough information to do that.\"",
-        ])
+        # Load rules from external prompts
+        parts.append(get_prompt_section("orchestrator", "rules").strip())
+        parts.append("")
+        parts.append(get_prompt_section("orchestrator", "tool_usage").strip())
+        parts.append("")
+        parts.append(get_prompt_section("orchestrator", "numeric_comparison").strip())
+        parts.append("")
+        parts.append(get_prompt_section("orchestrator", "communication_style").strip())
+        parts.append("")
+        parts.append(get_prompt_section("orchestrator", "ambiguous_request_protocol").strip())
+        parts.append("")
+        parts.append(get_prompt_section("orchestrator", "failure_mode").strip())
 
 
         # Device list with IDs for tool calls
@@ -794,87 +750,8 @@ Now provide your response to the user in plain English:"""
             parts.append(f"### Weather: {context['weather']}")
             parts.append("")
 
-        parts.append("""
-## Tool Usage Rules - CRITICAL
-
-**YOU MUST CALL TOOLS TO ANSWER QUESTIONS.**
-
-Do NOT respond with phrases like:
-- "Let me check that for you"
-- "I'll need to query the data"
-- "Let me fetch that information"
-
-Instead, IMMEDIATELY call the appropriate tool using this EXACT format:
-```json
-{"tool": "tool_name", "args": {"param": "value"}}
-```
-
-### When to Use Each Tool:
-
-**User asks: "Which sensors?" / "What devices in basement?" / "List devices" / "Show me sensors"**
-→ Call: `list_devices` to get ALL devices in a zone or entire home
-→ Example:
-```json
-{"tool": "list_devices", "args": {"zone": "basement"}}
-```
-
-**User asks: "How's the basement?" / "Everything OK in basement?" / "Any issues?"**
-→ Call: `check_erratic_behavior` for all basement devices + `get_recent_incidents` for basement
-→ Example:
-```json
-{"tool": "check_erratic_behavior", "args": {"device_id": "zwave-31"}}
-```
-
-**User asks: "What's the battery level?" / "Battery status?" / "Check battery"**
-→ Call: `get_device_status` to see CURRENT battery level
-→ Example:
-```json
-{"tool": "get_device_status", "args": {"device_id": "zwave-31"}}
-```
-
-**User asks: "Comfort levels?" / "How's the temperature?"**
-→ Call: `get_comfort_preferences` for learned temperature/humidity preferences
-→ Example:
-```json
-{"tool": "get_comfort_preferences", "args": {}}
-```
-
-**User asks: "When did X happen?" / "Last time there was a leak?"**
-→ Call: `get_recent_incidents` or `get_device_incidents`
-→ Example:
-```json
-{"tool": "get_recent_incidents", "args": {"limit": 10}}
-```
-
-**User asks: "Is my sensor broken?" / "Acting weird?"**
-→ Call: `check_erratic_behavior` to see if behavior is unusual
-→ Example:
-```json
-{"tool": "check_erratic_behavior", "args": {"device_id": "zwave-31"}}
-```
-
-**User asks: "Show me docs" / "How do I use X?" / "Manual for sensor"
-→ Call: `get_device_documentation`
-→ Example:
-```json
-{"tool": "get_device_documentation", "args": {"device_id": "zwave-31"}}
-```
-
-**User asks about a room/zone that might not match exactly (e.g., 'primary bedroom' when you have 'master bedroom')**
-→ Call: `list_zones` with search term to find matching zones
-→ Example:
-```json
-{"tool": "list_zones", "args": {"search": "bedroom"}}
-```
-
-### Response Flow:
-1. User asks question
-2. YOU call appropriate tool(s) - NO explanatory text, just the JSON
-3. I execute the tool and give you results
-4. YOU synthesize results into a natural, helpful response
-
-DO NOT say you're "going to check" - JUST CHECK by calling the tool!
-""")
+        # Load tool examples from external prompts
+        parts.append(get_prompt_section("orchestrator", "tool_examples").strip())
 
         return "\n".join(parts)
 
@@ -979,24 +856,8 @@ DO NOT say you're "going to check" - JUST CHECK by calling the tool!
 
             tools_text += "\n"
 
-        tools_text += """
-## CRITICAL: Tool Calling Format
-
-When you need to answer a question with data, you MUST call a tool.
-
-**Correct Format - Output ONLY the JSON:**
-{"tool": "tool_name", "args": {"param": "value"}}
-
-**WRONG - Do NOT output explanatory text:**
-❌ "Let me check that for you."
-❌ "I'll need to query the data."
-❌ "To check X, I'll use tool Y."
-
-**RIGHT - Just call the tool:**
-✅ {"tool": "get_device_baseline", "args": {"device_id": "zwave-31", "metric": "battery"}}
-
-After I execute the tool, I'll give you the results and THEN you respond conversationally.
-"""
+        # Load tool format guide from external prompts
+        tools_text += "\n" + get_prompt_section("orchestrator", "tool_format_guide").strip()
 
         return tools_text
 

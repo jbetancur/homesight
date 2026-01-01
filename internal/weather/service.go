@@ -40,7 +40,6 @@ type EnvironmentalContext struct {
 // WeatherData represents current weather conditions
 type WeatherData struct {
 	Temperature  float64   `json:"temperature"`
-	FeelsLike    float64   `json:"feels_like"`
 	Humidity     int       `json:"humidity"`
 	Pressure     int       `json:"pressure"`
 	Description  string    `json:"description"`
@@ -298,9 +297,6 @@ func (s *Service) fetchWeather() error {
 	windMPH := instant.WindSpeed * 2.237
 	humidity := int(instant.RelativeHumidity)
 
-	// Calculate feels like
-	feelsLike := calculateFeelsLike(tempF, windMPH, humidity)
-
 	// Precipitation (convert mm to inches)
 	var precip *float64
 	if current.Data.Next1Hours != nil && current.Data.Next1Hours.Details.PrecipAmount != nil {
@@ -310,7 +306,6 @@ func (s *Service) fetchWeather() error {
 
 	weather := WeatherData{
 		Temperature:   tempF,
-		FeelsLike:     feelsLike,
 		Humidity:      humidity,
 		Pressure:      int(instant.AirPressure),
 		Description:   desc,
@@ -371,34 +366,6 @@ func (s *Service) calculateSunTimes() SunTimes {
 }
 
 // Helper functions
-
-func calculateFeelsLike(tempF, windMPH float64, humidity int) float64 {
-	// Wind chill (temp < 50°F, wind > 3 mph)
-	if tempF <= 50 && windMPH > 3 {
-		return 35.74 + 0.6215*tempF - 35.75*pow(windMPH, 0.16) + 0.4275*tempF*pow(windMPH, 0.16)
-	}
-
-	// Heat index (temp > 80°F)
-	if tempF >= 80 {
-		h := float64(humidity)
-		return -42.379 + 2.04901523*tempF + 10.14333127*h -
-			0.22475541*tempF*h - 6.83783e-3*tempF*tempF -
-			5.481717e-2*h*h + 1.22874e-3*tempF*tempF*h +
-			8.5282e-4*tempF*h*h - 1.99e-6*tempF*tempF*h*h
-	}
-
-	return tempF
-}
-
-func pow(base, exp float64) float64 {
-	result := 1.0
-	for i := 0; i < int(exp*100); i++ {
-		if i%100 == 0 {
-			result *= base
-		}
-	}
-	return result
-}
 
 func stripSuffix(s, suffix string) string {
 	if len(s) >= len(suffix) && s[len(s)-len(suffix):] == suffix {

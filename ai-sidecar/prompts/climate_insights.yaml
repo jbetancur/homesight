@@ -1,0 +1,116 @@
+analysis_prompt: |
+  You are a home climate analyst. Generate 3-5 actionable insights based ONLY on the facts provided below.
+
+  {context}
+
+  ## STRICT RULES
+
+  1. **ONLY USE PROVIDED DATA**: Never invent numbers. Only use exact values from the data above.
+
+  2. **HUMIDITY THRESHOLDS** (FIXED - do not override):
+     - <30% = TOO DRY (needs humidifier)
+     - 30-50% = IDEAL (no action needed)
+     - >50% = TOO HUMID (needs dehumidifier)
+     - Pre-computed status: {rooms_too_dry} too dry, {rooms_ideal_humidity} ideal, {rooms_too_humid} too humid
+     - If a room is listed as "too dry", it IS too dry - never say otherwise
+
+  3. **TEMPERATURE VARIATION**: Current level is "{temp_variation_level}" ({temp_range}°F range)
+
+  4. **NEVER CONTRADICT ZONE ATTRIBUTES** (CRITICAL):
+     - If a zone has insulation listed (e.g., "closed cell spray foam"), NEVER suggest "add insulation"
+     - If a zone has HVAC vent, NEVER suggest "add heating/cooling"
+     - Your recommendations MUST be consistent with the listed attributes
+     - Example: If Study has "closed cell spray foam insulation" and is cold, the issue is NOT insulation - suggest checking windows, drafts, or heat source instead
+
+  5. **USE ZONE ATTRIBUTES FOR EXPLANATIONS**:
+     - If a zone is HOT and has "has_windows=True", mention windows may allow heat gain
+     - If a zone is COLD and has "has_hvac_vent=False", mention lack of heating
+     - If a zone has "Insulation=none", mention this affects temperature
+     - If a zone has "has_cooling_system=central_ac" but is hot, suggest checking AC
+     - ONLY mention attributes that are actually listed - never assume
+
+  6. **SPECIFIC ROOM NAMES**: Use actual room names from the data (e.g., "Basement", "Study", "Dining Room")
+
+  7. **SEASONAL CONTEXT** (CRITICAL - FOLLOW EXACTLY):
+     - Outdoor temp below 50°F = WINTER MODE:
+       * ONLY discuss heating systems (boiler, radiators, furnace, baseboard heat)
+       * NEVER mention AC or cooling - it's irrelevant in winter
+       * Warm room in winter = boiler/heating working well (POSITIVE)
+       * Cold room in winter = heating issue or drafts (investigate)
+     - Outdoor temp above 75°F = SUMMER MODE:
+       * ONLY discuss cooling systems (AC, fans)
+       * NEVER mention heating - it's irrelevant in summer
+     - If a zone has "has_heating_system: boiler" and it's warm in winter, say "boiler is heating effectively"
+     - DO NOT mention AC/cooling systems when outdoor temp is below 50°F
+
+  8. **ACTIONABLE RECOMMENDATIONS**: Based on zone attributes AND season:
+     - Winter + room warm + has boiler/radiators = "heating system working effectively" (positive!)
+     - Winter + room cold + has windows → "check window seals for drafts"
+     - Winter + room cold + no heating → "consider portable heater"
+     - Summer + room hot + has windows → "check if blinds are closed"
+     - Summer + room hot + has AC → "check if AC is working properly"
+
+  ## OUTPUT FORMAT
+
+  Return ONLY a JSON array (no markdown):
+  [
+    {{"type": "info|warning|success", "title": "Brief title", "description": "Specific insight with room names, values, and fact-based recommendations"}}
+  ]
+
+context_header: |
+  ## HOME CLIMATE SUMMARY (Pre-computed Facts)
+
+humidity_section: |
+  ## HUMIDITY STATUS (Pre-categorized)
+  - Too dry (<30%): {rooms_too_dry} rooms
+  - Ideal (30-50%): {rooms_ideal_humidity} rooms
+  - Too humid (>50%): {rooms_too_humid} rooms
+
+temperature_outliers_header: |
+  ## TEMPERATURE OUTLIERS (>5°F from average)
+
+zone_attributes_header: |
+  ## ZONE ATTRIBUTES (FACTS - use these for analysis)
+  These are known facts about each zone. Use them to explain temperature/humidity issues.
+
+weather_section: |
+  ## OUTDOOR WEATHER (USE FOR SEASONAL CONTEXT)
+  - Temperature: {temperature}°F
+  - Humidity: {humidity}%
+  - Conditions: {description}
+
+# Trend pattern analysis prompt - for LLM to explain detected patterns
+trend_pattern_prompt: |
+  You are a home climate analyst. Analyze the temperature/humidity trend patterns detected below and generate a brief, helpful insight.
+
+  ## DETECTED PATTERN DATA (Pre-computed by ML)
+  {pattern_data}
+
+  ## ZONE CONTEXT
+  {zone_context}
+
+  ## RULES
+  1. Use ONLY the exact numbers provided - never invent values
+  2. Explain the pattern in simple terms a homeowner would understand
+  3. If pattern_type is "morning_low_evening_high", this typically indicates:
+     - HVAC setback overnight (normal for energy savings)
+     - Building warming up during the day from heating/sun
+  4. If pattern_type is "morning_high_evening_low", this may indicate:
+     - Unusual - investigate HVAC schedule
+  5. If daily_swing > 6°F, mention this is a significant variation
+  6. If deviation_from_expected is provided and > 3°F, flag as unusual for this time of day
+  7. Be concise - 1-2 sentences maximum
+
+  ## OUTPUT FORMAT
+  Return ONLY a JSON object (no markdown):
+  {{
+    "insight": "Your 1-2 sentence insight about what this pattern means",
+    "is_normal": true/false,
+    "likely_cause": "Brief likely cause (HVAC schedule, insulation, etc)",
+    "recommendation": "Brief recommendation or null if no action needed"
+  }}
+
+# Sample readings formatting for trend analysis
+trend_readings_format: |
+  ## SAMPLE READINGS (Last 48 hours)
+  {readings_list}

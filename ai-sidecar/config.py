@@ -35,6 +35,7 @@ class LLMConfig(BaseModel):
     # Chat inference settings
     chat_temperature: float = Field(default=0.3, description="Temperature for chat responses (lower = less hallucination)")
     chat_max_tokens: int = Field(default=400, description="Max tokens for chat responses")
+    analysis_max_tokens: int = Field(default=500, description="Max tokens for incident analysis responses")
     chat_max_system_prompt_chars: int = Field(default=6000, description="Max chars for system prompt")
     chat_max_user_message_chars: int = Field(default=2000, description="Max chars for user message")
     chat_max_memory_turns: int = Field(default=20, description="Max conversation turns to store per session")

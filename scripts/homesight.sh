@@ -6,6 +6,18 @@ PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 PID_DIR="$PROJECT_DIR/.pids"
 LOG_DIR="$PROJECT_DIR/logs"
 
+# Dev mode flag
+DEV_MODE=false
+COMPOSE_CMD="docker compose"
+
+# Parse --dev flag from any position
+for arg in "$@"; do
+    if [ "$arg" = "--dev" ]; then
+        DEV_MODE=true
+        COMPOSE_CMD="docker compose -f docker-compose.yml -f docker-compose.dev.yml"
+    fi
+done
+
 # Colors
 GREEN='\033[0;32m'
 RED='\033[0;31m'
@@ -25,7 +37,7 @@ start_mosquitto() {
     cd "$PROJECT_DIR"
 
     # Start with docker compose
-    docker compose up -d mosquitto
+    $COMPOSE_CMD up -d mosquitto
 
     if [ $? -eq 0 ]; then
         echo -e "${GREEN}✅ Mosquitto started in Docker${NC}"
@@ -42,8 +54,8 @@ start_daemon() {
     cd "$PROJECT_DIR"
 
     # Stop any existing container
-    docker compose stop api 2>/dev/null || true
-    docker compose rm -f api 2>/dev/null || true
+    $COMPOSE_CMD stop api 2>/dev/null || true
+    $COMPOSE_CMD rm -f api 2>/dev/null || true
 
     # Kill any host processes on port 8080
     if lsof -ti:8080 >/dev/null 2>&1; then
@@ -55,11 +67,11 @@ start_daemon() {
     # Build if image doesn't exist
     if ! docker images homesight-api --format "{{.Repository}}" | grep -q "homesight-api"; then
         echo -e "${YELLOW}Building API Docker image...${NC}"
-        docker compose build api
+        $COMPOSE_CMD build api
     fi
 
     # Start with docker compose
-    docker compose up -d api
+    $COMPOSE_CMD up -d api
 
     if [ $? -eq 0 ]; then
         echo -e "${GREEN}✅ HomeSight API started in Docker${NC}"
@@ -76,8 +88,8 @@ start_ai() {
     cd "$PROJECT_DIR"
 
     # Stop any existing container
-    docker compose stop ai-sidecar 2>/dev/null || true
-    docker compose rm -f ai-sidecar 2>/dev/null || true
+    $COMPOSE_CMD stop ai-sidecar 2>/dev/null || true
+    $COMPOSE_CMD rm -f ai-sidecar 2>/dev/null || true
 
     # Kill any host processes on port 8001
     if lsof -ti:8001 >/dev/null 2>&1; then
@@ -87,7 +99,7 @@ start_ai() {
     fi
 
     # Start with docker compose
-    docker compose up -d ai-sidecar
+    $COMPOSE_CMD up -d ai-sidecar
 
     if [ $? -eq 0 ]; then
         echo -e "${GREEN}✅ AI Sidecar started in Docker${NC}"
@@ -104,8 +116,8 @@ start_zwave() {
     cd "$PROJECT_DIR"
 
     # Stop any existing container
-    docker compose stop zwavejs 2>/dev/null || true
-    docker compose rm -f zwavejs 2>/dev/null || true
+    $COMPOSE_CMD stop zwavejs 2>/dev/null || true
+    $COMPOSE_CMD rm -f zwavejs 2>/dev/null || true
 
     # Kill any host processes on port 8001
     if lsof -ti:8001 >/dev/null 2>&1; then
@@ -115,7 +127,7 @@ start_zwave() {
     fi
 
     # Start with docker compose
-    docker compose up -d zwavejs
+    $COMPOSE_CMD up -d zwavejs
 
     if [ $? -eq 0 ]; then
         echo -e "${GREEN}✅ ZWave started in Docker${NC}"
@@ -132,8 +144,8 @@ start_web_ui() {
     cd "$PROJECT_DIR"
 
     # Stop any existing container
-    docker compose stop web-ui 2>/dev/null || true
-    docker compose rm -f web-ui 2>/dev/null || true
+    $COMPOSE_CMD stop web-ui 2>/dev/null || true
+    $COMPOSE_CMD rm -f web-ui 2>/dev/null || true
 
     # Kill any host processes on port 5173
     if lsof -ti:5173 >/dev/null 2>&1; then
@@ -142,14 +154,18 @@ start_web_ui() {
         sleep 2
     fi
 
-    # Build if image doesn't exist
-    if ! docker images homesight-web-ui --format "{{.Repository}}" | grep -q "homesight-web-ui"; then
+    # Build if image doesn't exist (check dev image in dev mode)
+    local image_name="homesight-web-ui"
+    if [ "$DEV_MODE" = true ]; then
+        image_name="homesight-web-ui-dev"
+    fi
+    if ! docker images "$image_name" --format "{{.Repository}}" | grep -q "$image_name"; then
         echo -e "${YELLOW}Building Web UI Docker image...${NC}"
-        docker compose build web-ui
+        $COMPOSE_CMD build web-ui
     fi
 
     # Start with docker compose
-    docker compose up -d web-ui
+    $COMPOSE_CMD up -d web-ui
 
     if [ $? -eq 0 ]; then
         echo -e "${GREEN}✅ Web UI started in Docker${NC}"
@@ -164,7 +180,7 @@ start_docker() {
     echo -e "${GREEN}Starting Docker services...${NC}"
 
     cd "$PROJECT_DIR"
-    docker compose up -d prometheus grafana 2>/dev/null
+    $COMPOSE_CMD up -d prometheus grafana 2>/dev/null
 
     if [ $? -eq 0 ]; then
         echo -e "${GREEN}✅ Docker services started${NC}"
@@ -179,8 +195,8 @@ stop_daemon() {
     echo -e "${YELLOW}Stopping HomeSight API...${NC}"
 
     cd "$PROJECT_DIR"
-    docker compose stop api 2>/dev/null || true
-    docker compose rm -f api 2>/dev/null || true
+    $COMPOSE_CMD stop api 2>/dev/null || true
+    $COMPOSE_CMD rm -f api 2>/dev/null || true
 
     # Clean up any stray host processes
     pkill -9 -f "homesightd" 2>/dev/null || true
@@ -193,8 +209,8 @@ stop_mosquitto() {
     echo -e "${YELLOW}Stopping Mosquitto...${NC}"
 
     cd "$PROJECT_DIR"
-    docker compose stop mosquitto 2>/dev/null || true
-    docker compose rm -f mosquitto 2>/dev/null || true
+    $COMPOSE_CMD stop mosquitto 2>/dev/null || true
+    $COMPOSE_CMD rm -f mosquitto 2>/dev/null || true
 
     echo -e "${GREEN}✅ Mosquitto stopped${NC}"
 }
@@ -203,8 +219,8 @@ stop_ai() {
     echo -e "${YELLOW}Stopping AI Sidecar...${NC}"
 
     cd "$PROJECT_DIR"
-    docker compose stop ai-sidecar 2>/dev/null || true
-    docker compose rm -f ai-sidecar 2>/dev/null || true
+    $COMPOSE_CMD stop ai-sidecar 2>/dev/null || true
+    $COMPOSE_CMD rm -f ai-sidecar 2>/dev/null || true
 
     pkill -9 -f "python.*main.py" 2>/dev/null || true
     pkill -9 -f "uvicorn" 2>/dev/null || true
@@ -217,8 +233,8 @@ stop_web_ui() {
     echo -e "${YELLOW}Stopping Web UI...${NC}"
 
     cd "$PROJECT_DIR"
-    docker compose stop web-ui 2>/dev/null || true
-    docker compose rm -f web-ui 2>/dev/null || true
+    $COMPOSE_CMD stop web-ui 2>/dev/null || true
+    $COMPOSE_CMD rm -f web-ui 2>/dev/null || true
 
     lsof -ti:5173 2>/dev/null | xargs kill -9 2>/dev/null || true
 
@@ -229,7 +245,7 @@ stop_docker() {
     echo -e "${YELLOW}Stopping Docker services...${NC}"
 
     cd "$PROJECT_DIR"
-    docker compose down 2>/dev/null || true
+    $COMPOSE_CMD down 2>/dev/null || true
 
     echo -e "${GREEN}✅ Docker services stopped${NC}"
 }
@@ -337,7 +353,11 @@ clean_all() {
 
 case "${1:-}" in
     start)
-        echo "🏠 Starting HomeSight..."
+        if [ "$DEV_MODE" = true ]; then
+            echo "🏠 Starting HomeSight (DEV MODE)..."
+        else
+            echo "🏠 Starting HomeSight..."
+        fi
         echo ""
 
         start_mosquitto
@@ -363,7 +383,11 @@ case "${1:-}" in
         clean_all
         ;;
     restart)
-        echo "🏠 Restarting HomeSight..."
+        if [ "$DEV_MODE" = true ]; then
+            echo "🏠 Restarting HomeSight (DEV MODE)..."
+        else
+            echo "🏠 Restarting HomeSight..."
+        fi
         echo ""
 
         stop_web_ui
@@ -391,11 +415,11 @@ case "${1:-}" in
         ;;
     logs)
         case "${2:-}" in
-            ui|web-ui) docker compose logs -f web-ui ;;
-            api|daemon) docker compose logs -f api ;;
-            ai) docker compose logs -f ai-sidecar ;;
-            mqtt|mosquitto) docker compose logs -f mosquitto ;;
-            zwave|zwavejs) docker compose logs -f zwavejs ;;
+            ui|web-ui) $COMPOSE_CMD logs -f web-ui ;;
+            api|daemon) $COMPOSE_CMD logs -f api ;;
+            ai) $COMPOSE_CMD logs -f ai-sidecar ;;
+            mqtt|mosquitto) $COMPOSE_CMD logs -f mosquitto ;;
+            zwave|zwavejs) $COMPOSE_CMD logs -f zwavejs ;;
             *) echo "Usage: $0 logs [ui|api|ai|mqtt|zwave]" ;;
         esac
         ;;
@@ -406,7 +430,7 @@ case "${1:-}" in
         # Build Docker images
         echo -e "${GREEN}Building Docker images...${NC}"
         cd "$PROJECT_DIR"
-        docker compose build api ai-sidecar web-ui
+        $COMPOSE_CMD build api ai-sidecar web-ui
 
         echo -e "${GREEN}✅ Build complete${NC}"
         ;;
@@ -417,14 +441,14 @@ case "${1:-}" in
         # Rebuild Docker images without cache
         echo -e "${GREEN}Rebuilding Docker images (no cache)...${NC}"
         cd "$PROJECT_DIR"
-        docker compose build --no-cache api ai-sidecar web-ui
+        $COMPOSE_CMD build --no-cache api ai-sidecar web-ui
 
         echo -e "${GREEN}✅ Rebuild complete${NC}"
         ;;
     *)
         echo "🏠 HomeSight Control Script"
         echo ""
-        echo "Usage: $0 {start|stop|restart|clean|status|logs|build|rebuild}"
+        echo "Usage: $0 {start|stop|restart|clean|status|logs|build|rebuild} [--dev]"
         echo ""
         echo "Commands:"
         echo "  start    Start all services"
@@ -435,6 +459,9 @@ case "${1:-}" in
         echo "  logs     Show logs (ui|api|ai|mqtt|zwave)"
         echo "  build    Build Docker images"
         echo "  rebuild  Rebuild Docker images (no cache)"
+        echo ""
+        echo "Options:"
+        echo "  --dev    Use docker-compose.dev.yml for hot-reloading"
         exit 1
         ;;
 esac

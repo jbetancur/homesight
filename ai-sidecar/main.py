@@ -10,7 +10,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from typing import Optional
 from datetime import datetime
-import uvicorn
 import logging
 import os
 import httpx
@@ -38,6 +37,9 @@ from services.sse_service import SSEService, get_sse_service
 # LLM and RAG
 from llm.provider import LLMProvider
 from rag.engine import RAGEngine
+
+# Prompts
+from hsil.prompts import get_prompt
 
 # Queue management
 from queues.task_queue import TaskQueue, QueueType, QueueConfig
@@ -408,6 +410,7 @@ async def analyze(request: AnalyzeRequest):
             manufacturer = device_context.get("manufacturer", "") if device_context else ""
             model = device_context.get("model", "") if device_context else ""
 
+            # Simple query: device + incident type
             query_parts = []
             if manufacturer:
                 query_parts.append(manufacturer)
@@ -415,7 +418,7 @@ async def analyze(request: AnalyzeRequest):
                 query_parts.append(model)
             query_parts.append(incident_type.replace("_", " "))
             if description:
-                query_parts.append(description[:100])
+                query_parts.append(description[:150])
 
             query = " ".join(query_parts)
             where_filter = {"manufacturer": manufacturer.title()} if manufacturer else None
@@ -428,7 +431,7 @@ async def analyze(request: AnalyzeRequest):
                         rag_sources.append({
                             "source": r['metadata'].get('source', 'Documentation'),
                             "relevance": relevance,
-                            "excerpt": r['text'][:300].strip()
+                            "excerpt": r['text']  # Use full text, not truncated
                         })
             except Exception as e:
                 logger.warning(f"RAG query failed: {e}")
@@ -463,31 +466,43 @@ async def analyze(request: AnalyzeRequest):
                 other_devices = [d.get('name', d.get('id')) for d in zone_devices[:3]]
                 context_parts.append(f"Other devices in {zone_id}: {', '.join(other_devices)}")
 
+            # Build documentation context with full excerpts
+            documentation_text = ""
             if rag_sources:
-                docs = [f"- {s['source']}: {s['excerpt'][:150]}..." for s in rag_sources[:2]]
-                context_parts.append("Relevant documentation:\n" + "\n".join(docs))
+                doc_sections = []
+                for idx, s in enumerate(rag_sources[:3], 1):
+                    # Use full excerpt for better context
+                    doc_sections.append(f"Documentation Source {idx} ({s['source']}):\n{s['excerpt']}")
+                documentation_text = "\n\n".join(doc_sections)
 
-            prompt = f"""Analyze this home automation incident and provide actionable recommendations.
+            # Build base context without docs
+            base_context = chr(10).join(context_parts) if context_parts else "No additional context available."
 
-Incident: {incident_type.replace('_', ' ').title()}
-Severity: {severity}
-Description: {description}
-
-Context:
-{chr(10).join(context_parts)}
-
-Provide a brief analysis (2-3 sentences) and 2-3 specific actionable steps. Focus on practical troubleshooting.
-Be concise and specific to this device and situation.
-
-Format your response as:
-ANALYSIS: <your analysis>
-ACTIONS:
-1. <action 1>
-2. <action 2>
-3. <action 3>"""
+            # Create incident-focused prompt that extracts device-specific instructions
+            # Load from external YAML for hot-reload capability
+            if documentation_text:
+                prompt = get_prompt(
+                    "incident_analysis",
+                    "with_documentation",
+                    incident_type=incident_type.replace('_', ' ').title(),
+                    severity=severity,
+                    description=description,
+                    device_context=base_context,
+                    documentation=documentation_text
+                )
+            else:
+                # Fallback when no documentation available
+                prompt = get_prompt(
+                    "incident_analysis",
+                    "without_documentation",
+                    incident_type=incident_type.replace('_', ' ').title(),
+                    severity=severity,
+                    description=description,
+                    device_context=base_context
+                )
 
             try:
-                response = await llm_provider.generate(prompt, max_tokens=300)
+                response = await llm_provider.simple_generate_async(prompt, max_tokens=config.llm.analysis_max_tokens)
 
                 # Parse LLM response
                 if "ANALYSIS:" in response and "ACTIONS:" in response:
@@ -652,28 +667,13 @@ async def chat(request: ChatRequest):
                 logger.warning(f"RAG query failed (continuing without context): {e}")
         
         # Build system prompt with RAG context
-        system_prompt = """You are a helpful assistant for home automation and device documentation.
+        # Load from external YAML for hot-reload capability
+        system_prompt = get_prompt("chat", "system_prompt")
 
-CRITICAL RULES:
-1. ONLY use information from the provided documentation context below.
-2. NEVER invent or guess specifications like battery types, dimensions, or technical details.
-3. If information is not in the provided documentation, say "Specification not available from manufacturer documentation."
-4. Be precise and factual - accuracy is more important than completeness.
-"""
-        
         if rag_context:
-            system_prompt += f"""
---- OFFICIAL DOCUMENTATION CONTEXT ---
-The following is extracted from official manufacturer documentation. Use ONLY this information:
-
-{rag_context}
-
---- END DOCUMENTATION ---
-"""
+            system_prompt += "\n" + get_prompt("chat", "with_rag_context", rag_context=rag_context)
         else:
-            system_prompt += """
-Note: No official documentation was found in the knowledge base. Generate a minimal response and clearly indicate that specifications should be verified with official manufacturer documentation.
-"""
+            system_prompt += "\n" + get_prompt("chat", "without_rag_context")
         
         # Build message list
         messages = [
@@ -923,63 +923,50 @@ async def handle_incident_event(event: dict, background_tasks: BackgroundTasks):
 
 async def analyze_incident_background(incident_data: dict, callback_url: Optional[str] = None):
     """
-    Analyze incident in background using RAG document retrieval.
-    
-    Queries RAG for relevant device documentation and saves results
-    to Go backend database for the UI to display.
+    Analyze incident in background using LLM + RAG documentation.
+
+    Queries RAG for relevant device documentation and uses LLM to extract
+    specific, actionable instructions from the documentation.
     """
     import httpx
 
     incident_id = incident_data.get("id")
 
-    if not incident_id or not rag_engine:
+    if not incident_id:
         return
 
     try:
         logger.info(f"Starting background analysis for incident {incident_id}")
 
-        # Build query from incident data
+        # Call the main analyze endpoint logic
         incident_type = incident_data.get("title", "Unknown incident")
         device_id = incident_data.get("device_id", "")
         description = incident_data.get("description", "")
         severity = incident_data.get("severity", "unknown")
-        
-        query_parts = [incident_type]
-        if device_id:
-            query_parts.append(device_id)
-        if description:
-            query_parts.append(description[:100])
-        
-        query = " ".join(query_parts)
-        
-        # Query RAG for relevant documentation
-        results = rag_engine.query(query, n_results=5)
-        
-        # Build structured response
-        insights = []
-        sources = []
-        
-        if results:
-            for r in results:
-                relevance = r.get('relevance_score', 0)
-                if relevance > 0.2:
-                    source = r['metadata'].get('source', 'Documentation')
-                    excerpt = r['text'][:500].strip()
-                    insights.append(f"**{source}** (relevance: {relevance:.0%}):\n{excerpt}")
-                    sources.append({"source": source, "relevance": relevance})
-        
-        if not insights:
-            insights = [
-                "No device-specific documentation found.",
-                "Ask in chat for AI-powered troubleshooting."
-            ]
-        
-        analysis = f"Found {len(sources)} relevant documents for {incident_type}"
-        actions = [
-            "Review documentation above",
-            "Ask follow-up questions in chat",
-            "Check device knowledge base"
-        ]
+
+        # Build request for analyze endpoint
+        analyze_request = AnalyzeRequest(
+            type="incident",
+            data={
+                "id": incident_id,
+                "type": incident_type,
+                "severity": severity,
+                "device_id": device_id,
+                "description": description
+            },
+            context={
+                "incident_id": incident_id,
+                "device_id": device_id
+            }
+        )
+
+        # Call analyze function to get LLM-based analysis
+        response = await analyze(analyze_request)
+
+        analysis = response.analysis
+        insights = response.insights
+        actions = response.actions
+        sources = response.metadata.get("rag_sources", []) if response.metadata else []
 
         logger.info(f"✅ Completed analysis for incident {incident_id}")
 

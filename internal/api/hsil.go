@@ -2,7 +2,6 @@ package api
 
 import (
 	"bytes"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -140,34 +139,4 @@ func (s *Server) proxyToHSIL(w http.ResponseWriter, r *http.Request, path string
 
 	// Write response body
 	w.Write(respBody)
-}
-
-// ForwardEventToHSIL is a helper to send events to HSIL from other parts of the code
-// Use this in your MQTT consumer or event handlers
-func (s *Server) ForwardEventToHSIL(deviceID, sensorID, eventType string, value interface{}, location, deviceType string) error {
-	payload := map[string]interface{}{
-		"device_id":   deviceID,
-		"sensor_id":   sensorID,
-		"event_type":  eventType,
-		"value":       value,
-		"location":    location,
-		"device_type": deviceType,
-	}
-
-	jsonData, err := json.Marshal(payload)
-	if err != nil {
-		return fmt.Errorf("failed to marshal event: %w", err)
-	}
-
-	resp, err := http.Post(getHSILBaseURL()+"/events", "application/json", bytes.NewBuffer(jsonData))
-	if err != nil {
-		return fmt.Errorf("failed to forward to HSIL: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("HSIL returned non-OK status: %d", resp.StatusCode)
-	}
-
-	return nil
 }

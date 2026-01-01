@@ -74,7 +74,7 @@ class HSILRiverLearningEngine:
 
         # Comfort model: Linear regression for preferred conditions
         # Features: temp, humidity, hour_sin, hour_cos, dow_sin, dow_cos,
-        #           external_temp, feels_like, wind_speed, aqi, sun_elevation
+        #           external_temp, wind_speed, aqi, sun_elevation
         self.comfort_model = linear_model.LinearRegression(
             optimizer=optim.SGD(lr=0.01)
         )
@@ -104,6 +104,12 @@ class HSILRiverLearningEngine:
 
         # Baseline models: Running mean/variance per device+metric
         self.baseline_models: Dict[str, Dict[str, Tuple[stats.Mean, stats.Var]]] = defaultdict(dict)
+
+        # Hourly baseline models: Running mean/variance per device+metric+hour (24 buckets)
+        # Structure: {device_id: {metric: {hour: (Mean, Var)}}}
+        self.hourly_baselines: Dict[str, Dict[str, Dict[int, Tuple[stats.Mean, stats.Var]]]] = defaultdict(
+            lambda: defaultdict(dict)
+        )
 
         # Event frequency models: Track event rate per device for erratic detection
         # Stores (event_count_model, inter_event_time_model) per device
@@ -224,6 +230,12 @@ class HSILRiverLearningEngine:
                 elif model_name.startswith("anomaly_"):
                     device_id = model_name.replace("anomaly_", "")
                     self.anomaly_models[device_id] = model_obj
+                elif model_name.startswith("hourly_"):
+                    # Parse hourly_{device_id}_{metric} -> dict of hour -> (Mean, Var)
+                    parts = model_name.replace("hourly_", "").rsplit("_", 1)
+                    if len(parts) == 2:
+                        device_id, metric = parts
+                        self.hourly_baselines[device_id][metric] = model_obj
                 elif model_name.startswith("baseline_"):
                     # Parse baseline_{device_id}_{metric}
                     parts = model_name.replace("baseline_", "").rsplit("_", 1)
@@ -427,14 +439,12 @@ class HSILRiverLearningEngine:
         # Weather features
         if env:
             features["external_temp"] = env.weather.temperature
-            features["feels_like"] = env.weather.feels_like
             features["external_humidity"] = env.weather.humidity
             features["wind_speed"] = env.weather.wind_speed
             features["aqi"] = env.air_quality.aqi if env.air_quality else 1.0
             features["sun_elevation"] = self._compute_sun_elevation(context.timestamp, env)
         else:
             features["external_temp"] = 70.0
-            features["feels_like"] = 70.0
             features["external_humidity"] = 50.0
             features["wind_speed"] = 0.0
             features["aqi"] = 1.0
@@ -538,9 +548,9 @@ class HSILRiverLearningEngine:
         self.validation_counter += 1
         is_validation = (self.validation_counter % self.validation_frequency) == 0
 
-        # Update baseline model
+        # Update baseline model (with timestamp for hourly bucketing)
         if isinstance(context.event_value, (int, float)):
-            await self._update_baseline(context.device_id, context.event_type, float(context.event_value))
+            await self._update_baseline(context.device_id, context.event_type, float(context.event_value), context.timestamp)
 
         # Update event frequency model (for erratic detection)
         erratic_info = await self._update_frequency_model(context)
@@ -566,8 +576,8 @@ class HSILRiverLearningEngine:
             await self._persist_all_models()
             self._save_runtime_metadata()
 
-    async def _update_baseline(self, device_id: str, metric: str, value: float):
-        """Update running baseline statistics"""
+    async def _update_baseline(self, device_id: str, metric: str, value: float, timestamp: Optional[datetime] = None):
+        """Update running baseline statistics (global and hourly)"""
         if device_id not in self.baseline_models:
             self.baseline_models[device_id] = {}
 
@@ -578,12 +588,23 @@ class HSILRiverLearningEngine:
         mean_model.update(value)
         var_model.update(value)
 
+        # Update hourly baseline (for time-of-day pattern detection)
+        hour = (timestamp or datetime.now()).hour
+        if hour not in self.hourly_baselines[device_id][metric]:
+            self.hourly_baselines[device_id][metric][hour] = (stats.Mean(), stats.Var())
+
+        hourly_mean, hourly_var = self.hourly_baselines[device_id][metric][hour]
+        hourly_mean.update(value)
+        hourly_var.update(value)
+
         # Persist every 100 updates
         model_name = f"baseline_{device_id}_{metric}"
         self.model_update_counts[model_name] += 1
 
         if self.model_update_counts[model_name] % 100 == 0:
             self._save_model(model_name, (mean_model, var_model))
+            # Also persist hourly baselines
+            self._save_model(f"hourly_{device_id}_{metric}", self.hourly_baselines[device_id][metric])
 
     async def _update_frequency_model(self, context: EventContext) -> Optional[Dict[str, Any]]:
         """
@@ -1164,3 +1185,194 @@ class HSILRiverLearningEngine:
             # Per-device health metrics
             "device_health": device_health
         }
+
+    # ==================== TREND PATTERN ANALYSIS ====================
+
+    async def analyze_device_trend_pattern(
+        self,
+        device_id: str,
+        metric: str,
+        readings: list[Dict[str, Any]]
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Analyze temperature/humidity readings to detect cyclical patterns.
+
+        Uses hourly baselines (ML-learned) + raw readings to compute:
+        - Daily swing (max - min)
+        - Peak/trough times
+        - Pattern regularity
+        - Current deviation from expected-for-this-hour
+
+        Args:
+            device_id: Device ID (e.g., "zwave-36")
+            metric: Metric type ("temperature" or "humidity")
+            readings: List of readings with 'value' and 'timestamp' keys
+
+        Returns:
+            Dict with pattern analysis or None if insufficient data
+        """
+        if not readings or len(readings) < 6:
+            return None
+
+        # Extract values and timestamps
+        values = []
+        timestamps = []
+        for r in readings:
+            try:
+                val = float(r.get("value", 0))
+                ts_str = r.get("timestamp", "")
+                if ts_str:
+                    ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+                    values.append(val)
+                    timestamps.append(ts)
+            except (ValueError, TypeError):
+                continue
+
+        if len(values) < 6:
+            return None
+
+        # Basic statistics from readings
+        min_val = min(values)
+        max_val = max(values)
+        avg_val = sum(values) / len(values)
+        daily_swing = max_val - min_val
+
+        # Find typical high/low times
+        min_idx = values.index(min_val)
+        max_idx = values.index(max_val)
+        low_hour = timestamps[min_idx].hour
+        high_hour = timestamps[max_idx].hour
+
+        # Group readings by hour to find average per hour
+        hourly_values: Dict[int, list[float]] = defaultdict(list)
+        for val, ts in zip(values, timestamps):
+            hourly_values[ts.hour].append(val)
+
+        hourly_averages = {
+            hour: sum(vals) / len(vals)
+            for hour, vals in hourly_values.items()
+            if vals
+        }
+
+        # Detect cyclical pattern: check if there's a consistent daily swing
+        # A cyclical pattern has: morning lows, evening highs (or vice versa)
+        pattern_detected = False
+        pattern_type = "unknown"
+
+        if len(hourly_averages) >= 4:
+            # Find hour with min and max averages
+            sorted_hours = sorted(hourly_averages.items(), key=lambda x: x[1])
+            typical_low_hour = sorted_hours[0][0]
+            typical_low_val = sorted_hours[0][1]
+            typical_high_hour = sorted_hours[-1][0]
+            typical_high_val = sorted_hours[-1][1]
+
+            computed_swing = typical_high_val - typical_low_val
+
+            # Pattern is cyclical if swing > 3°F and hours are separated
+            if computed_swing >= 3.0:
+                hour_diff = abs(typical_high_hour - typical_low_hour)
+                if hour_diff >= 4 or hour_diff <= 20:  # At least 4 hours apart
+                    pattern_detected = True
+                    # Determine pattern type
+                    if 5 <= typical_low_hour <= 10:
+                        pattern_type = "morning_low_evening_high"
+                    elif 5 <= typical_high_hour <= 10:
+                        pattern_type = "morning_high_evening_low"
+                    else:
+                        pattern_type = "diurnal_cycle"
+
+        # Check hourly ML baselines for expected value at current hour
+        current_hour = datetime.now().hour
+        expected_for_hour = None
+        deviation_from_expected = None
+
+        if device_id in self.hourly_baselines and metric in self.hourly_baselines[device_id]:
+            hourly_data = self.hourly_baselines[device_id][metric]
+            if current_hour in hourly_data:
+                mean_model, var_model = hourly_data[current_hour]
+                expected_for_hour = mean_model.get()
+
+                # Calculate deviation from most recent reading
+                if values and expected_for_hour is not None:
+                    current_val = values[-1]  # Most recent
+                    deviation_from_expected = current_val - expected_for_hour
+
+        # Compute pattern regularity (how consistent is the pattern)
+        # Lower variance in hourly averages = more regular pattern
+        if len(hourly_averages) >= 6:
+            hourly_vals = list(hourly_averages.values())
+            hourly_mean = sum(hourly_vals) / len(hourly_vals)
+            hourly_variance = sum((v - hourly_mean) ** 2 for v in hourly_vals) / len(hourly_vals)
+            # Normalize to 0-1 (higher = more regular pattern)
+            # A swing of 6°F with low within-hour variance is very regular
+            regularity = min(1.0, (daily_swing / 10.0) * (1 - min(1, hourly_variance / 25)))
+        else:
+            regularity = 0.0
+
+        # Format times
+        def hour_to_time_range(hour: int) -> str:
+            next_hour = (hour + 1) % 24
+            return f"{hour:02d}:00-{next_hour:02d}:00"
+
+        return {
+            "device_id": device_id,
+            "metric": metric,
+            "pattern_detected": pattern_detected,
+            "pattern_type": pattern_type,
+            "min_value": round(min_val, 1),
+            "max_value": round(max_val, 1),
+            "avg_value": round(avg_val, 1),
+            "daily_swing": round(daily_swing, 1),
+            "typical_low_hour": low_hour,
+            "typical_low_time": hour_to_time_range(low_hour) if pattern_detected else None,
+            "typical_high_hour": high_hour,
+            "typical_high_time": hour_to_time_range(high_hour) if pattern_detected else None,
+            "expected_for_current_hour": round(expected_for_hour, 1) if expected_for_hour else None,
+            "deviation_from_expected": round(deviation_from_expected, 1) if deviation_from_expected else None,
+            "pattern_regularity": round(regularity, 2),
+            "readings_analyzed": len(values),
+            "hours_covered": len(hourly_averages),
+        }
+
+    async def get_hourly_baseline_summary(self, device_id: str, metric: str) -> Optional[Dict[str, Any]]:
+        """
+        Get summary of hourly baselines for a device.
+
+        Returns hourly averages learned by ML for pattern visualization.
+        """
+        if device_id not in self.hourly_baselines:
+            return None
+
+        if metric not in self.hourly_baselines[device_id]:
+            return None
+
+        hourly_data = self.hourly_baselines[device_id][metric]
+
+        if not hourly_data:
+            return None
+
+        summary = {
+            "device_id": device_id,
+            "metric": metric,
+            "hours": {}
+        }
+
+        for hour, (mean_model, var_model) in hourly_data.items():
+            mean_val = mean_model.get()
+            var_val = var_model.get()
+
+            if mean_val is not None:
+                summary["hours"][hour] = {
+                    "mean": round(mean_val, 1),
+                    "std_dev": round(math.sqrt(var_val), 2) if var_val and var_val > 0 else 0.0,
+                }
+
+        # Calculate overall pattern from hourly data
+        if summary["hours"]:
+            means = [h["mean"] for h in summary["hours"].values()]
+            summary["overall_min"] = min(means)
+            summary["overall_max"] = max(means)
+            summary["overall_swing"] = round(max(means) - min(means), 1)
+
+        return summary

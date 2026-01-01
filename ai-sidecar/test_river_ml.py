@@ -35,7 +35,6 @@ async def test_river_ml():
     env = EnvironmentalContext(
         weather=WeatherData(
             temperature=75.0,
-            feels_like=73.0,
             humidity=60,
             pressure=1013,
             description="clear sky",

@@ -221,16 +221,6 @@ type Sensor struct {
 	UpdatedAt time.Time         `json:"updated_at"`
 }
 
-// Home represents the top-level location
-type Home struct {
-	ID        string            `json:"id"`
-	Name      string            `json:"name"`
-	Address   string            `json:"address"`
-	Metadata  map[string]string `json:"metadata"`
-	CreatedAt time.Time         `json:"created_at"`
-	UpdatedAt time.Time         `json:"updated_at"`
-}
-
 // Zone represents a logical area within a home
 type Zone struct {
 	ID         string                 `json:"id"`
@@ -243,21 +233,6 @@ type Zone struct {
 	Metadata   map[string]string      `json:"metadata"`
 	CreatedAt  time.Time              `json:"created_at"`
 	UpdatedAt  time.Time              `json:"updated_at"`
-}
-
-// Asset represents a physical asset that may have sensors
-type Asset struct {
-	ID           string            `json:"id"`
-	HomeID       string            `json:"home_id"`
-	ZoneID       string            `json:"zone_id"`
-	Name         string            `json:"name"`
-	Type         string            `json:"type"` // "sump_pump", "water_heater", "hvac", etc.
-	Manufacturer string            `json:"manufacturer"`
-	Model        string            `json:"model"`
-	InstallDate  time.Time         `json:"install_date"`
-	Metadata     map[string]string `json:"metadata"`
-	CreatedAt    time.Time         `json:"created_at"`
-	UpdatedAt    time.Time         `json:"updated_at"`
 }
 
 // IncidentSeverity levels
@@ -327,21 +302,6 @@ type Incident struct {
 	Actions        []string       `json:"actions"`
 	AnalysisData   map[string]any `json:"analysis_data"` // metadata, sources, etc.
 	AnalyzedAt     *time.Time     `json:"analyzed_at"`
-}
-
-// Task represents a maintenance or action item
-type Task struct {
-	ID          string     `json:"id"`
-	Title       string     `json:"title"`
-	Description string     `json:"description"`
-	Priority    string     `json:"priority"`
-	Status      string     `json:"status"`
-	AssetID     string     `json:"asset_id"`
-	ZoneID      string     `json:"zone_id"`
-	DueDate     *time.Time `json:"due_date"`
-	CompletedAt *time.Time `json:"completed_at"`
-	CreatedAt   time.Time  `json:"created_at"`
-	UpdatedAt   time.Time  `json:"updated_at"`
 }
 
 // MetricPoint represents a time-series data point

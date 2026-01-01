@@ -7,12 +7,15 @@ import '@mantine/core/styles.css';
 import './index.css';
 import App from './App.tsx';
 import { EventProvider } from './events';
+import { AlertsProvider } from './context/AlertsContext';
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
     <MantineProvider>
       <EventProvider>
-        <App />
+        <AlertsProvider>
+          <App />
+        </AlertsProvider>
       </EventProvider>
     </MantineProvider>
   </StrictMode>

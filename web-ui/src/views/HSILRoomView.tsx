@@ -353,7 +353,7 @@ export default function HSILRoomView() {
                     <Thermometer size={18} />
                     <Text size="xl" fw={700}>{Math.round(weather.weather?.temperature || 0)}°F</Text>
                   </Group>
-                  <Text size="xs" c="dimmed">Feels like {Math.round(weather.weather?.feels_like || 0)}°F</Text>
+                  <Text size="xs" c="dimmed">Outside</Text>
                 </div>
                 <div>
                   <Group gap="xs">
